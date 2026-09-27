@@ -7,6 +7,7 @@ only implement ``run()`` (read provider events) and ``_send()`` (write context t
 from __future__ import annotations
 
 import asyncio
+import collections
 import dataclasses
 import hashlib
 import json
@@ -326,6 +327,7 @@ class SidebandWorker:
         self.notices = rt.notices
         self.fragments: deque[dict[str, Any]] = deque(maxlen=512)
         self.handoff_at: dict[str, float] = {}   # delegation id -> when the handoff arrived (monotonic)
+        self.recent_acks: collections.deque[str] = collections.deque(maxlen=4)  # varied, never repetitive
         self.route_timings: dict[str, int] = {}  # task id -> routing latency (ms), stored with the task
         self.delegations: set[str] = set()
         self.dispatch_tasks: set[asyncio.Task[Any]] = set()
@@ -523,7 +525,7 @@ class SidebandWorker:
     async def acknowledge(self, delegation_id: str, line: str, *, force: bool = False) -> None:
         """Say ONE short line the moment work starts, so the call never goes silent while a task runs.
         Skipped when the voice model already said something since this handoff (its own
-        \"on it\"), unless ``force``: a line that carries news (where the task went) is always said."""
+        acknowledgement), unless ``force``: a line that carries news (where the task went) is always said."""
         started = self.handoff_at.pop(delegation_id, None)
         if not force and not self.rt.settings()["speech"]["acknowledge"]:
             return
@@ -532,6 +534,7 @@ class SidebandWorker:
             since = min(started, recent) if started is not None else recent
             if self.assistant_spoke_since(since):
                 return
+        self.recent_acks.append(line)
         await self.append("session.commentary.append", delegation_id, line)
 
     def record_timing(self, task_id: str, idem: str) -> None:
@@ -737,7 +740,8 @@ class SidebandWorker:
         parallel = [r for r in (notice_text(self.store.request_text(k), 80) for k in others[-4:]) if r]
         if voice_id is None:
             await self.append("session.thinking.append", delegation_id, P.work_started_note(parallel))
-            await self.acknowledge(delegation_id, ack or P.ack_new(idem), force=bool(deliver_to and not replaces))
+            await self.acknowledge(delegation_id, ack or P.ack_new(idem, tuple(self.recent_acks)),
+                                   force=bool(deliver_to and not replaces))
         try:
             run_id = await asyncio.to_thread(self.hermes.start_run, prompt, idem, session_id)
             self.store.update_run(idem, run_id, "running")

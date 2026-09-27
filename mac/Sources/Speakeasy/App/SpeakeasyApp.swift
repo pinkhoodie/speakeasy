@@ -150,8 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func setBadge(_ on: Bool) {
-        statusItem?.button?.image = NSImage(systemSymbolName: on ? "waveform.badge.exclamationmark" : "waveform",
-                                            accessibilityDescription: "Speakeasy")
+        statusItem?.button?.image = BrandGlyph.menuBarImage(badge: on)
     }
 
     // MARK: Pairing links
@@ -199,7 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func configureStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Speakeasy")
+        statusItem.button?.image = BrandGlyph.menuBarImage()
         statusItem.button?.toolTip = "Speakeasy"
         let menu = NSMenu()
         let status = NSMenuItem(title: "", action: nil, keyEquivalent: "")

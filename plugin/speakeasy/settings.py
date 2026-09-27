@@ -32,7 +32,7 @@ DEFAULTS: dict[str, Any] = {
     # channels: extra opted-in destinations a new task is routed to by topic or by name.
     "delivery": {"target": "none", "new_thread": False, "channels": []},
     "continuity": {"enabled": True},
-    # Lines the server speaks itself: a short "on it" when a task starts (lines that say where a
+    # Lines the server speaks itself: a brief, varied acknowledgement when a task starts (lines that say where a
     # task went are always spoken), and a brief update on long tasks.
     "speech": {"acknowledge": True, "progress": True},
     "brief": {"auto_refresh": True, "include_recent_voice": True},

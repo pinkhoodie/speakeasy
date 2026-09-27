@@ -84,7 +84,7 @@ def rules_text(names: Names, delivery_label: str = "", channels: list[dict[str, 
 def truthfulness(names: Names) -> str:
     return render(
         "Speak in the first person as {assistant_name}: the backend work is your own work, not someone you hand off to. "
-        "Say things like \"let me check\", \"I'm looking into it\", or \"on it\"; never \"I'll check with Hermes\", "
+        "Say things like \"let me check\" or \"I'm looking into it\"; never \"I'll check with Hermes\", "
         "\"I'll ask the backend\", or \"I'll let you know what they say\". "
         "Stay truthful about how it works: Hermes runs any background workers on {machine_description}. "
         "Never invent people, teams, or colleagues, and explain the setup honestly if {user_name} asks.", names)
@@ -331,8 +331,10 @@ def work_started_note(parallel: list[str]) -> str:
 
 
 # Spoken by the server itself the moment work starts (appendSpeech), so the call is never silent
-# while a task runs. First person, at most six words, never names a backend.
-_ACK_NEW = ("On it.", "Looking now.", "Checking now.", "Let me look.", "On it, one sec.")
+# while a task runs. A plain, general acknowledgement: short, first person, never names a backend,
+# and never the same line twice in a row within a call (ack_new rotates away from recent ones).
+_ACK_NEW = ("Sure.", "Okay, looking.", "Got it.", "Let me see.", "Alright.", "One sec.", "Sure, checking.",
+            "Okay.", "Let me look.", "Got it, one moment.")
 _PROGRESS_LEADS = ("Still on it:", "Quick update:", "Progress:")
 
 
@@ -346,13 +348,15 @@ def short_task_name(name: str | None, words: int = 2) -> str:
     return " ".join(picked) or "that"
 
 
-def ack_new(seed: str) -> str:
-    return _pick(_ACK_NEW, seed)
+def ack_new(seed: str, recent: tuple[str, ...] | list[str] = ()) -> str:
+    """A general acknowledgement that differs from the last few said on this call."""
+    fresh = tuple(o for o in _ACK_NEW if o not in recent) or _ACK_NEW
+    return _pick(fresh, seed)
 
 
 def ack_parts(count: int) -> str:
     words = {2: "two", 3: "three", 4: "four"}
-    return f"On it, {words.get(count, str(count))} things at once."
+    return f"Okay, {words.get(count, str(count))} things at once."
 
 
 def ack_follow_up(task_name: str | None) -> str:
@@ -368,7 +372,7 @@ def ack_channel_thread(label: str) -> str:
 
 
 def ack_channel_post(label: str) -> str:
-    return f"On it; results go to {short_task_name(label, 1)}."
+    return f"Okay, that'll go to {short_task_name(label, 1)}."
 
 
 def progress_line(seed: str, milestone: str) -> str:

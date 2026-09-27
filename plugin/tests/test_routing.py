@@ -61,6 +61,18 @@ def test_no_double_speak_when_the_model_already_acknowledged(server, service, he
     assert spoken(worker) == []
 
 
+def test_general_acknowledgements_vary_and_never_repeat_back_to_back():
+    from speakeasy.prompt import builder as P
+    recent: list[str] = []
+    said = []
+    for i in range(12):
+        line = P.ack_new(f"idem_{i}", tuple(recent[-4:]))
+        assert line not in recent[-4:]
+        assert "on it" not in line.lower() and len(line.split()) <= 6
+        recent.append(line); said.append(line)
+    assert len(set(said)) >= 5
+
+
 def test_spoken_lines_can_be_turned_off(server, service, hermes, monkeypatch):
     import asyncio
     from speakeasy.calls import BackendRun

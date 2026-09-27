@@ -305,6 +305,14 @@ enum PanelSmoke {
 
     static func snapshots(_ c: NativeVoiceClient, dir: String) async {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        for (name, badge) in [("menubar-glyph", false), ("menubar-glyph-badge", true)] {
+            let image = BrandGlyph.menuBarImage(badge: badge, height: 128)
+            if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+                record("snapshot \(dir)/\(name).png")
+            }
+        }
         c.showPreview(workState(milestones: 4), workExpanded: true)
         await settle()
         do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/work-long-status.png")); record("snapshot \(dir)/work-long-status.png") }

@@ -6,6 +6,7 @@
   <key>CFBundleExecutable</key><string>Speakeasy</string>
   <key>CFBundleIdentifier</key><string>co.speakeasy.mac</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleName</key><string>Speakeasy</string>
   <key>CFBundleDisplayName</key><string>Speakeasy</string>
   <key>CFBundlePackageType</key><string>APPL</string>
