@@ -186,7 +186,7 @@ enum PanelSmoke {
         let previous = c.model.onEnd
         c.model.onEnd = { ended = true }
         let before = panel.frame.origin
-        let endPoint = NSPoint(x: panel.frame.width - 72, y: panel.frame.height - 32)   // End sits left of the close (x) button
+        let endPoint = NSPoint(x: panel.frame.width - 64, y: panel.frame.height - 32)   // End (30pt circle) sits left of the close (x) button
         await click(panel, at: endPoint)
         // Harness limit (same on the unfixed base): the first synthetic click
         // after a *different* interaction on this inactive, non-key panel is
@@ -358,6 +358,19 @@ enum PanelSmoke {
         do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/tour.png")); record("snapshot \(dir)/tour.png") }
         catch { fail("snapshot failed: \(error)") }
         c.model.tourActive = false
+        // The orb at rest and at full voice (the level meter is off in previews, so set it).
+        guard var (speaking, _) = PreviewFixtures.state("tasklist") else { return }
+        speaking.connection = .live
+        c.showPreview(speaking, workExpanded: false)
+        c.model.orbLevel = 0
+        await settle()
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/orb-rest.png")); record("snapshot \(dir)/orb-rest.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.model.orbLevel = 1
+        await settle()
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/orb-loud.png")); record("snapshot \(dir)/orb-loud.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.model.orbLevel = 0
     }
 
     // MARK: Slim mode shrinks a busy panel to the controls, and comes back

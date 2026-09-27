@@ -11,6 +11,13 @@ enum Tokens {
     static let maxExtraHeight: CGFloat = 700
     static let radius: CGFloat = 18
     static let blue = Color(red: 0.49, green: 0.67, blue: 1.0)
+    /// Brand palette (matches speakeasyvoice.ai): brass on warm near-black.
+    static let brass = Color(red: 0.831, green: 0.635, blue: 0.298)      // #d4a24c
+    static let brassLight = Color(red: 0.941, green: 0.784, blue: 0.447) // #f0c872
+    static let brassGlow = Color(red: 1.0, green: 0.89, blue: 0.64)      // #ffe3a3
+    static let brassDeep = Color(red: 0.42, green: 0.29, blue: 0.094)    // #6b4a18
+    static let brassInk = Color(red: 0.09, green: 0.067, blue: 0.039)    // #17110a
+    static let panelDark = Color(red: 0.086, green: 0.075, blue: 0.059)  // #16130f
     static let amber = Color(red: 0.97, green: 0.745, blue: 0.44)
     static let amberInk = Color(red: 0.23, green: 0.15, blue: 0.02)
     static let red = Color(red: 0.93, green: 0.36, blue: 0.36)
@@ -33,24 +40,33 @@ struct VisualEffectBackground: NSViewRepresentable {
 
 struct AssistantMark: View {
     var mark: PillPresentation.Mark
+    /// 0...1: the assistant's voice while it speaks, the user's mic while listening.
+    var level: Double = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let dim = mark == .muted || mark == .idle
+        let reacting = !reduceMotion && (mark == .speaking || mark == .listening)
+        let lift = reacting ? CGFloat(min(max(level, 0), 1)) : 0
         ZStack {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(LinearGradient(colors: [Color(red: 0.54, green: 0.62, blue: 1.0), Color(red: 0.26, green: 0.34, blue: 0.71), Color(red: 0.2, green: 0.24, blue: 0.48)],
-                                     startPoint: .topLeading, endPoint: .bottomTrailing))
-                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(.white.opacity(0.22), lineWidth: 0.5))
-                .saturation(dim ? 0.25 : 1)
-                .opacity(dim ? 0.7 : 1)
-            if mark == .speaking && !reduceMotion {
-                TimelineView(.animation(minimumInterval: 1 / 30)) { context in
-                    bars(time: context.date.timeIntervalSinceReferenceDate)
+            // Glow grows with the voice.
+            Circle()
+                .fill(Tokens.brassLight.opacity(dim ? 0 : 0.28 + 0.4 * lift))
+                .frame(width: 34, height: 34)
+                .blur(radius: 7 + 7 * lift)
+                .scaleEffect(1 + 0.3 * lift)
+            Group {
+                if mark == .connecting && !reduceMotion {
+                    TimelineView(.animation(minimumInterval: 1 / 30)) { context in
+                        let t = context.date.timeIntervalSinceReferenceDate
+                        orb.scaleEffect(0.92 + 0.06 * CGFloat((sin(t * 3.2) + 1) / 2))
+                    }
+                } else {
+                    orb.scaleEffect(1 + 0.16 * lift)
                 }
-            } else {
-                bars(time: nil)
             }
+            .saturation(dim ? 0.2 : 1)
+            .opacity(dim ? 0.6 : 1)
             if mark == .muted {
                 Image(systemName: "mic.slash.fill")
                     .font(.system(size: 9, weight: .bold))
@@ -61,22 +77,16 @@ struct AssistantMark: View {
             }
         }
         .frame(width: 36, height: 36)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: lift)
         .accessibilityHidden(true)
     }
 
-    private func bars(time: Double?) -> some View {
-        let rest: [CGFloat] = mark == .connecting ? [6, 6, 6] : [9, 16, 9]
-        return HStack(spacing: 3) {
-            ForEach(0..<3, id: \.self) { index in
-                let height: CGFloat = {
-                    guard let time else { return rest[index] }
-                    let phase = time * 7.5 + Double(index) * 1.9
-                    return 5 + CGFloat((sin(phase) + 1) / 2) * 14
-                }()
-                Capsule().fill(.white.opacity(mark == .muted || mark == .idle ? 0.55 : 0.96))
-                    .frame(width: 3, height: height)
-            }
-        }
+    private var orb: some View {
+        Circle()
+            .fill(RadialGradient(colors: [Tokens.brassGlow, Tokens.brass, Tokens.brassDeep],
+                                 center: UnitPoint(x: 0.35, y: 0.35), startRadius: 1, endRadius: 22))
+            .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
+            .frame(width: 32, height: 32)
     }
 }
 
@@ -151,9 +161,11 @@ struct MicButton: View {
         Button(action: action) {
             Image(systemName: muted ? "mic.slash.fill" : "mic.fill").font(.system(size: 12.5, weight: .semibold))
                 .frame(width: 30, height: 30)
-                .foregroundStyle(muted ? Color.primary.opacity(0.45) : Color.primary)
-                .background(Circle().fill(Color.primary.opacity(muted ? (hover ? 0.1 : 0.05) : (hover ? 0.18 : 0.12))))
-                .overlay(Circle().strokeBorder(Color.primary.opacity(muted ? 0.08 : 0.16), lineWidth: 0.5))
+                .foregroundStyle(muted ? Color.primary.opacity(0.45) : Tokens.green)
+                .background(Circle().fill(muted ? Color.primary.opacity(hover ? 0.1 : 0.05)
+                                                : Tokens.green.opacity(hover ? 0.2 : 0.13)))
+                .overlay(Circle().strokeBorder(muted ? Color.primary.opacity(0.08) : Tokens.green.opacity(0.45),
+                                               lineWidth: 0.75))
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -198,8 +210,8 @@ struct PauseButton: View {
         Button(action: action) {
             Image(systemName: resume ? "play.fill" : "pause.fill").font(.system(size: 11.5, weight: .semibold))
                 .frame(width: 30, height: 30)
-                .foregroundStyle(resume ? Color.white : Color.primary)
-                .background(Circle().fill(resume ? AnyShapeStyle(Color.accentColor.opacity(hover ? 1 : 0.9))
+                .foregroundStyle(resume ? Tokens.brassInk : Color.primary)
+                .background(Circle().fill(resume ? AnyShapeStyle(Tokens.brass.opacity(hover ? 1 : 0.9))
                                                  : AnyShapeStyle(Color.primary.opacity(hover ? 0.16 : 0.1))))
                 .overlay(Circle().strokeBorder(resume ? Color.clear : Color.primary.opacity(0.14), lineWidth: 0.5))
                 .contentShape(Circle())
@@ -220,12 +232,11 @@ struct EndButton: View {
     @State private var hover = false
     var body: some View {
         Button(action: action) {
-            Text("End").font(.system(size: 12, weight: .semibold))
+            Image(systemName: "phone.down.fill").font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 10)
-                .frame(height: 30)
-                .background(Capsule().fill(Tokens.red.opacity(hover ? 1 : 0.9)))
-                .contentShape(Capsule())
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(Tokens.red.opacity(hover ? 1 : 0.9)))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
@@ -243,10 +254,10 @@ struct StartButton: View {
                 Image(systemName: "phone.fill").font(.system(size: 10.5, weight: .semibold))
                 Text("Start").font(.system(size: 12, weight: .semibold))
             }
-            .foregroundStyle(Color.white)
+            .foregroundStyle(Tokens.brassInk)
             .padding(.horizontal, 10)
             .frame(height: 30)
-            .background(Capsule().fill(Color.accentColor.opacity(hover ? 1 : 0.9)))
+            .background(Capsule().fill(Tokens.brass.opacity(hover ? 1 : 0.9)))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -286,8 +297,8 @@ struct PillButton: View {
         Button(action: action) {
             Text(title).font(.system(size: 11.5, weight: .semibold))
                 .padding(.horizontal, 11).frame(height: 26)
-                .foregroundStyle(prominent ? Color.white : (destructive ? Tokens.red : Color.primary))
-                .background(Capsule().fill(prominent ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.primary.opacity(hover ? 0.14 : 0.08))))
+                .foregroundStyle(prominent ? Tokens.brassInk : (destructive ? Tokens.red : Color.primary))
+                .background(Capsule().fill(prominent ? AnyShapeStyle(Tokens.brass) : AnyShapeStyle(Color.primary.opacity(hover ? 0.14 : 0.08))))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -386,7 +397,7 @@ struct VoicePanelView: View {
         .background(
             ZStack {
                 VisualEffectBackground(material: scheme == .dark ? .hudWindow : .popover)
-                (scheme == .dark ? Color(red: 0.086, green: 0.10, blue: 0.133) : Color.white).opacity(scheme == .dark ? 0.55 : 0.35)
+                (scheme == .dark ? Tokens.panelDark : Color.white).opacity(scheme == .dark ? 0.78 : 0.35)
             }
         )
         .clipShape(RoundedRectangle(cornerRadius: Tokens.radius, style: .continuous))
@@ -402,7 +413,7 @@ struct VoicePanelView: View {
 
     private func header(_ p: PillPresentation) -> some View {
         HStack(spacing: 8) {
-            AssistantMark(mark: p.mark)
+            AssistantMark(mark: p.mark, level: model.orbLevel)
                 .padding(.trailing, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(p.primary).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
@@ -477,7 +488,7 @@ struct TranscriptBubble: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 9).padding(.vertical, 6)
                     .background(RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(mine ? AnyShapeStyle(Color.accentColor.opacity(0.85)) : AnyShapeStyle(Color.primary.opacity(0.08))))
+                        .fill(mine ? AnyShapeStyle(Tokens.brass.opacity(0.85)) : AnyShapeStyle(Color.primary.opacity(0.08))))
             }
             .fixedSize(horizontal: false, vertical: true)
             if !mine { Spacer(minLength: 36) }
@@ -761,7 +772,7 @@ struct TaskRow: View {
             case "cancelled", "interrupted": return ("stop.circle", .secondary)
             case "waiting_for_approval": return ("hand.raised.circle.fill", Tokens.amber)
             case "ambiguous": return ("questionmark.circle", Tokens.amber)
-            default: return ("circle.dotted", Tokens.blue)
+            default: return ("circle.dotted", Tokens.brassLight)
             }
         }()
         Image(systemName: symbol).font(.system(size: 13, weight: .semibold)).foregroundStyle(color)

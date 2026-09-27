@@ -185,6 +185,22 @@ final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChanne
         }
     }
 
+    /// Current audio levels (0...1) from WebRTC stats: `mic` = local capture ("media-source"),
+    /// `voice` = the assistant's playout ("inbound-rtp"). Calls back on the main queue.
+    func audioLevels(_ completion: @escaping (_ mic: Double, _ voice: Double) -> Void) {
+        guard let peer, !closed else { return }
+        peer.statistics { report in
+            var mic = 0.0, voice = 0.0
+            for stats in report.statistics.values {
+                guard (stats.values["kind"] as? String) == "audio",
+                      let level = (stats.values["audioLevel"] as? NSNumber)?.doubleValue else { continue }
+                if stats.type == "media-source" { mic = max(mic, level) }
+                else if stats.type == "inbound-rtp" { voice = max(voice, level) }
+            }
+            DispatchQueue.main.async { completion(mic, voice) }
+        }
+    }
+
     var sdpLineCount: Int? {
         peer?.localDescription?.sdp.components(separatedBy: .newlines).filter { !$0.isEmpty }.count
     }

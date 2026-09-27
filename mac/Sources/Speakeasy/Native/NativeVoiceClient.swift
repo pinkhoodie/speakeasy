@@ -73,6 +73,7 @@ final class NativeVoiceClient: VoiceCallClient {
     private var pollTask: Task<Void, Never>?
     private var workOnlyTask: Task<Void, Never>?
     private var ticker: Timer?
+    private var levelTimer: Timer?
     private var endDeadline: DispatchWorkItem?
     private var dwell = StatusDwell(minimumDwell: 1.5)
     private var closeNotified = false
@@ -178,7 +179,37 @@ final class NativeVoiceClient: VoiceCallClient {
         }
     }
 
-    private func stopTicker() { ticker?.invalidate(); ticker = nil }
+    private func stopTicker() {
+        ticker?.invalidate(); ticker = nil
+        levelTimer?.invalidate(); levelTimer = nil
+        model.orbLevel = 0
+    }
+
+    /// ~12 Hz: the orb follows the assistant's voice while it speaks, the mic while listening.
+    private func startLevelMeter() {
+        guard levelTimer == nil else { return }
+        levelTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let engine = self.engine, self.model.state.connection == .live,
+                      self.panel.isVisible else {
+                    if self?.model.orbLevel != 0 { self?.model.orbLevel = 0 }
+                    return
+                }
+                engine.audioLevels { [weak self] mic, voice in
+                    guard let self else { return }
+                    let speaking = self.model.presentation.mark == .speaking
+                    let muted = self.model.state.mic == .muted
+                    // Levels are linear; a square root makes quiet speech visible.
+                    let raw = speaking ? voice : (muted ? 0 : mic)
+                    let target = min(1, sqrt(max(0, raw)) * 1.4)
+                    let current = self.model.orbLevel
+                    // Fast attack, slower release, so it moves with syllables without flicker.
+                    let next = target > current ? current + (target - current) * 0.6 : current + (target - current) * 0.25
+                    if abs(next - current) > 0.01 { self.model.orbLevel = next }
+                }
+            }
+        }
+    }
 
     // MARK: Call lifecycle
 
@@ -200,6 +231,7 @@ final class NativeVoiceClient: VoiceCallClient {
         if startSlim { model.slim = true }
         if showPanelOnStart { panel.show() }
         startTicker()
+        startLevelMeter()
         #if os(macOS)
         if followSystemAudio { watchAudioDevices() }
         #endif
@@ -374,6 +406,7 @@ final class NativeVoiceClient: VoiceCallClient {
         dispatch(.resumeRequested)
         panel.show()
         startTicker()
+        startLevelMeter()
         onPauseChanged?(false)
         connect(api)
     }

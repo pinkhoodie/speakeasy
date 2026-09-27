@@ -16,6 +16,8 @@ final class VoicePanelModel: ObservableObject {
     @Published var showCaptions = true
     /// e.g. "⌃⌥M: tap to mute/unmute, hold to talk". Empty when no shortcut.
     @Published var muteShortcutHint = ""
+    /// 0...1 audio level the orb follows (assistant voice while speaking, mic while listening).
+    @Published var orbLevel: Double = 0
     /// the user's panel size: width, plus extra height given to the transcript and
     /// Work scroll areas. Set by dragging the panel's right/bottom edge.
     @Published var panelWidth: CGFloat = VoicePanelModel.defaultWidth
