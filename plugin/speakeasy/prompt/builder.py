@@ -156,10 +156,44 @@ def resume_input(history: list[dict[str, str]]) -> list[dict[str, Any]]:
     return picked
 
 
+TOUR_SKIPPED_NOTE = ("The user skipped the first-call tour. Stop the tour now, don't mention it again, "
+                     "and just help with whatever they ask.")
+
+
+def tour_block(names: Names, shortcuts: dict[str, str], delivery_label: str = "",
+               channels: list[dict[str, Any]] | None = None) -> str:
+    """One-time first-call tour. Steps, not a script: the voice says it in its own words."""
+    call, mute, pause = (shortcuts.get(k, "") for k in ("call", "mute", "pause"))
+    controls = ["they can interrupt you mid-sentence, just by talking"]
+    if mute:
+        controls.append(f"{mute} mutes the mic (hold it to talk)")
+    if pause:
+        controls.append(f"{pause} pauses the call and resumes it later with nothing lost")
+    if call:
+        controls.append(f"{call} starts and ends a call")
+    where = delivery_label or "the notifications on their Mac"
+    if channels:
+        labels = ", ".join(str(c.get("label") or "") for c in channels if c.get("label"))
+        where += f" by default, or one of their channels ({labels}) when a task fits one or they name it"
+    return (
+        f"# First-call tour\n"
+        f"This is {names.user}'s first call. Give a short tour, about a minute, one step at a time, "
+        f"waiting for them after each step. Use your own words; never read these steps out.\n"
+        f"1. Welcome them in a sentence and mention they can say \"skip\" any time.\n"
+        f"2. Invite a small real task (suggest one idea, like looking something up). When they give "
+        f"one, hand it off as usual and point out that you can keep talking while it runs.\n"
+        f"3. While it runs, cover the controls briefly: {'; '.join(controls)}.\n"
+        f"4. Say where finished work goes: {where}. They can ask how a task is going, or follow "
+        f"up on it, in this call or a later one.\n"
+        f"5. Close in one sentence and carry on normally.\n"
+        f"If they say skip, say they've got it, or ask for something else, drop the tour at once and "
+        f"just help. Never restart it.")
+
+
 def build_live_instructions(names: Names, *, brief: str = "", away: list[dict[str, Any]] | None = None,
                             recent_voice: str = "", resume: str = "", extra: str = "", now: str = "",
                             delivery_label: str = "", channels: list[dict[str, Any]] | None = None,
-                            max_chars: int = MAX_INSTRUCTION_CHARS) -> str:
+                            tour: str = "", max_chars: int = MAX_INSTRUCTION_CHARS) -> str:
     """Product rules + optional voice brief + per-call context, under the budget.
 
     Rules are never trimmed. The brief is capped. Optional per-call blocks are dropped
@@ -172,6 +206,8 @@ def build_live_instructions(names: Names, *, brief: str = "", away: list[dict[st
         head += "\n\n# About " + names.user + " and " + names.assistant_name + " (voice brief)\n" + brief.strip()[:MAX_BRIEF_CHARS]
     if now:
         head += f"\n\n# Now\nLocal date and time: {now}."
+    if tour:
+        head += "\n\n" + tour
     tail = [resume.strip()] if resume.strip() else []
     optional = []  # lowest priority last so it is trimmed first
     block = away_block(away or [], names)

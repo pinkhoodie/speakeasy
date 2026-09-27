@@ -31,6 +31,7 @@ used in the tests (timestamps and IDs will differ).
 | POST | `/voice/interactions/{id}/pause` | device | Pause the call (resumable) |
 | POST | `/voice/interactions/{id}/approval` | device | Answer a Hermes tool approval |
 | POST | `/voice/interactions/{id}/cancel-backend` | device | Stop a task's Hermes run |
+| POST | `/voice/interactions/{id}/skip-tour` | device | End the first-call tour |
 | GET | `/voice/work/latest` | device | Latest task + task list + recap |
 | GET | `/voice/work/{run_id}` | device | One task |
 | POST | `/voice/tasks/dismiss` | device | Hide finished tasks |
@@ -90,6 +91,11 @@ retry with the same key and body returns the same session instead of starting a 
 ```json
 {"sdp": "v=0\r\n...", "resume_from": "vi_2436cf97524f58de64775b5a9ecc3e58"}
 ```
+
+`tour` (optional, ignored with `resume_from`) starts the call with the one-time first-call tour:
+the voice walks the user through a real task, the controls and where results go, in its own
+words, and drops it the moment they say skip. Its value names the shortcuts to mention, all
+optional: `{"call": "⌃⌥Space", "mute": "⌃⌥M", "pause": "⌃⌥P"}` (`{}` for none).
 `201`
 ```json
 {
@@ -194,6 +200,11 @@ Answers a Hermes tool approval for one run. Only `once` and `deny` are accepted 
 {"interaction_id": "vi_...", "choice": "once", "run_id": "run_0001", "resolved": 1}
 ```
 409 when that approval is no longer pending (stale). 502 if Hermes rejected it.
+
+## POST /voice/interactions/{id}/skip-tour
+
+Body `{}`. The Skip tour button: tells the live call to drop the first-call tour and carry on
+normally. Returns `{"interaction_id", "tour": "skipped"}`.
 
 ## POST /voice/interactions/{id}/cancel-backend
 

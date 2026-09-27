@@ -69,6 +69,7 @@ private struct GeneralSettings: View {
     @AppStorage(Prefs.showCaptions) private var showCaptions = true
     @AppStorage(Prefs.notifyWhenDone) private var notifyWhenDone = true
     @AppStorage(Prefs.panelOnAllSpaces) private var panelOnAllSpaces = true
+    @AppStorage(Prefs.tourPending) private var tourPending = false
 
     var body: some View {
         Form {
@@ -88,6 +89,18 @@ private struct GeneralSettings: View {
             Section("After a call") {
                 Toggle("Notify me when work from a call finishes", isOn: $notifyWhenDone)
                     .help("A macOS notification when a task you started keeps running after you hang up and then finishes")
+            }
+            Section("Tour") {
+                LabeledContent {
+                    if tourPending {
+                        Button("Cancel") { tourPending = false }
+                    } else {
+                        Button("Replay the tour") { tourPending = true }
+                    }
+                } label: {
+                    Text(tourPending ? "Your next call starts with the tour." :
+                         "A one-minute spoken walkthrough at the start of your next call.")
+                }
             }
             Section {
                 Toggle("Launch at login", isOn: Binding(get: { app.launchAtLogin }, set: { app.launchAtLogin = $0 }))

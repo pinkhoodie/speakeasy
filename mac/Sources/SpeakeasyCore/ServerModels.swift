@@ -249,9 +249,12 @@ public struct SessionAdmission: Equatable, Sendable {
 
 /// Encodes the offer body without touching the SDP: its final CRLF is significant.
 /// `resumeFrom` names a paused call whose conversation the new session continues.
-public func sessionRequestBody(sdp: String, resumeFrom: String? = nil) throws -> Data {
+/// `tour` asks for the one-time first-call tour; values are the shortcut labels to mention
+/// (`call`, `mute`, `pause`). Never sent with `resumeFrom`.
+public func sessionRequestBody(sdp: String, resumeFrom: String? = nil, tour: [String: String]? = nil) throws -> Data {
     var body: [String: Any] = ["sdp": sdp]
     if let resumeFrom { body["resume_from"] = resumeFrom }
+    else if let tour { body["tour"] = tour }
     return try JSONSerialization.data(withJSONObject: body, options: [])
 }
 

@@ -56,6 +56,10 @@ final class NativeVoiceClient: VoiceCallClient {
 
     private(set) var config: AppConfig
     private(set) var api: ServerClient?
+    /// Set by the app before `start()`: the next new call runs the first-call tour, naming these
+    /// shortcuts. Consumed once the server admits the call (`onTourStarted`).
+    var pendingTour: [String: String]?
+    var onTourStarted: (() -> Void)?
     private var autoHide = PanelAutoHide()
     private var autoHideTimer: Timer?
     /// Fires when the panel hides itself or is closed (the app updates its menu).
@@ -248,9 +252,15 @@ final class NativeVoiceClient: VoiceCallClient {
                 engine.setMicEnabled(self?.model.state.localAudioEnabled ?? false)
                 let sdp = try await engine.createOffer()
                 guard let self, self.engine === engine, self.model.state.connection == .connecting else { engine.close(); return }
+                let tour = self.model.state.resumeFrom == nil ? self.pendingTour : nil
                 let admission = try await api.admitSession(sdp: sdp, idempotencyKey: UUID().uuidString,
-                                                              resumeFrom: self.model.state.resumeFrom)
+                                                              resumeFrom: self.model.state.resumeFrom, tour: tour)
                 guard self.engine === engine else { engine.close(); return }
+                if tour != nil {
+                    self.pendingTour = nil
+                    self.model.tourActive = true
+                    self.onTourStarted?()
+                }
                 self.voiceProvider = admission.voiceProvider
                 self.codexStopRequested = false
                 self.dispatch(.sessionAdmitted(interactionID: admission.interactionID))
@@ -453,8 +463,16 @@ final class NativeVoiceClient: VoiceCallClient {
         }
     }
 
+    func skipTour() {
+        guard model.tourActive else { return }
+        model.tourActive = false
+        guard let api, let id = model.state.interactionID else { return }
+        Task { try? await api.skipTour(interactionID: id) }
+    }
+
     private func finishCall(_ finalization: Finalization) {
         model.selectedTaskID = nil
+        model.tourActive = false
         endDeadline?.cancel(); endDeadline = nil
         startTask?.cancel(); startTask = nil
         engine?.close(); engine = nil

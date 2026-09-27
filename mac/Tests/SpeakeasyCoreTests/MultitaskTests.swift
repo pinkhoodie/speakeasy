@@ -153,6 +153,16 @@ final class MultitaskTests: XCTestCase {
         XCTAssertEqual(plain, ["sdp": sdp])
     }
 
+    func testTourRequestBodyCarriesShortcutsButNeverOnResume() throws {
+        let sdp = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n"
+        let tour = ["call": "⌃⌥Space", "mute": "⌃⌥M"]
+        let body = try JSONSerialization.jsonObject(with: sessionRequestBody(sdp: sdp, tour: tour)) as? [String: Any]
+        XCTAssertEqual(body?["tour"] as? [String: String], tour)
+        let resumed = try JSONSerialization.jsonObject(with: sessionRequestBody(sdp: sdp, resumeFrom: "vi_1", tour: tour))
+            as? [String: Any]
+        XCTAssertNil(resumed?["tour"], "a resumed call continues the old one; the tour never restarts")
+    }
+
     func testPauseShortcutDefaultIsValidAndDistinct() {
         XCTAssertEqual(KeyShortcut.defaultPause.display, "⌃⌥P")
         XCTAssertEqual(KeyShortcut.parse("ctrl+opt+p"), .success(.defaultPause))

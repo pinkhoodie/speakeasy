@@ -31,6 +31,10 @@ final class VoicePanelModel: ObservableObject {
     /// Slim only applies to an open call; a finished or work-only panel is always full.
     var showsSlim: Bool { slim && !state.workOnly && state.connection.isOpen }
 
+    /// The first-call tour is running in this call (shows a Skip tour button).
+    @Published var tourActive = false
+    var onSkipTour: () -> Void = {}
+
     var onToggleMic: () -> Void = {}
     var onStart: () -> Void = {}
     var onEnd: () -> Void = {}

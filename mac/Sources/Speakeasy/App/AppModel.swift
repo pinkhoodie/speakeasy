@@ -21,6 +21,9 @@ enum Prefs {
     static let showCaptions = "showCaptions"
     static let notifyWhenDone = "notifyWhenDone"
     static let panelOnAllSpaces = "panelOnAllSpaces"
+    /// The next new call starts with the first-call tour (set when onboarding finishes, or
+    /// by Settings › General › Replay the tour; cleared once a call runs it).
+    static let tourPending = "tourPending"
     /// The address the server last advertised for other devices (e.g. its tailnet URL).
     static let advertisedURL = "advertisedServerURL"
 

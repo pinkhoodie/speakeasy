@@ -45,6 +45,25 @@ PAUSE_NOTICE_AFTER_S = 15 * 60
 IDLE_CHECK_S = 15
 
 
+
+_SHORTCUT_RE = re.compile(r"^[^\x00-\x1f<>{}]{1,24}$")
+
+
+def _tour(value: Any) -> dict[str, str]:
+    """``tour`` on a session request: ``{}`` or shortcut labels ``{call, mute, pause}`` shown in the app."""
+    if value is True:
+        return {}
+    if not isinstance(value, dict) or not set(value) <= {"call", "mute", "pause"}:
+        raise ServiceError(400, "tour must be an object with optional call, mute and pause shortcut labels")
+    out = {}
+    for key, label in value.items():
+        if label in (None, ""):
+            continue
+        if not isinstance(label, str) or not _SHORTCUT_RE.fullmatch(label):
+            raise ServiceError(400, f"tour.{key} must be a short shortcut label")
+        out[key] = label
+    return out
+
 class VoiceService:
     def __init__(self, hermes_home: Path, *, hermes: Any = None, notifier: Any = None,
                  codex_factory: Callable[..., Any] | None = None, openai_negotiate: Callable[..., Any] | None = None,
@@ -129,11 +148,13 @@ class VoiceService:
         return {"device_id": device_id, "token": token, "assistant_name": self.settings.get()["assistant_name"]}
 
     # -- voice sessions -------------------------------------------------------------------------
-    def instructions(self, *, away: list[dict[str, Any]], resume: str) -> str:
+    def instructions(self, *, away: list[dict[str, Any]], resume: str,
+                     tour: dict[str, str] | None = None) -> str:
         s = self.settings.get()
         names = P.Names.from_settings(s)
         recent = ""
-        if s["brief"]["include_recent_voice"] and not resume:
+        label = D.target_label(s["delivery"]["target"])
+        if s["brief"]["include_recent_voice"] and not resume and tour is None:
             try:
                 turns = json.loads(self.store.get_meta("recent_voice") or "[]")
                 recent = P.format_recent([{"role": t.get("role"), "content": t.get("text")} for t in turns
@@ -143,14 +164,16 @@ class VoiceService:
         now = _dt.datetime.now().astimezone().strftime("%A %d %B %Y, %H:%M %Z")
         return P.build_live_instructions(names, brief=self.brief.text(), away=away, recent_voice=recent,
                                          resume=resume, extra=s["instructions_extra"], now=now,
-                                         delivery_label=D.target_label(s["delivery"]["target"]),
-                                         channels=s["delivery"]["channels"])
+                                         delivery_label=label, channels=s["delivery"]["channels"],
+                                         tour=P.tour_block(names, tour, label, s["delivery"]["channels"])
+                                         if tour is not None else "")
 
     def create_session(self, body: dict[str, Any], request_id: str, device_id: str = "") -> dict[str, Any]:
         resume_from = body.get("resume_from")
-        if (not set(body) <= {"sdp", "resume_from"} or not isinstance(body.get("sdp"), str)
+        if (not set(body) <= {"sdp", "resume_from", "tour"} or not isinstance(body.get("sdp"), str)
                 or resume_from is not None and not (isinstance(resume_from, str) and ID_RE.fullmatch(resume_from))):
-            raise ServiceError(400, "body must contain only an SDP offer and an optional resume_from")
+            raise ServiceError(400, "body must contain only an SDP offer, an optional resume_from and tour")
+        tour = _tour(body.get("tour")) if "tour" in body and not resume_from else None
         source = self.resumable(resume_from) if resume_from else None
         sdp = body["sdp"]
         # SDP is a wire format: its final CRLF is significant. Never strip it.
@@ -158,7 +181,8 @@ class VoiceService:
             raise ServiceError(400, "invalid SDP offer")
         if not ID_RE.fullmatch(request_id):
             raise ServiceError(400, "invalid Idempotency-Key")
-        fingerprint = hashlib.sha256((sdp + "\0" + (resume_from or "")).encode()).hexdigest()
+        fingerprint = hashlib.sha256((sdp + "\0" + (resume_from or "") + ("\0tour" if tour is not None else ""))
+                                     .encode()).hexdigest()
         interaction_id = "vi_" + secrets.token_hex(16)
         outcome, replay = self.store.reserve_session(request_id, fingerprint, interaction_id)
         if outcome == "conflict":
@@ -180,7 +204,7 @@ class VoiceService:
             resume = P.resume_block(interaction_tasks(self.store, source, names.assistant_name), names)
         else:
             away, resume = self.store.away(), ""
-        instructions = self.instructions(away=away, resume=resume)
+        instructions = self.instructions(away=away, resume=resume, tour=tour)
         seed = P.resume_input(history)
         provider = s["voice"]["provider"]
         voice = default_voice(s)
@@ -412,6 +436,13 @@ class VoiceService:
         return None
 
     # -- task controls -------------------------------------------------------------------------
+    def skip_tour(self, interaction_id: str) -> dict[str, Any]:
+        """Skip button in the panel: tell the live call to drop the first-call tour."""
+        interaction = self.interaction(interaction_id)
+        if interaction.worker is not None:
+            interaction.worker.speak_from_thread("session.thinking.append", P.TOUR_SKIPPED_NOTE)
+        return {"interaction_id": interaction_id, "tour": "skipped"}
+
     def cancel_backend(self, interaction_id: str, body: dict[str, Any]) -> dict[str, Any]:
         interaction = self.interaction(interaction_id)
         run_id = body.get("run_id")

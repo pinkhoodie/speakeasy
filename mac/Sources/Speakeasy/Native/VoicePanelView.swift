@@ -167,6 +167,25 @@ struct MicButton: View {
     }
 }
 
+/// Shown during the first-call tour: says what's happening and offers a way out.
+struct TourStrip: View {
+    var action: () -> Void
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "sparkles").foregroundStyle(.secondary)
+            Text("Quick tour — say \u{201C}skip\u{201D} any time.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button("Skip tour", action: action)
+                .controlSize(.small)
+                .help("End the tour; the call carries on normally")
+                .accessibilityLabel("Skip the tour")
+        }
+        .padding(.horizontal, 14).padding(.vertical, 6)
+    }
+}
+
 struct PauseButton: View {
     var label: String
     var enabled: Bool
@@ -287,6 +306,9 @@ struct VoicePanelView: View {
         let p = model.presentation
         VStack(alignment: .leading, spacing: 0) {
             if !model.state.workOnly { header(p) }
+            if model.tourActive && model.state.connection.isOpen && !model.state.workOnly {
+                TourStrip(action: model.onSkipTour)
+            }
             if model.showsSlim {
                 // Slim: header only. A task summary stands in for the list; clicking it
                 // (or the status line, or the expand button) brings the full panel back.

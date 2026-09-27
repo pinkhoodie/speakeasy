@@ -181,6 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if onboarding == nil {
             let controller = OnboardingWindowController(app: app)
             controller.onFinish = { [weak self] in
+                if !UserDefaults.standard.bool(forKey: Prefs.onboardingDone) {
+                    UserDefaults.standard.set(true, forKey: Prefs.tourPending)
+                }
                 UserDefaults.standard.set(true, forKey: Prefs.onboardingDone)
                 self?.onboarding = nil
             }
@@ -296,10 +299,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard app.isPaired else { showOnboarding(); return }
         active = true
         idle?.callStarted()
+        native.pendingTour = UserDefaults.standard.bool(forKey: Prefs.tourPending) ? tourShortcuts() : nil
         native.start()
         registerMuteHotKey()
         registerPauseHotKey()
         updateMenu()
+    }
+
+    /// Shortcut labels the tour mentions (only the ones that are set).
+    private func tourShortcuts() -> [String: String] {
+        var out = ["call": app.callShortcut.display]
+        if let muteShortcut { out["mute"] = muteShortcut.display }
+        if let pauseShortcut, native.supportsPause { out["pause"] = pauseShortcut.display }
+        return out
     }
 
     private func endConversation() {
@@ -314,6 +326,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.updateMenu()
         }
         native.model.onStart = { [weak self] in self?.startConversation() }
+        native.model.onSkipTour = { [weak self] in self?.native.skipTour() }
+        native.onTourStarted = { UserDefaults.standard.set(false, forKey: Prefs.tourPending) }
         native.onPausedTaskSettled = { [weak self] notice in
             guard let self else { return }
             if let idle = self.idle { idle.pausedNotice(notice) } else { self.setBadge(true) }

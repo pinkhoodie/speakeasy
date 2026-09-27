@@ -350,6 +350,14 @@ enum PanelSmoke {
         await settle()
         do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/long-connecting.png")); record("snapshot \(dir)/long-connecting.png") }
         catch { fail("snapshot failed: \(error)") }
+        guard let (listening, _) = PreviewFixtures.state("listening") else { return }
+        c.showPreview(listening, workExpanded: false)
+        c.model.tourActive = true
+        await settle()
+        check(c.panel.window.frame.height > 0, "tour strip renders")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/tour.png")); record("snapshot \(dir)/tour.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.model.tourActive = false
     }
 
     // MARK: Slim mode shrinks a busy panel to the controls, and comes back

@@ -463,9 +463,11 @@ private struct HotkeyStep: View {
             }
             .padding(.vertical, 4)
             if let error = flow.saveError { Text(error).foregroundStyle(.orange) }
+            Text("Your first call starts with a one-minute tour. Say \u{201C}skip\u{201D} or press Skip tour to jump straight in.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Button {
+                flow.finish()  // marks the tour pending before the call reads it
                 app.startCall()
-                flow.finish()
             } label: {
                 Label("Try it — start a call", systemImage: "waveform")
             }

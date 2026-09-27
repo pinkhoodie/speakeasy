@@ -143,8 +143,9 @@ final class ServerClient: @unchecked Sendable {
     }
 
     /// POST the SDP offer byte-for-byte (the body encoder never trims it).
-    func admitSession(sdp: String, idempotencyKey: String, resumeFrom: String? = nil) async throws -> SessionAdmission {
-        let body = try sessionRequestBody(sdp: sdp, resumeFrom: resumeFrom)
+    func admitSession(sdp: String, idempotencyKey: String, resumeFrom: String? = nil,
+                      tour: [String: String]? = nil) async throws -> SessionAdmission {
+        let body = try sessionRequestBody(sdp: sdp, resumeFrom: resumeFrom, tour: tour)
         let object = try await json("/voice/sessions", method: "POST", body: body,
                                     headers: ["Idempotency-Key": idempotencyKey])
         guard let admission = SessionAdmission(json: object) else {
@@ -191,6 +192,11 @@ final class ServerClient: @unchecked Sendable {
     /// Hold the call's conversation and tasks for Resume before the session closes.
     func pause(interactionID: String) async throws {
         _ = try await json("/voice/interactions/\(escape(interactionID))/pause", method: "POST", body: Data("{}".utf8))
+    }
+
+    /// Skip button during the first-call tour: the voice drops it.
+    func skipTour(interactionID: String) async throws {
+        _ = try await json("/voice/interactions/\(escape(interactionID))/skip-tour", method: "POST", body: Data("{}".utf8))
     }
 
     func cancelBackend(interactionID: String, runID: String) async throws {
