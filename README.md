@@ -3,10 +3,25 @@
 Talk to your Hermes agent by voice from your Mac.
 
 Speakeasy is a Hermes plugin plus a Mac app. The plugin runs inside your Hermes gateway; the app is a
-floating voice panel you open with a hotkey. Voice uses your ChatGPT sign-in (Codex) by default, and
-anything that needs real work goes to your own Hermes, with its tools, memory, skills and approvals.
+floating voice panel you open with a hotkey. The conversation runs on **OpenAI's GPT-Live-1** realtime
+speech model, and anything that needs real work goes to your own Hermes, with its tools, memory,
+skills and approvals.
 
-Status: early, private. Mac only.
+**Download the Mac app:** [latest release](https://github.com/rungmc357/speakeasy/releases/latest)
+(signed and notarized, macOS 14+) · Website: https://speakeasyvoice.ai
+
+Status: early. Mac only.
+
+## Voice model: GPT-Live-1, two ways to pay for it
+
+| | How it signs in | Model | Who pays |
+|---|---|---|---|
+| **Codex OAuth** (default) | Your ChatGPT account, through `codex login` on the Hermes machine | `gpt-live-1-codex`, via `codex app-server` | Your ChatGPT plan, no API key |
+| **OpenAI API** | An OpenAI API key (`hermes voice setup --api-key`) | `gpt-live-1`, via the Realtime API over WebRTC | Per-minute API usage on that key |
+
+Either way the key or sign-in stays on the Hermes machine, never on the Mac. Switch any time in the
+app (Settings › Voice) or with `hermes voice setup` / `hermes voice setup --api-key`. GPT-Live-1 only
+talks and hands off; the actual work runs on whatever model your Hermes uses.
 
 ## Install
 
@@ -15,8 +30,8 @@ On the machine that runs Hermes:
     hermes plugins install rungmc357/speakeasy#plugin/speakeasy --enable
     hermes voice setup
 
-`hermes voice setup` turns on Hermes' local API, signs you in to ChatGPT through Codex (or asks
-for an OpenAI API key with `--api-key`), restarts Hermes so the voice server starts, waits until it
+`hermes voice setup` turns on Hermes' local API, signs you in to GPT-Live-1 with your ChatGPT account
+through Codex OAuth (or asks for an OpenAI API key with `--api-key`), restarts Hermes so the voice server starts, waits until it
 answers, and then pairs the Speakeasy Mac app with a one-time link and 6-digit code.
 
 **Tailscale is picked up automatically.** When `tailscale` is installed and connected, setup

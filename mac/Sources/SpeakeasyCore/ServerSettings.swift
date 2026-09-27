@@ -9,8 +9,8 @@ public enum VoiceProvider: String, Codable, CaseIterable, Sendable, Identifiable
     public var id: String { rawValue }
     public var label: String {
         switch self {
-        case .codex: return "ChatGPT sign-in (Codex)"
-        case .openai: return "OpenAI API key"
+        case .codex: return "GPT-Live-1 via Codex OAuth (ChatGPT account)"
+        case .openai: return "GPT-Live-1 via the OpenAI API (API key)"
         }
     }
 }

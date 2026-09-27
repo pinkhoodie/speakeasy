@@ -39,7 +39,7 @@ def setup_parser(parser) -> None:
                        help="Require Tailscale (tailnet only); it is auto-detected without this flag")
     setup.add_argument("--no-tailscale", action="store_true", help="Stay local; don't publish on Tailscale")
     setup.add_argument("--api-key", action="store_true",
-                       help="Use an OpenAI API key for voice instead of your ChatGPT sign-in")
+                       help="Use GPT-Live-1 through the OpenAI API (an API key) instead of Codex OAuth (your ChatGPT sign-in)")
     setup.add_argument("--send", default="", help="Send the pairing link to a Hermes chat (e.g. telegram)")
     setup.add_argument("--yes", "-y", action="store_true", help="Answer yes to every question (restart, install)")
     setup.add_argument("--no-restart", action="store_true", help="Don't restart Hermes; print what to do instead")

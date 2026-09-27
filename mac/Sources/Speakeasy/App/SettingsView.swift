@@ -604,16 +604,42 @@ private struct ConnectionSettings: View {
 
 private struct AboutSettings: View {
     @EnvironmentObject var app: AppModel
+    @AppStorage(Prefs.checkForUpdates) private var autoCheck = true
     var body: some View {
         VStack(spacing: 10) {
-            Image(systemName: "waveform.circle.fill").font(.system(size: 48)).foregroundStyle(.tint)
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64)
             Text("Speakeasy").font(.title2.weight(.semibold))
             Text("Version \(app.appVersion)").foregroundStyle(.secondary)
+            updateRow
+            Toggle("Check for updates automatically", isOn: $autoCheck)
+                .toggleStyle(.checkbox).font(.callout)
+                .help("Once a week, asks GitHub for the latest release. Nothing is downloaded without you.")
             Text("Talk to your own Hermes agent by voice.").foregroundStyle(.secondary)
             Text("MIT License").font(.callout)
             Text("Uses WebRTC (BSD license).").font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder private var updateRow: some View {
+        HStack(spacing: 8) {
+            if let release = app.updateAvailable {
+                Text("Version \(release.version) is available.").foregroundStyle(.primary)
+                Button("Download") { app.openUpdate(release) }
+            } else {
+                Button(app.checkingForUpdates ? "Checking…" : "Check for Updates") {
+                    Task { await app.checkForUpdates() }
+                }
+                .disabled(app.checkingForUpdates)
+                switch app.updateOutcome {
+                case .upToDate?: Text("You're up to date.").foregroundStyle(.secondary)
+                case .noReleases?: Text("No releases published yet.").foregroundStyle(.secondary)
+                default: EmptyView()
+                }
+            }
+        }
+        .font(.callout)
+        if let error = app.updateError { Text(error).font(.caption).foregroundStyle(.orange) }
     }
 }
 

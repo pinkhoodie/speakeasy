@@ -119,7 +119,7 @@ def test_happy_path_restarts_waits_then_opens_link(home):
     assert fake.restarted and fake.health_checks >= 1
     assert len(opened) == 1 and opened[0].startswith("speakeasy://pair?server=http%3A%2F%2F127.0.0.1")
     text = "\n".join(fake.lines)
-    assert "✓ Voice: your ChatGPT account" in text and "✓ Voice server is running" in text
+    assert "✓ Voice: GPT-Live-1 through Codex OAuth" in text and "✓ Voice server is running" in text
     assert "Opened Speakeasy" in text
 
 

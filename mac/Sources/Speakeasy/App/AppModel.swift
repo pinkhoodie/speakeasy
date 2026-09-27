@@ -21,6 +21,8 @@ enum Prefs {
     static let showCaptions = "showCaptions"
     static let notifyWhenDone = "notifyWhenDone"
     static let panelOnAllSpaces = "panelOnAllSpaces"
+    static let checkForUpdates = "checkForUpdates"
+    static let lastUpdateCheck = "lastUpdateCheck"
     /// The next new call starts with the first-call tour (set when onboarding finishes, or
     /// by Settings › General › Replay the tour; cleared once a call runs it).
     static let tourPending = "tourPending"
@@ -82,6 +84,49 @@ final class AppModel: ObservableObject {
     var deviceName: String? { UserDefaults.standard.string(forKey: Prefs.deviceName) }
     var assistantName: String { status?.assistantName.flatMap { $0.isEmpty ? nil : $0 } ?? settings.resolvedAssistantName }
     var appVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev" }
+
+    // MARK: Updates
+    @Published var updateOutcome: UpdateCheck.Outcome?
+    @Published var checkingForUpdates = false
+    @Published var updateError: String?
+
+    /// Ask GitHub for the latest release. `quiet` = the weekly background check: no error shown.
+    func checkForUpdates(quiet: Bool = false) async {
+        guard !checkingForUpdates else { return }
+        checkingForUpdates = true; if !quiet { updateError = nil }
+        defer { checkingForUpdates = false }
+        var request = URLRequest(url: UpdateCheck.latestURL, timeoutInterval: 15)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("Speakeasy/\(appVersion)", forHTTPHeaderField: "User-Agent")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            UserDefaults.standard.set(Date(), forKey: Prefs.lastUpdateCheck)
+            if status == 404 { updateOutcome = .noReleases; return }
+            guard status == 200 else { throw URLError(.badServerResponse) }
+            updateOutcome = UpdateCheck.outcome(current: appVersion, latest: UpdateCheck.parse(data))
+        } catch {
+            if !quiet { updateError = "Couldn't check for updates. Try again later." }
+        }
+    }
+
+    /// Weekly, only when the user leaves automatic checks on.
+    func checkForUpdatesIfDue() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: Prefs.checkForUpdates) as? Bool ?? true else { return }
+        let last = defaults.object(forKey: Prefs.lastUpdateCheck) as? Date ?? .distantPast
+        guard Date().timeIntervalSince(last) > 7 * 24 * 3600 else { return }
+        Task { await checkForUpdates(quiet: true) }
+    }
+
+    var updateAvailable: UpdateCheck.Release? {
+        if case .available(let release)? = updateOutcome { return release }
+        return nil
+    }
+
+    func openUpdate(_ release: UpdateCheck.Release) {
+        NSWorkspace.shared.open(release.downloadURL ?? release.pageURL)
+    }
 
     // MARK: Pairing
 

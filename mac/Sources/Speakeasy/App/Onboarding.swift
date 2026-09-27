@@ -301,7 +301,7 @@ private struct VoiceSignInStep: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             StepHeader(title: "Voice sign-in",
-                       subtitle: "By default Speakeasy uses your ChatGPT sign-in through Codex on the Hermes machine. No API key needed.")
+                       subtitle: "The voice is OpenAI's GPT-Live-1. By default it runs through Codex OAuth with your ChatGPT account on the Hermes machine, so no API key is needed. You can use an OpenAI API key instead.")
             if let status = app.status {
                 ForEach(status.checks.filter { $0.id != "brief" }) { check in
                     HStack(alignment: .top) {
@@ -317,14 +317,14 @@ private struct VoiceSignInStep: View {
                     .accessibilityElement(children: .combine)
                 }
                 if status.codexSignedIn != true && status.resolvedProvider == .codex {
-                    Text("On the Hermes machine, run hermes voice setup in Terminal. It signs you in to ChatGPT (a browser window opens). Then press Check again.")
+                    Text("On the Hermes machine, run hermes voice setup in Terminal. It signs you in to GPT-Live-1 with your ChatGPT account through Codex (a browser window opens). Then press Check again.")
                         .font(.callout).fixedSize(horizontal: false, vertical: true)
                 }
             } else {
                 Text(app.lastError ?? "Checking…").foregroundStyle(.secondary)
             }
             DisclosureGroup("Use an API key instead", isExpanded: $showAPIKeyHelp) {
-                Text("On the Hermes machine, run hermes voice setup --api-key and paste your OpenAI API key when asked. It's stored only in that Hermes profile, never on this Mac, and calls bill that OpenAI account.")
+                Text("On the Hermes machine, run hermes voice setup --api-key and paste your OpenAI API key when asked. Calls then use GPT-Live-1 through the OpenAI API and bill that account per minute. The key is stored only in that Hermes profile, never on this Mac.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }

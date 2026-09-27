@@ -21,6 +21,7 @@ struct SpeakeasyApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let app = AppModel.shared
     private var statusItem: NSStatusItem!
+    private var updateItem: NSMenuItem?
     private var hotKey: GlobalHotKey?
     /// In-call mute shortcut: registered only while a call is open.
     private var muteHotKey: GlobalHotKey?
@@ -77,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let link = pendingLink { pendingLink = nil; handlePairURL(link) }
         else if !app.isPaired || !UserDefaults.standard.bool(forKey: Prefs.onboardingDone) { showOnboarding() }
         Task { await app.refresh() }
+        app.checkForUpdatesIfDue()
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(400)) { [weak self] in
             guard let self, !self.active else { return }
             self.native.hideIfIdle()
@@ -227,6 +229,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
+        let updates = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdatesFromMenu), keyEquivalent: "")
+        updates.target = self
+        menu.addItem(updates); updateItem = updates
         let quit = NSMenuItem(title: "Quit Speakeasy", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -238,7 +243,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) { updateMenu() }
 
+    /// Menu: check now and say the result in an alert (download offered when newer).
+    @objc private func checkForUpdatesFromMenu() {
+        Task { @MainActor in
+            await app.checkForUpdates()
+            let alert = NSAlert()
+            alert.icon = NSApp.applicationIconImage
+            if let release = app.updateAvailable {
+                alert.messageText = "Speakeasy \(release.version) is available"
+                alert.informativeText = "You have \(app.appVersion). Download the new version, then drag it into Applications to replace this one."
+                alert.addButton(withTitle: "Download")
+                alert.addButton(withTitle: "Later")
+                NSApp.activate(ignoringOtherApps: true)
+                if alert.runModal() == .alertFirstButtonReturn { app.openUpdate(release) }
+            } else {
+                switch app.updateOutcome {
+                case .upToDate?: alert.messageText = "You're up to date"
+                    alert.informativeText = "Speakeasy \(app.appVersion) is the latest version."
+                case .noReleases?: alert.messageText = "No releases yet"
+                    alert.informativeText = "There's no published Speakeasy release to compare against yet."
+                default: alert.messageText = "Couldn't check for updates"
+                    alert.informativeText = app.updateError ?? "Try again later."
+                }
+                NSApp.activate(ignoringOtherApps: true)
+                alert.runModal()
+            }
+            updateMenu()
+        }
+    }
+
     private func updateMenu() {
+        if let release = app.updateAvailable { updateItem?.title = "Update available: \(release.version)…" }
+        else { updateItem?.title = "Check for Updates…" }
         let name = app.assistantName
         if !app.isPaired {
             statusLine?.title = "Not connected — open Settings to pair"

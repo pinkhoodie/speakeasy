@@ -126,12 +126,12 @@ def voice_sign_in(env: Env, home: Path, settings: Settings, *, api_key: bool, as
         if not have_key and not ask_api_key(env, home):
             return False
         settings.patch({"voice": {"provider": "openai"}})
-        env.out("✓ Voice: your OpenAI API key")
+        env.out("✓ Voice: GPT-Live-1 through the OpenAI API (your API key, billed per minute)")
         return True
 
     binary = find_codex(settings.get()["voice"]["codex_path"])
     if binary is None:
-        env.out("• Voice uses your ChatGPT account through the Codex app, which isn't installed.")
+        env.out("• Voice is GPT-Live-1 through Codex OAuth (your ChatGPT account), and Codex isn't installed.")
         if env.confirm("  Install Codex now?", True, assume) and install_codex(env):
             binary = find_codex(settings.get()["voice"]["codex_path"])
         if binary is None:
@@ -151,9 +151,9 @@ def voice_sign_in(env: Env, home: Path, settings: Settings, *, api_key: bool, as
 
     if codex_signed_in(env, binary):
         settings.patch({"voice": {"provider": "codex"}})
-        env.out("✓ Voice: your ChatGPT account (through Codex)")
+        env.out("✓ Voice: GPT-Live-1 through Codex OAuth (your ChatGPT account)")
         return True
-    env.out("• Sign in to ChatGPT so Speakeasy can use your plan's voice. A browser window will open.")
+    env.out("• Sign in to ChatGPT so Speakeasy can use GPT-Live-1 on your plan. A browser window will open.")
     if env.interactive and env.confirm("  Sign in now?", True, assume):
         from .codex_transport import child_env
         try:
@@ -162,7 +162,7 @@ def voice_sign_in(env: Env, home: Path, settings: Settings, *, api_key: bool, as
             pass
         if codex_signed_in(env, binary):
             settings.patch({"voice": {"provider": "codex"}})
-            env.out("✓ Voice: your ChatGPT account (through Codex)")
+            env.out("✓ Voice: GPT-Live-1 through Codex OAuth (your ChatGPT account)")
             return True
     env.out("✗ Not signed in yet. Run `codex login`, then `hermes voice setup` again "
             "(or `hermes voice setup --api-key`).")
