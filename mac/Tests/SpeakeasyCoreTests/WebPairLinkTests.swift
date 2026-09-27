@@ -23,3 +23,18 @@ final class WebPairLinkTests: XCTestCase {
         XCTAssertTrue(SetupPrompt.text.contains("https://speakeasyvoice.ai/setup.md"))
     }
 }
+
+final class EmailDraftStatusTests: XCTestCase {
+    func testAnEmailDraftReadsAsNeedingYouNotWaitingForHermes() {
+        let draft = EmailDraft(draftID: "d", sha256: "0f", from: "a@example.com", to: ["b@example.com"], cc: [],
+                               subject: "Hi", body: "Hello")
+        var s = VoiceState()
+        let now = Date()
+        s.now = now
+        s.delegationAt = now - 60
+        s.workInfo = WorkInfo(runID: "run_x", status: "waiting_for_approval", updated: now, shortStatus: "Drafted an email",
+                              updatedAt: now, statusSource: "authored", events: [], result: nil)
+        s.workInfo?.emailDrafts = [draft]
+        XCTAssertEqual(workStatusLine(deriveWork(s, now: now), now: now)?.0, "Needs your approval")
+    }
+}

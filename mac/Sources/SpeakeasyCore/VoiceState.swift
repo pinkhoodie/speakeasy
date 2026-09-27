@@ -400,7 +400,12 @@ public func deriveWork(_ s: VoiceState, now: Date) -> WorkPhase {
     }
     if info.isTerminal { return .done(status: info.status, result: info.result) }
     if info.stale { return .stale }
-    if info.status == "waiting_for_approval" { return waitingFallback(info, s, now) }
+    if info.status == "waiting_for_approval" {
+        // An email draft is the approval: it's on screen waiting for the user, not for Hermes.
+        if !info.emailDrafts.isEmpty { return .approval(ApprovalInfo(runID: info.runID ?? "", requestID: "",
+                                                                     description: "Review the email draft")) }
+        return waitingFallback(info, s, now)
+    }
     // Local staleness: the api row itself has not moved for 90 s.
     if let heartbeat = info.updated ?? info.updatedAt, now.timeIntervalSince(heartbeat) > VoiceState.staleAfter {
         return .stale

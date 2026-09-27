@@ -366,7 +366,9 @@ struct VoicePanelView: View {
                     } label: {
                         HStack(spacing: 7) {
                             Image(systemName: "square.stack")
-                            Text("\(task.info.products.isEmpty ? task.info.cards.count + task.info.images.count : task.info.products.count + task.info.images.count) cards · \(task.name)").lineLimit(1)
+                            let count = task.info.products.isEmpty ? task.info.cards.count + task.info.images.count
+                                                                   : task.info.products.count + task.info.images.count
+                            Text("\(count) \(count == 1 ? "card" : "cards") · \(task.name)").lineLimit(1)
                             Spacer(minLength: 0)
                             Image(systemName: "chevron.up")
                         }

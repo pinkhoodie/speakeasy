@@ -128,7 +128,11 @@ enum PreviewFixtures {
             let result = WorkResult(spoken: "I put the speaker on screen.",
                                     full: "The KEF LSX II LT is the compact option.", products: [product])
             s.workInfo = work("completed", short: "Speakers compared", age: 3, result: result)
+            s.workInfo?.title = "Compact speaker for the office"
+            s.workInfo?.events = [WorkEventItem(kind: "request", text: "Find me a compact speaker for the office, under a grand", at: now - 90)]
             s.tasks = [TaskItem(id: "speaker", info: s.workInfo!)]
+            s.exchange = Exchange(you: "Find me a compact speaker for the office, under a grand.",
+                                  assistant: "The KEF LSX II LT fits. It's on screen.", replyStarted: true)
             s.runID = "run_preview"
         case "image":
             let result = WorkResult(spoken: "The picture is on screen.", full: "Here's concept 6, the voxel flame.",
@@ -156,6 +160,19 @@ enum PreviewFixtures {
             s.workInfo = s.tasks[2].info
             s.exchange = Exchange(you: "Salty, around sixty bucks.", assistant: "Got it — looking into that now.", replyStarted: true)
             if name == "paused" { s.connection = .paused; s.resumeFrom = "vi_preview" }
+        case "detail":
+            let events = [
+                WorkEventItem(kind: "request", text: "Restock the snack cart with salty stuff, about $60", at: now - 70),
+                WorkEventItem(kind: "milestone", text: "Checked what's usually on the cart", at: now - 55),
+                WorkEventItem(kind: "milestone", text: "Found chips, pretzels and nuts at Costco", at: now - 38),
+                WorkEventItem(kind: "milestone", text: "Same items on Amazon, $8 more with delivery", at: now - 20),
+            ]
+            s.workInfo = WorkInfo(runID: "run_detail", status: "working", updated: now - 4,
+                                  shortStatus: "Building the Costco cart, about $57 so far",
+                                  updatedAt: now - 4, statusSource: "authored", events: events, result: nil,
+                                  title: "Restock snack cart")
+            s.tasks = [TaskItem(id: "detail", info: s.workInfo!)]
+            s.runID = "run_detail"; s.delegationAt = now - 70
         case "email-draft":
             let draft = EmailDraft(draftID: "draft_preview", sha256: "0f3a9c", from: "you@example.com",
                                    to: ["dana@example.com"], cc: ["sam@example.com"],

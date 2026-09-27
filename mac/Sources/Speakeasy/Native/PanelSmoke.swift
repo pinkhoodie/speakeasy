@@ -319,6 +319,14 @@ enum PanelSmoke {
         catch { fail("snapshot failed: \(error)") }
         await longStrings(c, dir: dir)
         await slim(c, dir: dir)
+        // Screens for the website: the task list, a card result, and an approval.
+        for name in ["tasklist", "products", "approval", "detail"] {
+            guard let (state, _) = PreviewFixtures.state(name) else { continue }
+            c.showPreview(state, workExpanded: name == "products" || name == "detail")
+            await settle()
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/site-\(name).png")); record("snapshot \(dir)/site-\(name).png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
         if let (draft, _) = PreviewFixtures.state("email-draft") {
             c.showPreview(draft, workExpanded: false)
             await settle()
