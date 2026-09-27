@@ -90,6 +90,7 @@ final class AppModel: ObservableObject {
     // MARK: Updates
     @Published var updateOutcome: UpdateCheck.Outcome?
     @Published private(set) var latestRelease: UpdateCheck.Release?
+    @Published private(set) var latestPluginVersion: String?
     @Published var checkingForUpdates = false
     @Published var updateError: String?
 
@@ -101,19 +102,35 @@ final class AppModel: ObservableObject {
         var request = URLRequest(url: UpdateCheck.latestURL, timeoutInterval: 15)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Speakeasy/\(appVersion)", forHTTPHeaderField: "User-Agent")
+        if isPaired { await refresh() }
+        var appCheckOK = false
+        var pluginCheckOK = false
         do {
-            if isPaired { await refresh() }
             let (data, response) = try await URLSession.shared.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            UserDefaults.standard.set(Date(), forKey: Prefs.lastUpdateCheck)
-            if status == 404 { latestRelease = nil; updateOutcome = .noReleases; return }
-            guard status == 200 else { throw URLError(.badServerResponse) }
-            guard let release = UpdateCheck.parse(data) else { throw URLError(.cannotParseResponse) }
-            latestRelease = release
-            updateOutcome = UpdateCheck.outcome(current: appVersion, latest: release)
+            if status == 404 { latestRelease = nil; updateOutcome = .noReleases }
+            else {
+                guard status == 200 else { throw URLError(.badServerResponse) }
+                guard let release = UpdateCheck.parse(data) else { throw URLError(.cannotParseResponse) }
+                latestRelease = release
+                updateOutcome = UpdateCheck.outcome(current: appVersion, latest: release)
+            }
+            appCheckOK = true
         } catch {
-            if !quiet { updateError = "Couldn't check for updates. Try again later." }
+            if !quiet { updateError = "Couldn't check Mac app updates. Try again later." }
         }
+        do {
+            var pluginRequest = URLRequest(url: UpdateCheck.pluginManifestURL, timeoutInterval: 15)
+            pluginRequest.setValue("Speakeasy/\(appVersion)", forHTTPHeaderField: "User-Agent")
+            let (pluginData, pluginResponse) = try await URLSession.shared.data(for: pluginRequest)
+            guard (pluginResponse as? HTTPURLResponse)?.statusCode == 200,
+                  let version = UpdateCheck.parsePluginVersion(pluginData) else { throw URLError(.cannotParseResponse) }
+            latestPluginVersion = version
+            pluginCheckOK = true
+        } catch {
+            if !quiet { updateError = "Couldn't check plugin updates. Try again later." }
+        }
+        if appCheckOK && pluginCheckOK { UserDefaults.standard.set(Date(), forKey: Prefs.lastUpdateCheck) }
     }
 
     /// Weekly, only when the user leaves automatic checks on.
@@ -131,9 +148,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Compare the running Hermes plugin independently of the Mac app version.
-    var pluginUpdateAvailable: UpdateCheck.Release? {
+    var pluginUpdateAvailable: String? {
         guard isPaired else { return nil }
-        return UpdateCheck.pluginUpdate(latest: latestRelease, runningVersion: status?.version)
+        return UpdateCheck.pluginUpdate(latestVersion: latestPluginVersion, runningVersion: status?.version)
     }
 
     func openUpdate(_ release: UpdateCheck.Release) {

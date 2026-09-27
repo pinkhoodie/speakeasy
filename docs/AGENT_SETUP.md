@@ -18,9 +18,10 @@ If it's already installed, update it instead: `hermes plugins update speakeasy`.
 necessarily reactivate a disabled plugin. **Tell the user to restart Hermes themselves after
 an update**, even when the CLI reports that the update succeeded; do not restart it for them.
 
-The paired Mac app checks the latest GitHub release about once a week while it is running and
-compares that version against the *running* Hermes plugin. It shows a separate plugin-update
-notice in Settings and the menu bar, and a one-time macOS notification (if allowed). It does not
+The paired Mac app checks its latest GitHub release and the published plugin manifest separately
+about once a week while it is running. It compares the manifest version against the *running*
+Hermes plugin, so a Mac-only release does not trigger a false plugin alert. A newer plugin gets a
+separate menu and Settings notice, and a one-time macOS notification (if allowed). It does not
 auto-install the plugin or restart Hermes. If the app cannot reach Hermes, it cannot check the
 running plugin version; help the user restore the connection first.
 

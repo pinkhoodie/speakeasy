@@ -17,10 +17,13 @@ final class UpdateCheckTests: XCTestCase {
         let release = UpdateCheck.Release(version: "0.2.4",
                                           pageURL: URL(string: "https://example.com/release")!, downloadURL: nil)
         XCTAssertEqual(UpdateCheck.outcome(current: "0.2.4", latest: release), .upToDate(current: "0.2.4"))
-        XCTAssertEqual(UpdateCheck.pluginUpdate(latest: release, runningVersion: "0.2.3"), release)
-        XCTAssertNil(UpdateCheck.pluginUpdate(latest: release, runningVersion: "0.2.4"))
-        XCTAssertNil(UpdateCheck.pluginUpdate(latest: release, runningVersion: nil))
-        XCTAssertNil(UpdateCheck.pluginUpdate(latest: nil, runningVersion: "0.2.3"))
+        XCTAssertNil(UpdateCheck.pluginUpdate(latestVersion: "0.2.3", runningVersion: "0.2.3"),
+                     "a Mac-only 0.2.4 release does not imply a plugin update")
+        XCTAssertEqual(UpdateCheck.pluginUpdate(latestVersion: "0.2.5", runningVersion: "0.2.3"), "0.2.5")
+        XCTAssertNil(UpdateCheck.pluginUpdate(latestVersion: "0.2.4", runningVersion: nil))
+        XCTAssertNil(UpdateCheck.pluginUpdate(latestVersion: nil, runningVersion: "0.2.3"))
+        XCTAssertEqual(UpdateCheck.parsePluginVersion(Data("name: speakeasy\nversion: 0.2.3\n".utf8)), "0.2.3")
+        XCTAssertNil(UpdateCheck.parsePluginVersion(Data("version: something-wrong\n".utf8)))
     }
 
     func testParsesLatestReleaseAndPicksTheDmg() throws {

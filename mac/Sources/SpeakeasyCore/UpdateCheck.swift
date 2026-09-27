@@ -7,6 +7,21 @@ public enum UpdateCheck {
     public static let latestURL = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!
     public static let releasesPage = URL(string: "https://github.com/\(repo)/releases/latest")!
 
+    public static let pluginManifestURL = URL(string: "https://raw.githubusercontent.com/\(repo)/main/plugin/speakeasy/plugin.yaml")!
+
+    /// Read the published plugin's own version; a Mac-only release must not imply a plugin update.
+    public static func parsePluginVersion(_ data: Data) -> String? {
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        for line in text.components(separatedBy: .newlines) {
+            let fields = line.split(separator: ":", maxSplits: 1)
+            guard fields.count == 2, fields[0].trimmingCharacters(in: .whitespaces) == "version" else { continue }
+            let value = fields[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            let core = value.split(separator: ".")
+            return core.count == 3 && core.allSatisfy({ Int($0) != nil }) ? value : nil
+        }
+        return nil
+    }
+
     public struct Release: Equatable, Sendable {
         public let version: String      // "0.2.0" (a leading "v" in the tag is dropped)
         public let pageURL: URL         // release notes page
@@ -38,9 +53,9 @@ public enum UpdateCheck {
         return isNewer(latest.version, than: current) ? .available(latest) : .upToDate(current: current)
     }
 
-    public static func pluginUpdate(latest: Release?, runningVersion: String?) -> Release? {
-        guard let latest, let runningVersion, isNewer(latest.version, than: runningVersion) else { return nil }
-        return latest
+    public static func pluginUpdate(latestVersion: String?, runningVersion: String?) -> String? {
+        guard let latestVersion, let runningVersion, isNewer(latestVersion, than: runningVersion) else { return nil }
+        return latestVersion
     }
 
     /// Numeric dotted comparison: "0.10.0" > "0.9.2"; missing parts count as 0; a non-numeric

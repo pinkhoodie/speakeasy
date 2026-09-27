@@ -616,9 +616,9 @@ private struct AboutSettings: View {
             Text("Speakeasy").font(.title2.weight(.semibold))
             Text("Version \(app.appVersion)").foregroundStyle(.secondary)
             updateRow
-            if let release = app.pluginUpdateAvailable {
+            if let version = app.pluginUpdateAvailable {
                 VStack(spacing: 4) {
-                    Text("Hermes plugin update available: \(release.version)").font(.callout.weight(.semibold))
+                    Text("Hermes plugin update available: \(version)").font(.callout.weight(.semibold))
                     Text("Running plugin: \(app.status?.version ?? "unknown"). Ask your agent to update Speakeasy on Hermes, then restart Hermes yourself when prompted. The Mac app is separate.")
                         .font(.caption).foregroundStyle(.secondary)
                     Button("Copy update request") { app.copyPluginUpdateRequest() }

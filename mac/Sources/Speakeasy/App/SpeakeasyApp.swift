@@ -116,13 +116,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Model wiring
 
     private func observeModel() {
-        app.$status.combineLatest(app.$latestRelease)
+        app.$status.combineLatest(app.$latestPluginVersion)
             .receive(on: RunLoop.main)
             .sink { [weak self] _, _ in
                 guard let self else { return }
                 self.updateMenu()
-                if let release = self.app.pluginUpdateAvailable {
-                    self.idle?.notifyPluginUpdate(version: release.version)
+                if let version = self.app.pluginUpdateAvailable {
+                    self.idle?.notifyPluginUpdate(version: version)
                 }
             }.store(in: &bag)
         app.configChanged.sink { [weak self] config in
@@ -281,9 +281,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             await app.checkForUpdates()
             let alert = NSAlert()
             alert.icon = NSApp.applicationIconImage
-            if let release = app.pluginUpdateAvailable {
+            if let version = app.pluginUpdateAvailable {
                 alert.messageText = "Hermes plugin update available"
-                alert.informativeText = "Speakeasy on Hermes is \(app.status?.version ?? "unknown"); \(release.version) is available. Ask your agent to update the plugin, then restart Hermes yourself when prompted. The Mac app updates separately."
+                alert.informativeText = "Speakeasy on Hermes is \(app.status?.version ?? "unknown"); \(version) is available. Ask your agent to update the plugin, then restart Hermes yourself when prompted. The Mac app updates separately."
                 alert.addButton(withTitle: "Copy update request")
                 alert.addButton(withTitle: "Later")
                 NSApp.activate(ignoringOtherApps: true)
@@ -312,7 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateMenu() {
-        if let release = app.pluginUpdateAvailable { updateItem?.title = "Hermes plugin update: \(release.version)…" }
+        if let version = app.pluginUpdateAvailable { updateItem?.title = "Hermes plugin update: \(version)…" }
         else if let release = app.updateAvailable { updateItem?.title = "Update available: \(release.version)…" }
         else { updateItem?.title = "Check for Updates…" }
         let name = app.assistantName
