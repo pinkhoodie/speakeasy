@@ -56,13 +56,9 @@ Routing (follow-up or new task, splitting "do X and Y", picking a channel) uses 
 your Hermes auxiliary model `speakeasy_router`; pick its model with `hermes model` → auxiliary
 tasks. If it's slow or fails, simple built-in rules take over.
 
-## Tests
+## Contributing
 
-No network or paid calls: a fake Hermes API server, a fake `codex app-server` and a fake live
-worker stand in for the real services.
-
-    cd plugin && ~/.hermes/hermes-agent/venv/bin/python -m pytest tests -q
-    cd ~/.hermes/hermes-agent && venv/bin/python <repo>/plugin/tests/e2e_local.py
+Building from source, running the tests and releasing: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
