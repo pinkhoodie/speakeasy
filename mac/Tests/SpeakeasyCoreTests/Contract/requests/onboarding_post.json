@@ -1,0 +1,10 @@
+{
+  "body" : {
+    "assistant_name" : "Nova",
+    "delivery_target" : "none",
+    "user_name" : "Sam",
+    "write_brief" : false
+  },
+  "method" : "POST",
+  "path" : "\/voice\/onboarding"
+}

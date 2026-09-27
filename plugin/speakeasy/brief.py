@@ -1,0 +1,244 @@
+"""The voice brief: written by the user's own Hermes, validated, stored, refreshed in the background.
+
+- `<HERMES_HOME>/speakeasy/voice-brief.md` holds the brief; `brief-state.json` its metadata.
+- A write runs `prompt/brief_request.md` through `/v1/runs` (the user's model, memory, permissions).
+- Validation: size cap, the five required sections, a secret scan. A failed write never replaces a
+  good brief.
+- Refresh: at most once a day, only when the input hash (memory, user profile, persona, config tool
+  and platform choices, skill names) changed, only while auto-refresh is on and the brief was not
+  edited by hand. Never at call start.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import re
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+from .prompt.builder import PROMPT_DIR
+
+logger = logging.getLogger(__name__)
+
+MAX_BRIEF_CHARS = 12_000
+MIN_BRIEF_CHARS = 200
+REFRESH_INTERVAL_S = 24 * 3600
+CHECK_INTERVAL_S = 3600
+REQUIRED_SECTIONS = ("User", "Assistant persona", "Capability map", "Answer preferences", "Current context")
+_SECRET_PATTERNS = [
+    re.compile(p) for p in (
+        r"sk-[A-Za-z0-9_-]{20,}", r"sk-ant-[A-Za-z0-9_-]{20,}", r"gh[pousr]_[A-Za-z0-9]{30,}",
+        r"xox[bpas]-[A-Za-z0-9-]{10,}", r"AKIA[0-9A-Z]{16}", r"-----BEGIN [A-Z ]*PRIVATE KEY-----", r"\bop:" + "//",  # password-manager reference
+        r"(?i)\b(?:password|passwd|api[_ -]?key|secret|token)\s*[:=]\s*\S{6,}",
+        r"\b(?:\d[ -]?){13,19}\b",                     # card-like numbers
+        r"[A-Za-z0-9_+=/-]{40,}",                      # long opaque strings
+        r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b",               # email addresses
+        r"\b[a-z0-9-]+\.tail[0-9a-f]{6}\.ts\.net\b",   # tailnet hosts
+    )]
+
+
+class BriefInvalid(ValueError):
+    pass
+
+
+def _write_private(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def strip_status_lines(output: str) -> str:
+    text = re.sub(r"(?im)^[ \t]*(?:DONE|SPOKEN|STATUS|DETAIL):.*$", "", output or "")
+    text = re.sub(r"^\s*```(?:markdown|md)?\s*\n(.*)\n```\s*$", r"\1", text.strip(), flags=re.S)
+    return text.strip()
+
+
+def validate(text: str) -> str:
+    """Return the cleaned brief or raise BriefInvalid with a short reason."""
+    text = strip_status_lines(text)
+    if len(text) < MIN_BRIEF_CHARS:
+        raise BriefInvalid("brief is too short")
+    if len(text) > MAX_BRIEF_CHARS:
+        raise BriefInvalid("brief is too long")
+    headings = {h.strip().lower() for h in re.findall(r"(?m)^#{1,3}\s+(.+?)\s*$", text)}
+    missing = [s for s in REQUIRED_SECTIONS if s.lower() not in headings]
+    if missing:
+        raise BriefInvalid(f"brief is missing sections: {', '.join(missing)}")
+    for pattern in _SECRET_PATTERNS:
+        if pattern.search(text):
+            raise BriefInvalid("brief looks like it contains secrets or sensitive data")
+    return text + "\n"
+
+
+def input_hash(hermes_home: Path) -> str:
+    """Hash of what the brief is written from; changes trigger a (daily) refresh."""
+    h = hashlib.sha256()
+    home = Path(hermes_home)
+    for rel in ("memories/MEMORY.md", "memories/USER.md", "MEMORY.md", "USER.md", "SOUL.md"):
+        try:
+            h.update(rel.encode() + b"\0" + (home / rel).read_bytes() + b"\0")
+        except OSError:
+            pass
+    try:
+        import yaml  # type: ignore
+        cfg = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:
+        cfg = {}
+    if isinstance(cfg, dict):
+        picked = {k: cfg.get(k) for k in ("toolsets", "agent", "personality", "display")}
+        platforms = cfg.get("platforms")
+        picked["platforms"] = sorted(platforms) if isinstance(platforms, dict) else []
+        h.update(json.dumps(picked, sort_keys=True, default=str).encode())
+    skills = home / "skills"
+    if skills.is_dir():
+        names = sorted(str(p.parent.relative_to(skills)) for p in skills.glob("**/SKILL.md"))[:2000]
+        h.update("\n".join(names).encode())
+    return h.hexdigest()
+
+
+class BriefManager:
+    def __init__(self, hermes_home: Path, run_fn: Callable[[str, str], tuple[str, str]] | None,
+                 settings_fn: Callable[[], dict[str, Any]], clock: Callable[[], float] = time.time):
+        self.home = Path(hermes_home)
+        self.dir = self.home / "speakeasy"
+        self.path = self.dir / "voice-brief.md"
+        self.state_path = self.dir / "brief-state.json"
+        self.run_fn, self.settings_fn, self.clock = run_fn, settings_fn, clock
+        self._lock = threading.Lock()
+        self._writing = False
+        self._stop = threading.Event()
+
+    # -- state -------------------------------------------------------------------------
+    def _state(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_state(self, **changes: Any) -> dict[str, Any]:
+        state = {**self._state(), **changes}
+        _write_private(self.state_path, json.dumps(state, indent=2) + "\n")
+        return state
+
+    def text(self) -> str:
+        try:
+            return self.path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def status(self) -> dict[str, Any]:
+        state = self._state()
+        text = self.text()
+        if self._writing:
+            label = "writing"
+        elif text:
+            label = "edited" if state.get("edited") else "ready"
+        elif state.get("error"):
+            label = "failed"
+        else:
+            label = "none"
+        return {"state": label, "updated_at": state.get("updated_at"), "edited": bool(state.get("edited")),
+                "auto_refresh": bool(self.settings_fn()["brief"]["auto_refresh"]) and not state.get("edited"),
+                "error": state.get("error"), "words": len(text.split()) if text else 0}
+
+    def get(self) -> dict[str, Any]:
+        return {"brief": self.text(), **self.status()}
+
+    # -- edits -------------------------------------------------------------------------
+    def put(self, text: Any) -> dict[str, Any]:
+        """A manual edit. Kept as written (after validation); stops auto-refresh."""
+        if not isinstance(text, str):
+            raise BriefInvalid("brief must be text")
+        if not text.strip():
+            with self._lock:
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
+                self._save_state(edited=False, updated_at=self.clock(), error=None)
+            return self.get()
+        clean = validate(text)
+        with self._lock:
+            _write_private(self.path, clean)
+            self._save_state(edited=True, updated_at=self.clock(), error=None)
+        return self.get()
+
+    # -- writes by Hermes ------------------------------------------------------------------
+    def request_prompt(self) -> str:
+        return (PROMPT_DIR / "brief_request.md").read_text(encoding="utf-8")
+
+    def rewrite(self, *, force: bool = True, background: bool = True) -> dict[str, Any]:
+        """Ask Hermes to (re)write the brief. With force=False, an edited brief is left alone."""
+        if self.run_fn is None:
+            raise BriefInvalid("Hermes API is not configured")
+        with self._lock:
+            if self._writing:
+                return self.status()
+            if not force and self._state().get("edited"):
+                return self.status()
+            self._writing = True
+        if background:
+            threading.Thread(target=self._write, daemon=True, name="speakeasy-brief").start()
+            return self.status()
+        self._write()
+        return self.status()
+
+    def _write(self) -> None:
+        digest = input_hash(self.home)
+        now = self.clock()
+        try:
+            if self.run_fn is None:
+                raise BriefInvalid("Hermes API is not configured")
+            status, output = self.run_fn(self.request_prompt(), "speakeasy_brief_" + hashlib.sha256(
+                f"{digest}:{now}".encode()).hexdigest()[:24])
+            if status != "completed":
+                raise BriefInvalid(f"Hermes run ended with status {status}")
+            clean = validate(output)
+            with self._lock:
+                _write_private(self.path, clean)
+                self._save_state(edited=False, updated_at=now, input_hash=digest, last_attempt=now, error=None)
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, BriefInvalid) else f"brief write failed ({type(exc).__name__})"
+            logger.warning("speakeasy: %s", message)
+            with self._lock:
+                self._save_state(last_attempt=now, error=message[:200])
+        finally:
+            with self._lock:
+                self._writing = False
+
+    def refresh_due(self) -> bool:
+        if not self.settings_fn()["brief"]["auto_refresh"]:
+            return False
+        state = self._state()
+        if state.get("edited") or not self.text():
+            return False
+        last = float(state.get("last_attempt") or state.get("updated_at") or 0)
+        if self.clock() - last < REFRESH_INTERVAL_S:
+            return False
+        return state.get("input_hash") != input_hash(self.home)
+
+    def maybe_refresh(self) -> bool:
+        if self.run_fn is None or not self.refresh_due():
+            return False
+        self.rewrite(force=False, background=True)
+        return True
+
+    def start_scheduler(self) -> None:
+        def loop() -> None:
+            while not self._stop.wait(CHECK_INTERVAL_S):
+                try:
+                    self.maybe_refresh()
+                except Exception as exc:  # never kill the gateway thread
+                    logger.warning("speakeasy: brief refresh check failed: %s", type(exc).__name__)
+        threading.Thread(target=loop, daemon=True, name="speakeasy-brief-refresh").start()
+
+    def stop(self) -> None:
+        self._stop.set()

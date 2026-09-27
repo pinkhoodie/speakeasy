@@ -1,0 +1,712 @@
+"""The Speakeasy server core: calls, tasks, approvals, email drafts, settings, brief, status.
+
+Transport-agnostic (the HTTP handler in ``server.py`` is a thin layer over this). Constructed once
+inside the gateway with the profile's HERMES_HOME resolved up front: HTTP threads do not carry the
+gateway's profile scope.
+"""
+from __future__ import annotations
+
+import datetime as _dt
+import hashlib
+import json
+import logging
+import re
+import secrets
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+from . import __version__
+from . import delivery as D
+from .brief import BriefInvalid, BriefManager
+from .calls import (ACTIVE_RUN_STATES, MAX_TASKS, ServiceError, Interaction, Notices, Runtime, SidebandWorker,
+                    interaction_tasks, publish_state)
+from .cards import ImageRejected, default_image_roots, fetch_image, read_local_image
+from .devices import DeviceStore
+from .emails import canonical_json, extract_email_drafts
+from .hermes_api import HermesAPI, HermesError
+from .prompt import builder as P
+from .settings import (OPENAI_KEY_NAME, Settings, SettingsError, default_voice, find_codex, hermes_api_base,
+                       hermes_secret, valid_delivery_target)
+from .store import StateStore
+from .text import ID_RE, MAX_CARDS, TERMINAL, notice_text, split_result
+
+logger = logging.getLogger(__name__)
+
+MAX_SDP = 96 * 1024
+PAUSE_NOTICE_AFTER_S = 15 * 60
+IDLE_CHECK_S = 15
+
+
+class VoiceService:
+    def __init__(self, hermes_home: Path, *, hermes: Any = None, notifier: Any = None,
+                 codex_factory: Callable[..., Any] | None = None, openai_negotiate: Callable[..., Any] | None = None,
+                 openai_worker: Callable[..., Any] | None = None, codex_login: Callable[..., Any] | None = None,
+                 brief_run: Callable[[str, str], tuple[str, str]] | None = None, start_threads: bool = True):
+        self.home = Path(hermes_home)
+        self.dir = self.home / "speakeasy"
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.settings = Settings(self.home)
+        self.devices = DeviceStore(self.home)
+        self.store = StateStore(self.dir / "state.sqlite3")
+        self.hermes = hermes or HermesAPI(hermes_api_base(self.home), self.hermes_key,
+                                          self.settings.get()["hermes_profile"])
+        self.notifier = notifier if notifier is not None else D.HermesSendNotifier(
+            self.home, self.settings.get()["hermes_profile"])
+        self.notices = Notices(self.store, self.notifier, lambda: self.settings.get()["delivery"]["target"],
+                               lambda: P.Names.from_settings(self.settings.get()))
+        self.rt = Runtime(store=self.store, hermes=self.hermes, settings=self.settings.get, hermes_home=self.home,
+                          image_roots=self.image_roots, notices=self.notices, hermes_key=self.hermes_key)
+        self.brief = BriefManager(self.home, brief_run or self._brief_run, self.settings.get)
+        self.interactions: dict[str, Interaction] = {}
+        self.lock = threading.Lock()
+        self._codex_factory = codex_factory
+        self._openai_negotiate = openai_negotiate
+        self._openai_worker = openai_worker
+        self._codex_login = codex_login
+        self._stop = threading.Event()
+        if start_threads:
+            threading.Thread(target=self._idle_loop, daemon=True, name="speakeasy-idle").start()
+            self.brief.start_scheduler()
+
+    # -- secrets (read per use, never stored or returned) ------------------------------------
+    def hermes_key(self) -> str:
+        return hermes_secret(self.home, "API_SERVER_KEY")
+
+    def openai_key(self) -> str:
+        return hermes_secret(self.home, OPENAI_KEY_NAME)
+
+    def image_roots(self) -> tuple[Path, ...]:
+        return default_image_roots(self.home, self.settings.get()["image_roots"])
+
+    def _brief_run(self, prompt: str, idem: str) -> tuple[str, str]:
+        return self.hermes.run_to_completion(prompt, idem, "speakeasy_brief")
+
+    def close(self) -> None:
+        self._stop.set()
+        self.brief.stop()
+        with self.lock:
+            live = list(self.interactions.values())
+        for interaction in live:
+            worker = interaction.worker
+            if worker is not None:
+                try:
+                    worker.stop_transport()
+                except Exception:
+                    pass
+
+    # -- auth ---------------------------------------------------------------------------------
+    def authenticate(self, headers: Any) -> str:
+        supplied = headers.get("Authorization", "")
+        token = supplied[7:].strip() if supplied.startswith("Bearer ") else None
+        device_id = self.devices.authenticate(token)
+        if device_id is None:
+            raise ServiceError(401, "unauthorized")
+        return device_id
+
+    def pair(self, body: dict[str, Any]) -> dict[str, Any]:
+        code, name = body.get("code"), body.get("device_name", "Mac")
+        if not isinstance(code, str) or not re.fullmatch(r"\s*\d{6}\s*", code) or not isinstance(name, str):
+            raise ServiceError(400, "code (6 digits) and device_name are required")
+        result = self.devices.redeem(code, name)
+        if result is None:
+            raise ServiceError(403, "pairing code is wrong or expired")
+        device_id, token = result
+        return {"device_id": device_id, "token": token, "assistant_name": self.settings.get()["assistant_name"]}
+
+    # -- voice sessions -------------------------------------------------------------------------
+    def instructions(self, *, away: list[dict[str, Any]], resume: str) -> str:
+        s = self.settings.get()
+        names = P.Names.from_settings(s)
+        recent = ""
+        if s["brief"]["include_recent_voice"] and not resume:
+            try:
+                turns = json.loads(self.store.get_meta("recent_voice") or "[]")
+                recent = P.format_recent([{"role": t.get("role"), "content": t.get("text")} for t in turns
+                                          if isinstance(t, dict)], names)
+            except ValueError:
+                recent = ""
+        now = _dt.datetime.now().astimezone().strftime("%A %d %B %Y, %H:%M %Z")
+        return P.build_live_instructions(names, brief=self.brief.text(), away=away, recent_voice=recent,
+                                         resume=resume, extra=s["instructions_extra"], now=now,
+                                         delivery_label=D.target_label(s["delivery"]["target"]))
+
+    def create_session(self, body: dict[str, Any], request_id: str, device_id: str = "") -> dict[str, Any]:
+        resume_from = body.get("resume_from")
+        if (not set(body) <= {"sdp", "resume_from"} or not isinstance(body.get("sdp"), str)
+                or resume_from is not None and not (isinstance(resume_from, str) and ID_RE.fullmatch(resume_from))):
+            raise ServiceError(400, "body must contain only an SDP offer and an optional resume_from")
+        source = self.resumable(resume_from) if resume_from else None
+        sdp = body["sdp"]
+        # SDP is a wire format: its final CRLF is significant. Never strip it.
+        if not sdp.strip() or len(sdp.encode()) > MAX_SDP or not sdp.startswith("v=0"):
+            raise ServiceError(400, "invalid SDP offer")
+        if not ID_RE.fullmatch(request_id):
+            raise ServiceError(400, "invalid Idempotency-Key")
+        fingerprint = hashlib.sha256((sdp + "\0" + (resume_from or "")).encode()).hexdigest()
+        interaction_id = "vi_" + secrets.token_hex(16)
+        outcome, replay = self.store.reserve_session(request_id, fingerprint, interaction_id)
+        if outcome == "conflict":
+            raise ServiceError(409, "Idempotency-Key reused with different SDP")
+        if outcome == "pending":
+            raise ServiceError(409, "identical session admission is still pending")
+        if replay is not None:
+            with self.lock:
+                live = replay.get("interaction_id") in self.interactions
+            if not live:
+                raise ServiceError(409, "session replay unavailable after server restart; create a new offer")
+            return replay
+        s = self.settings.get()
+        names = P.Names.from_settings(s)
+        history: list[dict[str, str]] = []
+        if source is not None:
+            away: list[dict[str, Any]] = []
+            history = self.pause_history(source)
+            resume = P.resume_block(interaction_tasks(self.store, source, names.assistant_name), names)
+        else:
+            away, resume = self.store.away(), ""
+        instructions = self.instructions(away=away, resume=resume)
+        seed = P.resume_input(history)
+        provider = s["voice"]["provider"]
+        voice = default_voice(s)
+        transport = None
+        try:
+            if provider == "codex":
+                transport = self._start_codex(sdp, instructions, seed, voice, s)
+                live_id, answer = transport.thread_id, transport_answer(transport)
+            else:
+                key = self.openai_key()
+                if not key:
+                    raise ServiceError(409, f"voice.provider is openai but {OPENAI_KEY_NAME} is not set in the Hermes .env")
+                from .openai_live import negotiate, session_payload
+                result = (self._openai_negotiate or negotiate)(key, session_payload(instructions, voice, sdp, seed))
+                live_id = (result.get("session") or {}).get("id")
+                answer = (result.get("transport") or {}).get("sdp")
+        except ServiceError:
+            self.store.fail_session(request_id)
+            raise
+        except Exception as exc:
+            if transport is not None:
+                transport.stop()
+            self.store.fail_session(request_id)
+            raise ServiceError(502, f"Voice session creation failed: {type(exc).__name__}") from None
+        if not isinstance(live_id, str) or not live_id or not isinstance(answer, str) or not answer:
+            if transport is not None:
+                transport.stop()
+            self.store.fail_session(request_id)
+            raise ServiceError(502, "voice provider returned an invalid session response")
+        client_result: dict[str, Any] = {
+            "interaction_id": interaction_id, "session": {"id": live_id},
+            "transport": {"type": "webrtc", "sdp": answer}, "voice_provider": provider,
+        }
+        interaction = Interaction(interaction_id=interaction_id, live_session_id=live_id, away=away,
+                                  device_id=device_id)
+        if source is not None:
+            self.adopt(source, interaction, history)
+            client_result["resumed_from"] = source.interaction_id
+        with self.lock:
+            self.interactions[interaction_id] = interaction
+        self.store.complete_session(request_id, client_result)
+        self._start_worker(interaction, provider, transport).start()
+        return client_result
+
+    def _start_codex(self, sdp: str, instructions: str, seed: list, voice: str, s: dict[str, Any]) -> Any:
+        if self._codex_factory is not None:
+            transport = self._codex_factory()
+        else:
+            from .codex_transport import CodexTransport
+            binary = find_codex(s["voice"]["codex_path"])
+            if binary is None:
+                raise ServiceError(409, "Codex CLI not found: install it and run `codex login`, or set voice.codex_path")
+            transport = CodexTransport(binary, self.dir / "codex", s["voice"]["max_call_minutes"] * 60)
+        transport._answer = transport.start(sdp, instructions, seed, voice)
+        return transport
+
+    def _start_worker(self, interaction: Interaction, provider: str, transport: Any) -> SidebandWorker:
+        if provider == "codex":
+            from .codex_transport import CodexSidebandWorker
+            return CodexSidebandWorker(self.rt, interaction, transport)
+        if self._openai_worker is not None:
+            return self._openai_worker(self.rt, interaction)
+        from .openai_live import OpenAISidebandWorker
+        return OpenAISidebandWorker(self.rt, interaction, self.openai_key)
+
+    def finish_transport(self, interaction_id: str) -> dict[str, Any]:
+        """End: close the provider session once the client saw it close (Codex needs an explicit stop)."""
+        interaction = self.interaction(interaction_id)
+        worker = interaction.worker
+        with interaction.lock:
+            if interaction.finalization == "confirmed":
+                return {"finalization": "confirmed"}
+        transport = getattr(worker, "transport", None)
+        if transport is None:
+            return {"finalization": interaction.finalization}
+        if transport.thread_id != interaction.live_session_id:
+            raise ServiceError(409, "voice session mismatch")
+        try:
+            transport.request("thread/realtime/stop", {"threadId": transport.thread_id}, timeout=4)
+        except (RuntimeError, TimeoutError, OSError):
+            raise ServiceError(502, "voice stop unconfirmed") from None
+        for _ in range(20):
+            with interaction.lock:
+                if interaction.finalization != "open":
+                    return {"finalization": interaction.finalization}
+            time.sleep(.1)
+        return {"finalization": "pending"}
+
+    # -- pause / resume / idle ---------------------------------------------------------------
+    def pause(self, interaction_id: str, *, stop_transport: bool = False) -> dict[str, Any]:
+        """Pause closes the paid voice session but keeps the call's transcript and tasks."""
+        interaction = self.interaction(interaction_id)
+        with interaction.lock:
+            if interaction.successor is not None:
+                raise ServiceError(409, "call was already resumed")
+            already_closed = interaction.call_closed
+            interaction.paused = True
+        worker = interaction.worker
+        if already_closed and worker is not None:
+            with interaction.lock:
+                if not interaction.history:
+                    interaction.history = worker.turns()[-400:]
+        if stop_transport and worker is not None:
+            try:
+                worker.stop_transport()
+            except Exception:
+                pass
+        timer = threading.Timer(PAUSE_NOTICE_AFTER_S, self.pause_expired, args=(interaction,))
+        timer.daemon = True
+        timer.start()
+        publish_state(self.store, interaction, self.settings.get()["assistant_name"])
+        return {"interaction_id": interaction_id, "paused": True}
+
+    def pause_expired(self, interaction: Interaction) -> None:
+        with interaction.lock:
+            if interaction.successor is not None or not interaction.paused or interaction.pause_bookkept:
+                return
+            interaction.pause_bookkept = True
+        worker = interaction.worker
+        try:
+            self.store.mark_call_ended()
+            if worker is not None:
+                worker.still_working_notices()
+        except Exception as exc:
+            logger.warning("speakeasy: pause-expiry bookkeeping failed: %s", type(exc).__name__)
+
+    def resumable(self, interaction_id: str) -> Interaction:
+        source = self.interaction(interaction_id)
+        with source.lock:
+            if not source.paused:
+                raise ServiceError(409, "call is not paused")
+            if source.successor is not None:
+                raise ServiceError(409, "call was already resumed")
+        return source
+
+    def pause_history(self, source: Interaction) -> list[dict[str, str]]:
+        with source.lock:
+            closed, history = source.call_closed, list(source.history)
+        worker = source.worker
+        if not closed and worker is not None:
+            history = history + worker.turns()
+        return history[-400:]
+
+    def adopt(self, source: Interaction, interaction: Interaction, history: list[dict[str, str]]) -> None:
+        with source.lock:
+            if source.successor is not None:
+                raise ServiceError(409, "call was already resumed")
+            source.successor = interaction
+            source.paused = False
+            runs = dict(source.runs)
+        interaction.runs.update(runs)
+        interaction.history = history
+        interaction.resumed_from = source.interaction_id
+        interaction.revision = source.revision
+        interaction.latest_delegation_id = source.latest_delegation_id
+
+    def idle_check(self, now: float | None = None) -> list[str]:
+        """Auto-pause connected calls idle longer than idle_pause_minutes (0 = off)."""
+        minutes = self.settings.get()["idle_pause_minutes"]
+        if not minutes:
+            return []
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            live = list(self.interactions.values())
+        paused = []
+        for interaction in live:
+            worker = interaction.worker
+            with interaction.lock:
+                eligible = (worker is not None and not interaction.paused and not interaction.call_closed
+                            and interaction.successor is None and now - interaction.last_activity > minutes * 60)
+            if not eligible or not worker.call_connected():
+                continue
+            try:
+                self.pause(interaction.interaction_id, stop_transport=True)
+                paused.append(interaction.interaction_id)
+            except ServiceError:
+                continue
+        return paused
+
+    def _idle_loop(self) -> None:
+        while not self._stop.wait(IDLE_CHECK_S):
+            try:
+                self.idle_check()
+            except Exception as exc:
+                logger.warning("speakeasy: idle check failed: %s", type(exc).__name__)
+
+    # -- lookups -------------------------------------------------------------------------------
+    def interaction(self, interaction_id: str) -> Interaction:
+        if not ID_RE.fullmatch(interaction_id or ""):
+            raise ServiceError(404, "interaction not found")
+        with self.lock:
+            value = self.interactions.get(interaction_id)
+        if not value:
+            raise ServiceError(404, "interaction not found")
+        return value
+
+    @staticmethod
+    def _run(interaction: Interaction, run_id: str) -> Any:
+        for backend in interaction.runs.values():
+            if backend.run_id == run_id:
+                return backend
+        backend = interaction.runs.get(run_id)
+        if backend is not None and backend.run_id:
+            return backend
+        raise ServiceError(409, "run does not belong to this interaction")
+
+    def publish_all(self, key: str | None = None) -> None:
+        with self.lock:
+            live = list(self.interactions.values())
+        name = self.settings.get()["assistant_name"]
+        for interaction in live:
+            with interaction.lock:
+                touched = key is None or any(r.idem_key == key for r in interaction.runs.values())
+            if touched:
+                publish_state(self.store, interaction, name)
+
+    def interaction_for_key(self, key: str) -> Interaction | None:
+        with self.lock:
+            live = list(self.interactions.values())
+        for interaction in live:
+            with interaction.lock:
+                if any(r.idem_key == key for r in interaction.runs.values()):
+                    return interaction.head()
+        return None
+
+    # -- task controls -------------------------------------------------------------------------
+    def cancel_backend(self, interaction_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        interaction = self.interaction(interaction_id)
+        run_id = body.get("run_id")
+        if set(body) != {"run_id"} or not isinstance(run_id, str) or not ID_RE.fullmatch(run_id):
+            raise ServiceError(400, "exact run_id is required")
+        with interaction.lock:
+            backend = self._run(interaction, run_id)
+            if backend.status in TERMINAL or backend.status in {"ambiguous", "cancel_requested"}:
+                raise ServiceError(409, "no active backend run")
+            backend.status = "cancel_requested"
+        self.store.update_run(backend.idem_key, None, "cancel_requested")
+        self.store.progress(backend.idem_key, "milestone", "Stop requested")
+        name = self.settings.get()["assistant_name"]
+        publish_state(self.store, interaction, name)
+        try:
+            result = self.hermes.stop(backend.run_id)
+        except Exception:
+            with interaction.lock:
+                if backend.status == "cancel_requested":
+                    backend.status, backend.error = "ambiguous", "Backend stop outcome is ambiguous"
+            publish_state(self.store, interaction, name)
+            raise ServiceError(502, "Hermes stop failed") from None
+        return {"interaction_id": interaction_id, "backend_cancel": result.get("status", "unknown"),
+                "run_id": backend.run_id, "voice_session": "open"}
+
+    def approve(self, interaction_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        interaction = self.interaction(interaction_id)
+        request_id, run_id, choice = body.get("request_id"), body.get("run_id"), body.get("choice")
+        if (set(body) != {"request_id", "run_id", "choice"}
+                or not isinstance(request_id, str) or not ID_RE.fullmatch(request_id)
+                or not isinstance(run_id, str) or not ID_RE.fullmatch(run_id) or choice not in {"once", "deny"}):
+            raise ServiceError(400, "exact run_id, request_id, and once|deny are required")
+        with interaction.lock:
+            backend = self._run(interaction, run_id)
+            approval = backend.approval
+            if backend.status != "waiting_for_approval" or not approval or request_id != approval.get("request_id"):
+                raise ServiceError(409, "approval is stale or not pending for that run")
+            backend.approval, backend.status = None, "resolving_approval"
+        name = self.settings.get()["assistant_name"]
+        try:
+            result = self.hermes.approve(backend.run_id, request_id, choice)
+        except Exception:
+            with interaction.lock:
+                if backend.status == "resolving_approval":
+                    backend.status, backend.error = "ambiguous", "Backend approval outcome is ambiguous"
+            publish_state(self.store, interaction, name)
+            raise ServiceError(502, "Hermes approval failed") from None
+        with interaction.lock:
+            if backend.status == "resolving_approval":
+                backend.status = "working"
+        self.store.update_run(backend.idem_key, None, "working")
+        self.store.progress(backend.idem_key, "milestone", "Approved once" if choice == "once" else "Approval denied")
+        publish_state(self.store, interaction, name)
+        return {"interaction_id": interaction_id, "choice": choice, "run_id": backend.run_id,
+                "resolved": result.get("resolved", 0)}
+
+    def dismiss_tasks(self, body: dict[str, Any]) -> dict[str, Any]:
+        run_ids = body.get("run_ids")
+        if set(body) != {"run_ids"} or not isinstance(run_ids, list) or not run_ids or len(run_ids) > 50 \
+                or not all(isinstance(r, str) and ID_RE.fullmatch(r) for r in run_ids):
+            raise ServiceError(400, "run_ids must be a list of run ids")
+        dismissed = self.store.dismiss(run_ids)
+        with self.lock:
+            live = list(self.interactions.values())
+        name = self.settings.get()["assistant_name"]
+        for interaction in live:
+            with interaction.lock:
+                touched = any(r.run_id in dismissed for r in interaction.runs.values())
+            if touched:
+                publish_state(self.store, interaction, name)
+        return {"dismissed": dismissed}
+
+    def work_latest(self) -> dict[str, Any]:
+        name = self.settings.get()["assistant_name"]
+        return {"work": self.store.work(assistant_name=name), "away": self.store.away(),
+                "tasks": self.store.latest_tasks(MAX_TASKS)}
+
+    def work(self, run_id: str) -> dict[str, Any]:
+        if not ID_RE.fullmatch(run_id):
+            raise ServiceError(404, "not found")
+        return {"work": self.store.work(run_id, assistant_name=self.settings.get()["assistant_name"])}
+
+    # -- card images ---------------------------------------------------------------------------
+    def _card(self, run_id: str, index: int) -> dict[str, Any]:
+        if not ID_RE.fullmatch(run_id) or not 1 <= index <= MAX_CARDS:
+            raise ServiceError(404, "card not found")
+        cards = self.store.result_cards(run_id)
+        if index > len(cards) or not isinstance(cards[index - 1], dict):
+            raise ServiceError(404, "card not found")
+        return cards[index - 1]
+
+    def card_image(self, run_id: str, index: int) -> tuple[bytes, str]:
+        card = self._card(run_id, index)
+        path = card.get("path") if card.get("kind") == "image" else None
+        try:
+            if isinstance(path, str):
+                return read_local_image(path, self.image_roots())
+            url = card.get("image_url")
+            if not isinstance(url, str):
+                raise ServiceError(404, "image not found")
+            return fetch_image(url)
+        except (ImageRejected, OSError, TimeoutError):
+            raise ServiceError(404, "image unavailable") from None
+
+    # -- email drafts ------------------------------------------------------------------------
+    def decide_draft(self, draft_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """approve | deny | revise one draft, bound to the exact hash the user saw."""
+        action, digest, instructions = body.get("action"), body.get("sha256"), body.get("instructions")
+        if (not set(body) <= {"action", "sha256", "instructions"} or action not in {"approve", "deny", "revise"}
+                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise ServiceError(400, "action (approve|deny|revise) and sha256 are required")
+        if action == "revise":
+            if not isinstance(instructions, str) or not instructions.strip() or len(instructions) > 2000:
+                raise ServiceError(400, "revise needs instructions (up to 2000 characters)")
+        elif instructions is not None:
+            raise ServiceError(400, "instructions are only for revise")
+        if not re.fullmatch(r"ed_[0-9a-f]{24}", draft_id or ""):
+            raise ServiceError(404, "draft not found")
+        draft = self.store.draft(draft_id)
+        if draft is None:
+            raise ServiceError(404, "draft not found")
+        if not secrets.compare_digest(draft["sha256"], digest):
+            raise ServiceError(409, "draft changed; review the current draft")
+        target = {"approve": "approved", "deny": "denied", "revise": "revising"}[action]
+        # Idempotent: repeating a decision already taken returns the current state, never re-sends.
+        already = {"approve": {"approved", "sent", "failed"}, "deny": {"denied"}, "revise": {"revising"}}[action]
+        if draft["status"] in already:
+            return self._draft_view(draft)
+        if not self.store.transition_draft(draft_id, {"pending"}, target):
+            current = self.store.draft(draft_id) or draft
+            if current["status"] in already:
+                return self._draft_view(current)
+            raise ServiceError(409, f"draft is {current['status']}")
+        names = P.Names.from_settings(self.settings.get())
+        public = {k: v for k, v in draft.items() if not k.startswith("_") and k not in
+                  {"draft_id", "sha256", "status", "created_at", "updated_at", "error"}}
+        message = {"approve": lambda: P.draft_approved_message(names, canonical_json(public)),
+                   "deny": lambda: P.draft_denied_message(names),
+                   "revise": lambda: P.draft_revise_message(names, instructions or "")}[action]()
+        key, session_id = draft["_key"], draft["_session_id"]
+        self.store.progress(key, "milestone", {"approve": "Email approved; sending", "deny": "Email draft denied",
+                                               "revise": "Revising the email draft"}[action])
+        idem = f"speakeasy_draft_{draft_id}_{action}"
+        try:
+            run_id = self.hermes.start_run(message, idem, session_id)
+        except HermesError as exc:
+            if action == "approve":
+                # Nothing reached Hermes: mark failed rather than pretend it was sent.
+                self.store.transition_draft(draft_id, {"approved"}, "failed", error=exc.message[:200])
+            elif action == "revise":
+                self.store.transition_draft(draft_id, {"revising"}, "pending", error=exc.message[:200])
+            self.publish_all(key)
+            raise ServiceError(502, "Hermes did not accept the decision") from None
+        self.store.transition_draft(draft_id, {target}, target, action_run_id=run_id)
+        self.publish_all(key)
+        interaction = self.interaction_for_key(key)
+        if interaction is not None and interaction.worker is not None:
+            interaction.worker.speak_from_thread("session.thinking.append", P.draft_outcome_note(action))
+        threading.Thread(target=self._follow_draft_run, args=(draft_id, action, run_id, key), daemon=True,
+                         name="speakeasy-draft").start()
+        return self._draft_view(self.store.draft(draft_id) or draft)
+
+    def _follow_draft_run(self, draft_id: str, action: str, run_id: str, key: str) -> None:
+        final: dict[str, Any] = {}
+
+        def on_event(event: dict[str, Any]) -> None:
+            kind = event.get("event") or ""
+            if kind.startswith("run.") and kind[4:] in TERMINAL:
+                final["status"] = kind[4:]
+                if isinstance(event.get("output"), str):
+                    final["output"] = event["output"]
+        try:
+            if not self.hermes.events(run_id, on_event) or "output" not in final:
+                result = self.hermes.get_run(run_id)
+                final.setdefault("status", result.get("status"))
+                if isinstance(result.get("output"), str):
+                    final.setdefault("output", result["output"])
+        except Exception as exc:
+            final.setdefault("status", "unknown")
+            final.setdefault("error", type(exc).__name__)
+        self.draft_run_finished(draft_id, action, final.get("status") or "unknown", final.get("output") or "")
+
+    def draft_run_finished(self, draft_id: str, action: str, status: str, output: str) -> None:
+        draft = self.store.draft(draft_id)
+        if draft is None:
+            return
+        key = draft["_key"]
+        result = split_result(output, self.image_roots()) if output else None
+        spoken = (result or {}).get("spoken") or ""
+        if action == "approve":
+            failed = status != "completed" or bool(re.search(
+                r"(?i)\b(?:failed to send|couldn't send|could not send|not sent|unable to send|send failed)\b", spoken))
+            self.store.transition_draft(draft_id, {"approved"}, "failed" if failed else "sent",
+                                        error=(notice_text(spoken, 200) or f"status {status}") if failed else None)
+            self.store.progress(key, "milestone", "Email failed to send" if failed else "Email sent")
+        elif action == "revise":
+            _, drafts = extract_email_drafts(output or "")
+            if status == "completed" and drafts:
+                self.store.add_draft(key, draft["_session_id"], drafts[-1])  # supersedes the revising one
+                self.store.progress(key, "milestone", "Revised email draft ready")
+            else:
+                self.store.transition_draft(draft_id, {"revising"}, "pending", error="No revised draft came back")
+        self.publish_all(key)
+        interaction = self.interaction_for_key(key)
+        if interaction is not None and interaction.worker is not None and spoken:
+            interaction.worker.speak_from_thread("session.commentary.append", spoken)
+
+    @staticmethod
+    def _draft_view(draft: dict[str, Any]) -> dict[str, Any]:
+        return {"draft": {k: v for k, v in draft.items() if not k.startswith("_")}}
+
+    # -- settings / brief / status / onboarding ---------------------------------------------------
+    def get_settings(self) -> dict[str, Any]:
+        return {"settings": self.settings.get()}
+
+    def patch_settings(self, body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return {"settings": self.settings.patch(body)}
+        except SettingsError as exc:
+            raise ServiceError(400, str(exc)) from None
+
+    def get_brief(self) -> dict[str, Any]:
+        return self.brief.get()
+
+    def put_brief(self, body: dict[str, Any]) -> dict[str, Any]:
+        if set(body) != {"brief"}:
+            raise ServiceError(400, "body must be {\"brief\": \"...\"}")
+        try:
+            return self.brief.put(body["brief"])
+        except BriefInvalid as exc:
+            raise ServiceError(422, str(exc)) from None
+
+    def rewrite_brief(self) -> dict[str, Any]:
+        try:
+            return {**self.brief.rewrite(force=True), "brief": self.brief.text()}
+        except BriefInvalid as exc:
+            raise ServiceError(409, str(exc)) from None
+
+    def codex_state(self) -> tuple[bool, bool, str]:
+        s = self.settings.get()
+        binary = find_codex(s["voice"]["codex_path"])
+        if self._codex_login is not None:
+            ok, msg = self._codex_login(binary)
+        else:
+            from .codex_transport import login_status
+            ok, msg = login_status(binary)
+        return binary is not None, ok, msg
+
+    def status(self) -> dict[str, Any]:
+        s = self.settings.get()
+        found, signed_in, codex_message = self.codex_state()
+        api_key_set = bool(self.openai_key())
+        provider = s["voice"]["provider"]
+        voice_ready = signed_in if provider == "codex" else api_key_set
+        return {
+            "assistant_name": s["assistant_name"], "user_name": s["user_name"], "provider": provider,
+            "voice": default_voice(s), "voice_ready": voice_ready,
+            "codex_found": found, "codex_signed_in": signed_in, "codex_message": codex_message,
+            "api_key_set": api_key_set, "brief_state": self.brief.status()["state"],
+            "hermes_api_ok": self.hermes.health(), "hermes_api_key_set": bool(self.hermes_key()),
+            "delivery_target": s["delivery"]["target"], "threads_supported": D.threads_supported(),
+            "continuity_enabled": s["continuity"]["enabled"], "devices": len(self.devices.devices()),
+            "version": __version__,
+        }
+
+    def destinations(self) -> dict[str, Any]:
+        return {**D.destinations(self.home), "current": self.settings.get()["delivery"]["target"],
+                "threads_supported": D.threads_supported()}
+
+    def onboarding(self) -> dict[str, Any]:
+        s = self.settings.get()
+        _, signed_in, message = self.codex_state()
+        voice_ready = signed_in if s["voice"]["provider"] == "codex" else bool(self.openai_key())
+        brief_state = self.brief.status()["state"]
+        steps = {
+            "paired": bool(self.devices.devices()),
+            "codex_signed_in": signed_in,
+            "voice_ready": voice_ready,
+            "names_set": s["onboarding"]["names_set"],
+            "delivery_set": s["onboarding"]["delivery_set"],
+            "brief_ready": brief_state in {"ready", "edited"},
+        }
+        required = ("paired", "voice_ready", "names_set", "delivery_set")
+        return {"steps": steps, "complete": all(steps[k] for k in required), "brief_state": brief_state,
+                "codex_message": message, "assistant_name": s["assistant_name"], "user_name": s["user_name"],
+                "delivery_target": s["delivery"]["target"]}
+
+    def save_onboarding(self, body: dict[str, Any]) -> dict[str, Any]:
+        allowed = {"assistant_name", "user_name", "delivery_target", "write_brief"}
+        if not isinstance(body, dict) or not set(body) <= allowed or not body:
+            raise ServiceError(400, f"body may contain only: {', '.join(sorted(allowed))}")
+        patch: dict[str, Any] = {}
+        onboarding: dict[str, bool] = {}
+        if "assistant_name" in body or "user_name" in body:
+            for key in ("assistant_name", "user_name"):
+                if key in body:
+                    patch[key] = body[key]
+            onboarding["names_set"] = True
+        if "delivery_target" in body:
+            if not valid_delivery_target(body["delivery_target"]):
+                raise ServiceError(400, "delivery_target must be none or a Hermes send target like telegram or discord:<chat_id>")
+            patch["delivery"] = {"target": body["delivery_target"]}
+            onboarding["delivery_set"] = True
+        if onboarding:
+            patch["onboarding"] = onboarding
+        if patch:
+            self.patch_settings(patch)
+        if body.get("write_brief") is True:
+            try:
+                self.brief.rewrite(force=False)
+            except BriefInvalid:
+                pass
+        return {**self.onboarding(), "settings": self.settings.get()}
+
+
+def transport_answer(transport: Any) -> str:
+    return getattr(transport, "_answer", "") or ""

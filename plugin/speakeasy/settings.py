@@ -1,0 +1,266 @@
+"""Server-side settings and the Hermes-side values Speakeasy reads (never writes secrets here).
+
+``<HERMES_HOME>/speakeasy/settings.json`` (0600) holds only non-secret preferences. The optional
+OpenAI API key is read from the Hermes profile scope / ``.env`` as ``SPEAKEASY_OPENAI_API_KEY`` and
+the Hermes API server key/port from ``API_SERVER_KEY`` / ``API_SERVER_PORT``; neither is ever
+stored in settings or returned by a route.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import os
+import re
+import shutil
+import threading
+from pathlib import Path
+from typing import Any
+
+DEFAULT_PORT = 8795
+DEFAULT_HERMES_API_PORT = 8642
+OPENAI_KEY_NAME = "SPEAKEASY_OPENAI_API_KEY"
+
+DEFAULTS: dict[str, Any] = {
+    "assistant_name": "Hermes",
+    "user_name": "",
+    "machine_description": "this Mac",
+    "voice": {"provider": "codex", "voice": "", "codex_path": "", "max_call_minutes": 30},
+    "idle_pause_minutes": 5,
+    "instructions_extra": "",
+    "hermes_profile": "",
+    "delivery": {"target": "none", "new_thread_per_task": False},
+    "continuity": {"enabled": True},
+    "brief": {"auto_refresh": True, "include_recent_voice": True},
+    "image_roots": [],
+    # Set by POST /voice/onboarding (or `hermes voice config set`) when the user confirmed them.
+    "onboarding": {"names_set": False, "delivery_set": False},
+}
+DEFAULT_VOICES = {"codex": "cove", "openai": "marin"}
+
+# Hermes `hermes send` target: platform, platform:chat_id, platform:chat_id:thread_id, platform:#name.
+DELIVERY_TARGET_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}(?::(?:#[A-Za-z0-9_.-]{1,80}|[A-Za-z0-9_@+.=-]{1,128})(?::[A-Za-z0-9_.-]{1,64})?)?$")
+NAME_RE = re.compile(r"^[^\x00-\x1f{}<>`]{0,40}$")
+VOICE_RE = re.compile(r"^[a-z0-9_-]{0,32}$")
+PROFILE_RE = re.compile(r"^[A-Za-z0-9_-]{0,64}$")
+
+
+class SettingsError(ValueError):
+    pass
+
+
+def _merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    out = copy.deepcopy(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def valid_delivery_target(value: Any) -> bool:
+    return isinstance(value, str) and (value == "none" or bool(DELIVERY_TARGET_RE.fullmatch(value)))
+
+
+def validate(settings: dict[str, Any]) -> dict[str, Any]:
+    """Return a clean copy or raise SettingsError naming the first bad field."""
+    s = _merge(DEFAULTS, {k: v for k, v in settings.items() if k in DEFAULTS})
+    for key in ("assistant_name", "user_name"):
+        if not isinstance(s[key], str) or not NAME_RE.fullmatch(s[key].strip()):
+            raise SettingsError(f"{key} must be a short name (up to 40 characters)")
+        s[key] = s[key].strip()
+    if not s["assistant_name"]:
+        s["assistant_name"] = DEFAULTS["assistant_name"]
+    if not isinstance(s["machine_description"], str) or not 0 < len(s["machine_description"].strip()) <= 80:
+        raise SettingsError("machine_description must be 1-80 characters")
+    s["machine_description"] = s["machine_description"].strip()
+    voice = s["voice"]
+    if voice.get("provider") not in {"codex", "openai"}:
+        raise SettingsError("voice.provider must be codex or openai")
+    if not isinstance(voice.get("voice"), str) or not VOICE_RE.fullmatch(voice["voice"]):
+        raise SettingsError("voice.voice must be a voice name")
+    if not isinstance(voice.get("codex_path"), str) or len(voice["codex_path"]) > 512:
+        raise SettingsError("voice.codex_path must be a path")
+    if not isinstance(voice.get("max_call_minutes"), int) or not 1 <= voice["max_call_minutes"] <= 240:
+        raise SettingsError("voice.max_call_minutes must be 1-240")
+    if not isinstance(s["idle_pause_minutes"], int) or not 0 <= s["idle_pause_minutes"] <= 120:
+        raise SettingsError("idle_pause_minutes must be 0-120")
+    if not isinstance(s["instructions_extra"], str) or len(s["instructions_extra"]) > 1000:
+        raise SettingsError("instructions_extra must be at most 1000 characters")
+    if not isinstance(s["hermes_profile"], str) or not PROFILE_RE.fullmatch(s["hermes_profile"]):
+        raise SettingsError("hermes_profile must be a profile name")
+    delivery = s["delivery"]
+    if not valid_delivery_target(delivery.get("target")):
+        raise SettingsError("delivery.target must be none or a Hermes send target like telegram or discord:<chat_id>")
+    if not isinstance(delivery.get("new_thread_per_task"), bool):
+        raise SettingsError("delivery.new_thread_per_task must be true or false")
+    for group, keys in (("continuity", ("enabled",)), ("brief", ("auto_refresh", "include_recent_voice")),
+                        ("onboarding", ("names_set", "delivery_set"))):
+        for key in keys:
+            if not isinstance(s[group].get(key), bool):
+                raise SettingsError(f"{group}.{key} must be true or false")
+    roots = s["image_roots"]
+    if not isinstance(roots, list) or len(roots) > 8 or not all(
+            isinstance(r, str) and Path(r).expanduser().is_absolute() for r in roots):
+        raise SettingsError("image_roots must be a list of absolute paths")
+    return s
+
+
+def _write_private(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+class Settings:
+    """Thread-safe settings file. `get()` always returns a validated full copy."""
+
+    def __init__(self, hermes_home: Path):
+        self.hermes_home = Path(hermes_home)
+        self.path = self.hermes_home / "speakeasy" / "settings.json"
+        self._lock = threading.Lock()
+
+    def exists(self) -> bool:
+        return self.path.exists()
+
+    def get(self) -> dict[str, Any]:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raw = {}
+        try:
+            return validate(raw if isinstance(raw, dict) else {})
+        except SettingsError:
+            return copy.deepcopy(DEFAULTS)
+
+    def save(self, settings: dict[str, Any]) -> dict[str, Any]:
+        clean = validate(settings)
+        with self._lock:
+            _write_private(self.path, json.dumps(clean, indent=2) + "\n")
+        return clean
+
+    def patch(self, patch: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(patch, dict):
+            raise SettingsError("JSON object required")
+        unknown = set(patch) - set(DEFAULTS)
+        if unknown:
+            raise SettingsError(f"unknown setting: {sorted(unknown)[0]}")
+        return self.save(_merge(self.get(), patch))
+
+    def ensure(self) -> dict[str, Any]:
+        return self.get() if self.exists() else self.save({})
+
+
+# -- dotted get/set for `hermes voice config` -------------------------------------------
+
+def get_path(settings: dict[str, Any], dotted: str) -> Any:
+    node: Any = settings
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            raise SettingsError(f"unknown setting: {dotted}")
+        node = node[part]
+    return node
+
+
+def patch_for(dotted: str, raw: str) -> dict[str, Any]:
+    """`voice.provider=openai` → {"voice": {"provider": "openai"}}; JSON values accepted."""
+    try:
+        value: Any = json.loads(raw)
+    except ValueError:
+        value = raw
+    if isinstance(get_path(DEFAULTS, dotted), str) and not isinstance(value, str):
+        value = raw
+    out: dict[str, Any] = {}
+    node = out
+    parts = dotted.split(".")
+    for part in parts[:-1]:
+        node[part] = {}
+        node = node[part]
+    node[parts[-1]] = value
+    return out
+
+
+# -- Hermes-side values ------------------------------------------------------------------
+
+def read_env_file(path: Path) -> dict[str, str]:
+    """Parse a Hermes .env (via Hermes' own tokenizer when importable)."""
+    try:
+        from agent.secret_scope import load_env_file  # type: ignore
+        return dict(load_env_file(path))
+    except Exception:
+        pass
+    out: dict[str, str] = {}
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.removeprefix("export ").partition("=")
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            out[key.strip()] = value
+    except OSError:
+        pass
+    return out
+
+
+def hermes_secret(hermes_home: Path, name: str) -> str:
+    """A value from this profile's .env, else the Hermes secret scope, else the process env.
+
+    The profile .env comes first: HTTP handler threads do not carry the gateway's profile scope,
+    and the home is resolved once at construction.
+    """
+    value = read_env_file(Path(hermes_home) / ".env").get(name, "").strip()
+    if value:
+        return value
+    try:
+        from agent.secret_scope import get_secret  # type: ignore
+        value = get_secret(name) or ""
+        if value:
+            return str(value).strip()
+    except Exception:
+        pass
+    return os.environ.get(name, "").strip()
+
+
+def _hermes_config(hermes_home: Path) -> dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+        data = yaml.safe_load((Path(hermes_home) / "config.yaml").read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def hermes_api_base(hermes_home: Path) -> str:
+    """Loopback URL of the Hermes API server (config.yaml platforms.api_server.port, else env)."""
+    cfg = _hermes_config(hermes_home)
+    port: Any = None
+    platforms = cfg.get("platforms") if isinstance(cfg.get("platforms"), dict) else {}
+    api = platforms.get("api_server") if isinstance(platforms, dict) else None
+    if isinstance(api, dict):
+        port = (api.get("extra") or {}).get("port") if isinstance(api.get("extra"), dict) else None
+        port = port or api.get("port")
+    port = port or hermes_secret(hermes_home, "API_SERVER_PORT") or DEFAULT_HERMES_API_PORT
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = DEFAULT_HERMES_API_PORT
+    return f"http://127.0.0.1:{port}"
+
+
+def find_codex(configured: str = "") -> Path | None:
+    if configured:
+        path = Path(configured).expanduser()
+        return path if path.is_file() and os.access(path, os.X_OK) else None
+    found = shutil.which("codex")
+    return Path(found) if found else None
+
+
+def default_voice(settings: dict[str, Any]) -> str:
+    voice = settings["voice"]
+    return voice.get("voice") or DEFAULT_VOICES[voice["provider"]]

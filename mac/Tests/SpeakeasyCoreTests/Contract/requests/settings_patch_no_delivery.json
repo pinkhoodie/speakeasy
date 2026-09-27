@@ -1,0 +1,25 @@
+{
+  "body" : {
+    "assistant_name" : "Nova",
+    "brief" : {
+      "auto_refresh" : true,
+      "include_recent_voice" : true
+    },
+    "continuity" : {
+      "enabled" : true
+    },
+    "delivery" : {
+      "new_thread_per_task" : false,
+      "target" : "none"
+    },
+    "idle_pause_minutes" : 5,
+    "instructions_extra" : "",
+    "user_name" : "Sam",
+    "voice" : {
+      "provider" : "codex",
+      "voice" : ""
+    }
+  },
+  "method" : "PATCH",
+  "path" : "\/voice\/settings"
+}

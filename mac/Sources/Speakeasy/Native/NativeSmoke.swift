@@ -1,0 +1,184 @@
+import AppKit
+import AVFoundation
+import Foundation
+import SpeakeasyCore
+
+/// Offline smoke checks and canned UI previews. None of these touch the network.
+@MainActor
+enum NativeSmoke {
+    /// Build a real local offer (receive-only transceiver, no mic), print its shape.
+    static func offer() {
+        let engine = NativeCallEngine()
+        Task { @MainActor in
+            do {
+                try engine.prepare(captureAudio: false)
+                let sdp = try await engine.createOffer(iceTimeout: 5)
+                let lines = sdp.components(separatedBy: .newlines).filter { !$0.isEmpty }
+                let audio = lines.contains { $0.hasPrefix("m=audio") }
+                let data = lines.contains { $0.hasPrefix("m=application") }
+                let crlf = sdp.hasSuffix("\r\n")
+                print("native-offer-smoke ok sdp_lines=\(lines.count) bytes=\(sdp.utf8.count) m_audio=\(audio) m_application=\(data) trailing_crlf=\(crlf)")
+                engine.close()
+                exit(0)
+            } catch {
+                print("native-offer-smoke failed: \(error.localizedDescription)")
+                engine.close()
+                exit(1)
+            }
+        }
+    }
+
+    /// Permission + one second of capture; prints peak level. No network.
+    static func mic() {
+        AVCaptureDevice.requestAccess(for: .audio) { granted in
+            guard granted else { print("native-mic-smoke denied"); exit(2) }
+            DispatchQueue.main.async {
+                let engine = AVAudioEngine()
+                let input = engine.inputNode
+                let format = input.outputFormat(forBus: 0)
+                var peak: Float = 0
+                var frames = 0
+                let lock = NSLock()
+                input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+                    guard let channel = buffer.floatChannelData?[0] else { return }
+                    var local: Float = 0
+                    for i in 0..<Int(buffer.frameLength) { local = max(local, abs(channel[i])) }
+                    lock.lock(); peak = max(peak, local); frames += Int(buffer.frameLength); lock.unlock()
+                }
+                do { try engine.start() } catch { print("native-mic-smoke failed: \(error.localizedDescription)"); exit(1) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    engine.stop(); input.removeTap(onBus: 0)
+                    lock.lock(); let p = peak; let f = frames; lock.unlock()
+                    print(String(format: "native-mic-smoke ok peak=%.4f frames=%d rate=%.0f", p, f, format.sampleRate))
+                    exit(0)
+                }
+            }
+        }
+    }
+}
+
+/// Canned states for `--ui-preview <state>`.
+enum PreviewFixtures {
+    /// A drawn stand-in for a Hermes render, so the image card previews without a api.
+    static func sampleImage() -> Data? {
+        let image = NSImage(size: NSSize(width: 640, height: 400), flipped: false) { rect in
+            NSGradient(starting: .systemOrange, ending: .systemPurple)?.draw(in: rect, angle: 35)
+            NSColor.white.withAlphaComponent(0.85).setFill()
+            NSBezierPath(ovalIn: NSRect(x: 250, y: 120, width: 140, height: 180)).fill()
+            return true
+        }
+        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "email-draft", "ended"]
+
+    static func state(_ name: String) -> (VoiceState, workExpanded: Bool)? {
+        let now = Date()
+        var s = VoiceState()
+        s.now = now
+        s.connection = .live
+        s.interactionID = "vi_preview"
+        let request = WorkEventItem(kind: "request", text: "Can you check whether my UA 123 flight tomorrow is still on time and text Dana if it moved?", at: now - 95)
+        func work(_ status: String, short: String?, age: TimeInterval, stale: Bool = false, result: WorkResult? = nil) -> WorkInfo {
+            WorkInfo(runID: "run_preview", status: status, stale: stale, updated: now - age,
+                     shortStatus: short, detail: "Comparing United's live status page with FlightAware",
+                     updatedAt: now - age, statusSource: "authored",
+                     events: [request,
+                              WorkEventItem(kind: "milestone", text: "Opened United flight status", at: now - 80),
+                              WorkEventItem(kind: "milestone", text: "Found departure gate C71", at: now - 40)],
+                     result: result)
+        }
+        switch name {
+        case "listening":
+            s.exchange = Exchange(you: "What's on my calendar after lunch?", assistant: "", replyStarted: false)
+        case "speaking":
+            s.speech = .speaking(lastDelta: now)
+            s.exchange = Exchange(you: "What's on my calendar after lunch?",
+                                  assistant: "You have the design review at two, then a call with Dana at four thirty.", replyStarted: true)
+        case "muted":
+            s.mic = .muted
+        case "working":
+            s.runID = "run_preview"; s.delegationAt = now - 95
+            s.workInfo = work("working", short: "Checking UA 123 status", age: 4)
+            s.exchange = Exchange(you: "Is my flight tomorrow on time?", assistant: "I'll check United and let you know.", replyStarted: true)
+        case "waiting":
+            s.delegationAt = now - 92
+            s.exchange = Exchange(you: "Is my flight tomorrow on time?", assistant: "On it.", replyStarted: true)
+        case "stale":
+            s.runID = "run_preview"; s.delegationAt = now - 300
+            s.workInfo = work("working", short: "Checking UA 123 status", age: 140)
+        case "approval":
+            s.runID = "run_preview"; s.delegationAt = now - 120
+            s.workInfo = work("waiting_for_approval", short: "Ready to text Dana", age: 6)
+            s.approval = ApprovalInfo(runID: "run_preview", requestID: "req_preview",
+                                      description: "Send an iMessage to Dana: “Flight moved to 9:40, landing 12:15.”")
+        case "done":
+            s.runID = "run_preview"; s.delegationAt = now - 200
+            s.workInfo = work("completed", short: "Done", age: 3,
+                              result: WorkResult(spoken: "UA 123 is on time",
+                                                 full: "United 123 departs Newark (EWR) at 9:05 AM from gate C71 and is on time.\nLive status: https://www.united.com/en/us/flightstatus",
+                                                 label: "Flight checked"))
+            s.exchange = Exchange(you: "Is my flight tomorrow on time?", assistant: "Yes — UA 123 is on time from gate C71.", replyStarted: true)
+        case "products":
+            let raw: [String: Any] = ["name": "KEF LSX II LT", "url": "https://example.com/kef",
+                                      "price": "$999", "store": "Example store", "rating": "4.5",
+                                      "specs": ["AirPlay 2", "Stereo pair", "Compact"]]
+            let product = ProductCard(json: raw, number: 1)!
+            let result = WorkResult(spoken: "I put the speaker on screen.",
+                                    full: "The KEF LSX II LT is the compact option.", products: [product])
+            s.workInfo = work("completed", short: "Speakers compared", age: 3, result: result)
+            s.tasks = [TaskItem(id: "speaker", info: s.workInfo!)]
+            s.runID = "run_preview"
+        case "image":
+            let result = WorkResult(spoken: "The picture is on screen.", full: "Here's concept 6, the voxel flame.",
+                                    label: "Concept drawn", images: [ImageCard(number: 1, name: "voxel-flame-concept-06.png")])
+            s.workInfo = work("completed", short: "Concept drawn", age: 3, result: result)
+            s.tasks = [TaskItem(id: "concept", info: s.workInfo!)]
+            s.runID = "run_preview"
+        case "tasks", "tasklist", "paused":
+            func item(_ id: String, _ status: String, _ text: String, title: String?, short: String?, age: TimeInterval,
+                      result: WorkResult? = nil) -> TaskItem {
+                TaskItem(id: id, info: WorkInfo(runID: "run_\(id)", status: status, updated: now - age, shortStatus: short,
+                                                updatedAt: now - age, statusSource: "authored",
+                                                events: [WorkEventItem(kind: "request", text: text, at: now - age - 60)],
+                                                result: result, title: title))
+            }
+            s.tasks = [
+                item("d0", "completed", "Where did we leave off with the iOS app?", title: "iOS app status", short: "Done", age: 90,
+                     result: WorkResult(spoken: "Built, never run on your phone.", full: nil, label: nil)),
+                item("d1", "completed", "What's the weather tomorrow in Brooklyn?", title: "Brooklyn weather tomorrow", short: "Done", age: 40,
+                     result: WorkResult(spoken: "Sunny, 72.", full: "Sunny, high of 72.", label: "Weather checked")),
+                item("d2", "working", "Restock the snack cart with salty stuff, about $60", title: "Restock snack cart", short: "Comparing Costco and Amazon", age: 5),
+                item("d3", "waiting_for_approval", "Text Dana that I'm running late", title: nil, short: "Ready to text Dana", age: 3),
+            ]
+            s.runID = "run_d2"; s.delegationAt = now - 65
+            s.workInfo = s.tasks[2].info
+            s.exchange = Exchange(you: "Salty, around sixty bucks.", assistant: "Got it — looking into that now.", replyStarted: true)
+            if name == "paused" { s.connection = .paused; s.resumeFrom = "vi_preview" }
+        case "email-draft":
+            let draft = EmailDraft(draftID: "draft_preview", sha256: "0f3a9c", from: "you@example.com",
+                                   to: ["dana@example.com"], cc: ["sam@example.com"],
+                                   subject: "Running a little late",
+                                   body: "Hi Dana,\n\nMy flight moved to 9:40, so I'll land around 12:15. Could we push lunch to 1:30?\n\nThanks!")
+            s.runID = "run_preview"; s.delegationAt = now - 60
+            s.workInfo = work("waiting_for_approval", short: "Drafted an email to Dana", age: 4)
+            s.workInfo?.emailDrafts = [draft]
+            s.tasks = [TaskItem(id: "email", info: s.workInfo!)]
+            s.exchange = Exchange(you: "Email Dana that I'm running late.", assistant: "I drafted it — take a look.", replyStarted: true)
+        case "ended":
+            s.connection = .ended(.complete)
+            s.interactionID = nil
+            s.exchange = Exchange(you: "That's all, thanks.", assistant: "Talk soon.", replyStarted: true)
+        case "expanded":
+            s.runID = "run_preview"; s.delegationAt = now - 95
+            s.workInfo = work("working", short: "Checking UA 123 status", age: 4)
+            s.workInfo?.events.append(WorkEventItem(kind: "milestone", text: "Checking inbound aircraft", at: now - 4))
+            s.exchange = Exchange(you: "Is my flight tomorrow on time?", assistant: "I'll check.", replyStarted: true)
+        default:
+            return nil
+        }
+        s.work = deriveWork(s, now: now)
+        return (s, name == "expanded" || name == "tasklist" || name == "products" || name == "image")
+    }
+}
