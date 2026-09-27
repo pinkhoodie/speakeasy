@@ -54,6 +54,7 @@ class OpenTask:
     request: str
     status: str
     result: str = ""
+    age_s: float | None = None   # seconds since it started, when known
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,10 +68,35 @@ def _words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 and w not in _STOP}
 
 
+FRAGMENT_WINDOW_S = 45
+# How a trailing half-thought starts: a joiner, or a bare question that leans on the previous one.
+_FRAGMENT_START = re.compile(
+    r"(?i)^(?:and|or|plus|also|like|oh|if|whether|gonna|going to|am i|are (?:we|they|you)|is (?:it|he|she|that)|"
+    r"will (?:i|we|it|they|he|she)|would (?:i|we|it)|can (?:i|we|it)|do (?:i|we|they)|does (?:it|he|she)|did (?:i|we|it|they))\b")
+
+
+def continues_newest(request: str, tasks: list[OpenTask]) -> OpenTask | None:
+    """The newest task, when this request is a short tail of it: said within seconds, while it
+    runs, and too thin to stand alone ("...gonna win?" after "How's my league team doing").
+    """
+    if not tasks:
+        return None
+    newest = tasks[-1]
+    if newest.status not in {"admitting", "working", "running"} or newest.age_s is None:
+        return None
+    words = re.findall(r"[A-Za-z0-9']+", request)
+    if newest.age_s > FRAGMENT_WINDOW_S or not words or len(words) > 7:
+        return None
+    return newest if _FRAGMENT_START.search(request.strip()) else None
+
+
 def route(request: str, tasks: list[OpenTask], marked_task_id: Any = None) -> list[Part]:
     """One Part: the request as a new task, or a follow-up to one open task."""
     request = (request or "").strip()
     open_tasks = tasks[-MAX_OPEN_TASKS:]
+    tail = continues_newest(request, open_tasks)
+    if tail is not None and not (isinstance(marked_task_id, str) and marked_task_id != tail.task_id):
+        return [Part("follow_up", request, tail.task_id)]
     if isinstance(marked_task_id, str) and TASK_ID_RE.fullmatch(marked_task_id):
         if any(t.task_id == marked_task_id for t in open_tasks):
             return [Part("follow_up", request, marked_task_id)]
@@ -107,14 +133,18 @@ class Decision:
 
 
 def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic]) -> list[dict[str, str]]:
-    open_lines = "\n".join(f"- {t.task_id}: {t.request[:200]} ({t.status})" for t in tasks[-MAX_OPEN_TASKS:]) or "none"
+    open_lines = "\n".join(f"- {t.task_id}: {t.request[:200]} ({t.status}"
+                           + (f", started {int(t.age_s)}s ago" if t.age_s is not None else "") + ")"
+                           for t in tasks[-MAX_OPEN_TASKS:]) or "none"
     channel_lines = "\n".join(f"- {c.label}: {c.topic or 'no description'}" for c in topics) or "none"
     return [
         {"role": "system", "content":
             "You route one spoken request for a voice assistant. Reply with strict JSON only, no prose: "
             '{"follow_up_task_id": string or null, "parts": [strings], "channel": string or null}. '
             "follow_up_task_id: the id of an open task ONLY when the request clearly adds to, changes, corrects "
-            "or asks about that task; else null. parts: when not a follow-up, the request as 1 to 4 independent, "
+            "or asks about that task; else null. People pause mid-thought: a short fragment said seconds after "
+            "a task started that only makes sense as the end of that request (\"...and am I gonna win?\") is a "
+            "follow-up to it, never a new task. parts: when not a follow-up, the request as 1 to 4 independent, "
             "self-contained asks (split only clearly separate asks; keep one ask whole; each part must make sense "
             "alone). channel: the label of the channel whose description clearly fits, else null."},
         {"role": "user", "content": f"Open tasks:\n{open_lines}\n\nChannels:\n{channel_lines}\n\n"
@@ -208,6 +238,9 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
     open_tasks = tasks[-MAX_OPEN_TASKS:]
     if isinstance(marked_task_id, str) and any(t.task_id == marked_task_id for t in open_tasks):
         return Decision([Part("follow_up", request, marked_task_id)], None, "marked")
+    tail = continues_newest(request, open_tasks)
+    if tail is not None and marked_task_id in (None, "", tail.task_id):
+        return Decision([Part("follow_up", request, tail.task_id)], None, "fragment")
     started = time.monotonic()
     decision = None
     if needs_model(request, open_tasks, topics):

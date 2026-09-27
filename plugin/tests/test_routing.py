@@ -454,3 +454,67 @@ def test_routing_call_runs_in_the_plugin_profile_scope(monkeypatch):
     with router._profile_scope():
         pass
     assert entered == ["/tmp/hermes-home"]
+
+
+# -- a pause mid-request stays one task -----------------------------------------------------------
+
+def test_a_short_tail_right_after_a_task_joins_it():
+    running = [router.OpenTask("t1", "How's my league team doing", "running", "", 8.0)]
+    for tail in ("gonna win", "and am I gonna win?", "or should I bench someone"):
+        decision = router.decide(tail, running, None, [], call=lambda m: (_ for _ in ()).throw(AssertionError))
+        assert decision.parts[0].kind == "follow_up" and decision.parts[0].task_id == "t1", tail
+    # Too late, not running, or a full request of its own: a new task.
+    late = [router.OpenTask("t1", "How's my league team doing", "running", "", 120.0)]
+    done = [router.OpenTask("t1", "How's my league team doing", "completed", "", 8.0)]
+    assert router.route("gonna win", late)[0].kind == "new"
+    assert router.route("gonna win", done)[0].kind == "new"
+    assert router.route("book dinner for four on Friday at the Italian place", running)[0].kind == "new"
+
+
+def test_the_routing_model_sees_how_recently_tasks_started():
+    msgs = router.route_messages("gonna win", [router.OpenTask("t1", "league team", "running", "", 8.4)], [])
+    assert "started 8s ago" in msgs[1]["content"] and "People pause mid-thought" in msgs[0]["content"]
+
+
+def test_a_tail_during_a_thread_task_joins_that_thread(server, service, hermes, monkeypatch):
+    import threading as _th
+    release = _th.Event()
+
+    class SlowThreads(FakeThreads):
+        def wait(self, opened, on_session, on_title=None):
+            on_session("thread_session_1")
+            release.wait(10)
+            return self.answer
+
+    conv = continuity.Conversation("thread_session_1", "discord", "999", "thread", "999", "42", "111",
+                                   "Server / #work / League", "League team", time.time())
+    sent = []
+    monkeypatch.setattr(continuity, "conversation_by_session", lambda db, sid: conv if sid == "thread_session_1" else None)
+    monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
+    monkeypatch.setattr(continuity, "ensure_alias", lambda c: None)
+
+    def fake_stream(base, key, c, message, callback, **k):
+        sent.append((c.session_id, message))
+        callback("run.started", {"run_id": "run_tail1"})
+        callback("assistant.completed", {"content": "You're projected to win by 12."})
+        callback("run.completed", {})
+        return True
+    monkeypatch.setattr(continuity, "stream_session_chat", fake_stream)
+    service.rt.threads = SlowThreads()
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [dict(WORK, new_thread=True)]}})
+    _, worker = start_call(server, service)
+    worker.delegate("call_a", "Put this in work: how's my league team doing")
+    first = wait_for(lambda: next(iter(worker.interaction.runs.values()), None))
+    wait_for(lambda: service.store.continued_for(first.idem_key))
+    worker.feed({"type": "session.output_transcript.delta", "delta": "On it.", "start_ms": 3, "end_ms": 4})
+    worker.delegate("call_b", "gonna win")
+    from speakeasy.calls import interaction_tasks
+    panel = lambda: interaction_tasks(service.store, worker.interaction)
+    time.sleep(0.5)
+    assert len(panel()) == 1 and len(tasks(server)) == 1  # the tail joins the task; no second row
+    assert "joined" not in str(spoken(worker)) and sent == []  # waits for the first turn
+    release.set()
+    wait_for(lambda: sent)
+    assert sent[0][0] == "thread_session_1" and "gonna win" in sent[0][1]
+    final = wait_for(lambda: [t for t in panel() if t["status"] == "completed" and "12" in str(t.get("result"))])
+    assert len(panel()) == 1 and len(tasks(server)) == 1 and final

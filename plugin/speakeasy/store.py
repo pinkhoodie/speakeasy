@@ -142,6 +142,15 @@ class StateStore:
                     done.append(run_id)
         return done
 
+    def hide_key(self, key: str) -> None:
+        """Keep a row out of the task list regardless of status (a tail waiting to join its task)."""
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET dismissed=1 WHERE idem_key=?", (key,))
+
+    def unhide_key(self, key: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET dismissed=NULL WHERE idem_key=?", (key,))
+
     def dismiss_key(self, key: str) -> bool:
         settled = sorted(TERMINAL | {"rejected"})
         marks = ",".join("?" * len(settled))

@@ -59,7 +59,10 @@ spctl -a -t open --context context:primary-signature -v "$DMG"
 shasum -a 256 "$DMG" | tee "$DMG.sha256"
 
 if [[ "$PUBLISH" == "--publish" ]]; then
-    gh release create "v$VERSION" "$DMG" "$DMG.sha256" --title "Speakeasy $VERSION" \
+    # Also as a fixed name, so https://github.com/rungmc357/speakeasy/releases/latest/download/Speakeasy.dmg
+    # always downloads the newest app directly (the website's Download button).
+    cp "$DMG" "$ROOT/dist/Speakeasy.dmg"
+    gh release create "v$VERSION" "$DMG" "$DMG.sha256" "$ROOT/dist/Speakeasy.dmg" --title "Speakeasy $VERSION" \
         --notes "Signed and notarized macOS app (macOS 14+). Open the dmg and drag Speakeasy into Applications."
 fi
 echo "$DMG"

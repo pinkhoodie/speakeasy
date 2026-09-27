@@ -31,6 +31,7 @@ MAX_TASKS = 8
 ACTIVE_RUN_STATES = {"admitting", "running", "working", "waiting_for_approval", "resolving_approval",
                      "cancel_requested"}
 CONTINUITY_WAIT_S = 600
+THREAD_OPEN_WAIT_S = 20
 CONTINUITY_POLL_S = 5
 # Spoken progress: only for tasks running this long, at most once per task per PROGRESS_EVERY_S,
 # and only when the user hasn't spoken since the last update.
@@ -555,16 +556,17 @@ class SidebandWorker:
 
     def open_tasks(self) -> list[router.OpenTask]:
         with self.interaction.lock:
-            runs = [(r.delegation_id, r.idem_key, r.status) for r in self.interaction.runs.values()
+            runs = [(r.delegation_id, r.idem_key, r.status, r.started) for r in self.interaction.runs.values()
                     if r.status != "rejected"]
         tasks = []
-        for task_id, key, status in runs[-MAX_TASKS:]:
+        now = time.monotonic()
+        for task_id, key, status, started in runs[-MAX_TASKS:]:
             request = self.store.request_text(key)
             if not request:
                 continue
             work = self.store.work(idem_key=key) or {}
             spoken = ((work.get("result") or {}).get("spoken") or "") if status == "completed" else ""
-            tasks.append(router.OpenTask(task_id, request, status, spoken))
+            tasks.append(router.OpenTask(task_id, request, status, spoken, round(now - started, 1)))
         return tasks
 
     async def dispatch(self, delegation_id: str, revision: int, context: str, marked: Any = None) -> None:
@@ -658,10 +660,18 @@ class SidebandWorker:
             return
         earlier = notice_text(self.store.request_text(key), 200) or "an earlier request"
         placed = self.store.continued_for(key)
+        opening_thread = placed is None and not run_id and status in ACTIVE_RUN_STATES and target.deliver_to
+        waited = 0.0
+        while opening_thread and placed is None and waited < THREAD_OPEN_WAIT_S:
+            await asyncio.sleep(1.0)  # a thread task that just started: its session appears in seconds
+            waited += 1.0
+            placed = self.store.continued_for(key)
         if placed is not None:
             conv = await asyncio.to_thread(continuity.conversation_by_session, self.rt.state_db, placed["session_id"])
             if conv is not None:
-                await self.start_continuity_task(delegation_id, revision, context, part.request, conv)
+                joins = status in ACTIVE_RUN_STATES
+                await self.start_continuity_task(delegation_id, revision, context, part.request, conv,
+                                                 joins=target if joins else None)
                 return
         if run_id and status in {"running", "working"}:
             accepted = await asyncio.to_thread(self.hermes.steer, run_id, P.steer_text(self.names, part.request))
@@ -757,13 +767,21 @@ class SidebandWorker:
             await self.append("session.commentary.append", delegation_id, P.FAILED_SPOKEN)
 
     async def start_continuity_task(self, task_id: str, revision: int, context: str, request: str,
-                                    conv: continuity.Conversation) -> None:
+                                    conv: continuity.Conversation, joins: "BackendRun | None" = None) -> None:
         """Run the request inside an existing Hermes conversation's own session: it sees that
         conversation's history, and the reply posts back to that chat."""
         idem = self._idem(task_id, revision)
-        backend = BackendRun(task_id, revision, idem)
+        backend = BackendRun(task_id, revision, idem, deliver_to=joins.deliver_to if joins else None)
         delegation_id = backend.say_id
-        self._register(task_id, backend)
+        if joins is None:
+            self._register(task_id, backend)
+        else:
+            # Part of a task still running: no new row. It goes into the same thread after that
+            # turn and takes over the row then, so the panel shows one task with one final answer.
+            earlier = notice_text(self.store.request_text(joins.idem_key), 200) or "the task"
+            self.store.progress(joins.idem_key, "milestone", f"You added: {notice_text(request, 200)}")
+            await self.append("session.thinking.append", delegation_id, P.added_to_task_note(earlier))
+            self.handoff_at.pop(delegation_id, None)
         self.publish()
         state, known_run = self.store.reserve_run(idem, self.interaction.interaction_id, task_id, revision)
         if state != "created":
@@ -778,9 +796,27 @@ class SidebandWorker:
         self.store.progress(idem, "request", request)
         self.store.set_title(idem, short_title(request))
         self.store.progress(idem, "milestone", f"Continuing in {where}")
+        if joins is not None:
+            self.store.hide_key(idem)
         self.publish()
-        await self.append("session.thinking.append", delegation_id, P.continuing_in_note(where))
-        self.handoff_at.pop(delegation_id, None)
+        if joins is None:
+            await self.append("session.thinking.append", delegation_id, P.continuing_in_note(where))
+            self.handoff_at.pop(delegation_id, None)
+        waited = 0
+        while joins is not None:  # hold until the first turn is done, then take over its row
+            with self.interaction.lock:
+                first_done = joins.status not in ACTIVE_RUN_STATES
+            if first_done or waited >= CONTINUITY_WAIT_S:
+                self.store.unhide_key(idem)
+                replaced_key = self._register(task_id, backend, replaces=joins.delegation_id)
+                if replaced_key:
+                    self.store.dismiss_key(replaced_key)
+                self.store.set_title(idem, self.store.title(joins.idem_key) or short_title(request))
+                self.publish()
+                joins = None
+                break
+            await asyncio.sleep(CONTINUITY_POLL_S)
+            waited += CONTINUITY_POLL_S
         waited = 0
         while await asyncio.to_thread(continuity.session_busy, self.rt.state_db, conv.session_id):
             if waited == 0:
