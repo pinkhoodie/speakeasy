@@ -189,6 +189,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/voice/tasks/dismiss":
                 self._reply(200, self.service.dismiss_tasks(self._body()))
                 return
+            if path == "/voice/destinations/suggest":
+                self._reply(200, self.service.suggest_channels())
+                return
             if path == "/voice/brief/rewrite":
                 self._reply(202, self.service.rewrite_brief())
                 return

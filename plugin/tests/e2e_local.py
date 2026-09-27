@@ -28,7 +28,8 @@ shutil.copytree(PLUGIN_SRC, home / "plugins/speakeasy", ignore=shutil.ignore_pat
 (home / "config.yaml").write_text(  # what `hermes plugins enable` writes, plus a Telegram home channel
     "plugins:\n  enabled:\n    - speakeasy\n"
     "platforms:\n  telegram:\n    enabled: true\n    home_channel:\n      platform: telegram\n"
-    "      chat_id: '555000111'\n      name: Sam\n")
+    "      chat_id: '555000111'\n      name: Sam\n"
+    "  webhook:\n    enabled: true\n    extra:\n      host: 127.0.0.1\n      port: 8644\n")
 # A gateway that has Telegram and Discord connected and has seen a few chats (no real IDs).
 (home / "channel_directory.json").write_text(json.dumps({"platforms": {
     "telegram": [{"id": "555000111", "name": "Sam", "type": "dm"}],

@@ -46,8 +46,22 @@ def register(ctx) -> None:
         required_env=[], install_hint="No extra packages needed (stdlib only)",
         emoji="\U0001f399", allow_update_command=False, platform_hint=_PLATFORM_HINT,
     )
+    _register_routing_task(ctx)
     ctx.register_cli_command(
         "voice", help="Speakeasy voice: setup, pairing and devices",
         setup_fn=setup_parser, handler_fn=handle,
         description="Set up Speakeasy, pair a Mac, list or revoke paired devices.",
     )
+
+
+def _register_routing_task(ctx) -> None:
+    """One auxiliary task for all request routing, so the user picks its model in their own Hermes
+    (``hermes model`` → auxiliary tasks, or ``auxiliary.speakeasy_router`` in config.yaml)."""
+    from .router import AUX_DESCRIPTION, AUX_DISPLAY_NAME, AUX_TASK
+    register = getattr(ctx, "register_auxiliary_task", None)
+    if not callable(register):
+        return  # older Hermes: routing uses the auxiliary default
+    try:
+        register(AUX_TASK, display_name=AUX_DISPLAY_NAME, description=AUX_DESCRIPTION, defaults={"timeout": 3})
+    except Exception as exc:
+        logger.warning("speakeasy: could not register the routing task: %s", exc)

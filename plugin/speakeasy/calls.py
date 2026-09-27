@@ -19,7 +19,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
-from . import continuity, router
+from . import channels, continuity, router
 from .prompt import builder as P
 from .text import (ID_RE, MAX_TRANSCRIPT, TERMINAL, clean_transcript, delivery_text, derive_tool_status,
                    interim_progress, notice_text, safe_user_text, short_title, split_result)
@@ -32,6 +32,12 @@ ACTIVE_RUN_STATES = {"admitting", "running", "working", "waiting_for_approval", 
                      "cancel_requested"}
 CONTINUITY_WAIT_S = 600
 CONTINUITY_POLL_S = 5
+# Spoken acknowledgement: skip it when the voice model already spoke this long after the handoff.
+ACK_RECENT_S = 3.0
+# Spoken progress: only for tasks running this long, at most once per task per PROGRESS_EVERY_S,
+# and only when the user hasn't spoken since the last update.
+PROGRESS_AFTER_S = 20.0
+PROGRESS_EVERY_S = 30.0
 
 
 class ServiceError(Exception):
@@ -51,6 +57,10 @@ class Runtime:
     image_roots: Callable[[], tuple[Path, ...]]
     notices: "Notices"
     hermes_key: Callable[[], str] = lambda: ""
+    # Routing: the model call (None = Hermes' auxiliary client, task speakeasy_router) and the
+    # new-thread runner (None = channels only get results posted, never a thread).
+    route_call: Callable[[list[dict[str, str]]], str | None] | None = None
+    threads: Any = None
 
     @property
     def names(self) -> P.Names:
@@ -63,6 +73,20 @@ class Runtime:
     def delivery_label(self) -> str:
         from .delivery import target_label
         return target_label(self.settings()["delivery"]["target"])
+
+    def channel_label(self, target: str) -> str:
+        found = next((c for c in channels.opted_in(self.settings()) if c.target == target), None)
+        return found.label if found else self.delivery_label()
+
+    def route(self, request: str, tasks: list[router.OpenTask], marked: Any) -> router.Decision:
+        topics = [router.Topic(c.label, c.topic) for c in channels.opted_in(self.settings())]
+        return router.decide(request, tasks, marked, topics, self.route_call)
+
+    def explicit_channel(self, request: str) -> channels.Choice | None:
+        return channels.explicit(request, self.settings(), P.clarify_channel)
+
+    def topical_channel(self, picked: str | None) -> channels.Choice:
+        return channels.resolve(self.settings(), self.delivery_label(), picked)
 
 
 # -- live event feed ------------------------------------------------------------------------
@@ -115,6 +139,10 @@ class BackendRun:
     error: str | None = None
     # A part split from one spoken request, or a follow-up run: the voice delegation it answers.
     voice_id: str | None = None
+    # Where the finished answer is posted when it is not the default target (a routed channel).
+    deliver_to: str | None = None
+    started: float = dataclasses.field(default_factory=time.monotonic)
+    spoken_at: float = 0.0          # last spoken progress line for this task (monotonic)
 
     @property
     def say_id(self) -> str:
@@ -242,8 +270,8 @@ class Notices:
         if notifier is not None:
             threading.Thread(target=self._worker, daemon=True, name="speakeasy-notices").start()
 
-    def post(self, dedupe_key: str, text: str, limit: int = 600) -> bool:
-        target = self.target()
+    def post(self, dedupe_key: str, text: str, limit: int = 600, target: str | None = None) -> bool:
+        target = target or self.target()
         if self.notifier is None or not target or target == "none" or not text.strip():
             return False
         try:
@@ -274,11 +302,12 @@ class Notices:
     def needs_you(self, request_id: str, summary: str | None) -> None:
         self.post(f"approval:{request_id}", P.needs_you_notice(self.names(), summary))
 
-    def answered(self, run_id: str, full: str | None) -> None:
-        """Post a finished answer in full, once per run (`hermes send` splits long text)."""
+    def answered(self, run_id: str, full: str | None, target: str | None = None) -> None:
+        """Post a finished answer in full, once per run (`hermes send` splits long text), to the
+        task's routed channel when it has one, else the default target."""
         text = (full or "").strip()
         if text:
-            self.post(f"answer:{run_id}", text, limit=20000)
+            self.post(f"answer:{run_id}", text, limit=20000, target=target)
 
     def stopped(self, run_id: str, status: str, request: str | None) -> None:
         self.post(f"stopped:{run_id}", P.stopped_notice(self.names(), status, request))
@@ -296,6 +325,8 @@ class SidebandWorker:
         self.rt, self.store, self.hermes, self.interaction = rt, rt.store, rt.hermes, interaction
         self.notices = rt.notices
         self.fragments: deque[dict[str, Any]] = deque(maxlen=512)
+        self.handoff_at: dict[str, float] = {}   # delegation id -> when the handoff arrived (monotonic)
+        self.route_timings: dict[str, int] = {}  # task id -> routing latency (ms), stored with the task
         self.delegations: set[str] = set()
         self.dispatch_tasks: set[asyncio.Task[Any]] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -395,7 +426,7 @@ class SidebandWorker:
                 return
             self.touch()
             speaker = "user" if kind.startswith("session.input") else "assistant"
-            self.fragments.append({"speaker": speaker, "text": delta,
+            self.fragments.append({"speaker": speaker, "text": delta, "at": time.monotonic(),
                                    "start_ms": int(event.get("start_ms", 0)), "end_ms": int(event.get("end_ms", 0))})
             return
         if kind == "session.delegation.created":
@@ -421,6 +452,7 @@ class SidebandWorker:
             self.publish()
 
     def schedule_dispatch(self, delegation_id: str, context: str, marked: Any = None) -> None:
+        self.handoff_at[delegation_id] = time.monotonic()
         with self.interaction.lock:
             self.interaction.revision += 1
             revision = self.interaction.revision
@@ -479,6 +511,48 @@ class SidebandWorker:
             return
         asyncio.run_coroutine_threadsafe(worker._send(kind, None, content[:2000]), loop)
 
+    # -- spoken acknowledgement and progress -------------------------------------------------
+    def assistant_spoke_since(self, since: float) -> bool:
+        return any(f["speaker"] == "assistant" and f.get("at", 0) >= since and clean_transcript(f["text"]).strip()
+                   for f in list(self.fragments))
+
+    def user_spoke_since(self, since: float) -> bool:
+        return any(f["speaker"] == "user" and f.get("at", 0) >= since and clean_transcript(f["text"]).strip()
+                   for f in list(self.fragments))
+
+    async def acknowledge(self, delegation_id: str, line: str, *, force: bool = False) -> None:
+        """Say ONE short line the moment work starts, so the call never goes silent while a task runs.
+        Skipped when the voice model already said something since this handoff (its own
+        \"on it\"), unless ``force``: a line that carries news (where the task went) is always said."""
+        started = self.handoff_at.pop(delegation_id, None)
+        if not force:
+            recent = time.monotonic() - ACK_RECENT_S
+            since = min(started, recent) if started is not None else recent
+            if self.assistant_spoke_since(since):
+                return
+        await self.append("session.commentary.append", delegation_id, line)
+
+    def record_timing(self, task_id: str, idem: str) -> None:
+        ms = self.route_timings.pop(task_id, None)
+        if ms is not None:
+            self.store.set_timing(idem, "routing_ms", ms)
+
+    async def maybe_speak_progress(self, backend: BackendRun, milestone: str) -> None:
+        """A long task with a new milestone gets one brief spoken update, at most once per 30 s, and
+        only while the user is quiet (never talk over them or chain updates)."""
+        now = time.monotonic()
+        with self.interaction.lock:
+            last = backend.spoken_at or backend.started
+            if (now - backend.started < PROGRESS_AFTER_S or (backend.spoken_at and now - backend.spoken_at < PROGRESS_EVERY_S)
+                    or backend.status not in {"running", "working"}):
+                return
+            if self.user_spoke_since(last):
+                backend.spoken_at = now  # they talked meanwhile: restart the quiet window
+                return
+            backend.spoken_at = now
+        if self.call_connected():
+            await self.append("session.commentary.append", backend.say_id, P.progress_line(backend.idem_key, milestone))
+
     # -- dispatch ---------------------------------------------------------------------------
     def _idem(self, key: str, revision: int) -> str:
         return "se_" + hashlib.sha256(
@@ -513,16 +587,58 @@ class SidebandWorker:
             return
         last_request = next((line[6:].strip() for line in reversed(context.splitlines())
                              if line.startswith("User: ")), "")
-        parts = router.route(last_request, self.open_tasks(), marked)
-        part = parts[0]
+        decision = await asyncio.to_thread(self.rt.route, last_request, self.open_tasks(), marked)
+        self.route_timings[delegation_id] = decision.latency_ms
+        part = decision.parts[0]
         if part.kind == "follow_up" and part.task_id:
             await self.follow_up(delegation_id, revision, context, part)
             return
-        conv = await self.match_conversation(last_request)
-        if conv is not None:
-            await self.start_continuity_task(delegation_id, revision, context, last_request, conv)
+        named = self.rt.explicit_channel(last_request)
+        if named is None and len(decision.parts) == 1:
+            conv = await self.match_conversation(last_request)
+            if conv is not None:
+                await self.start_continuity_task(delegation_id, revision, context, last_request, conv)
+                return
+        choice = named or self.rt.topical_channel(decision.channel)
+        if len(decision.parts) > 1 and not choice.clarify:
+            await self.start_parts(delegation_id, revision, context, [p.request for p in decision.parts], choice)
             return
-        await self.start_task(delegation_id, revision, context, last_request)
+        await self.start_routed(delegation_id, revision, context, last_request, choice)
+
+    async def start_parts(self, delegation_id: str, revision: int, context: str, parts: list[str],
+                          choice: channels.Choice) -> None:
+        """A compound request: one parallel task per part, one spoken acknowledgement for all."""
+        channel = choice.channel
+        deliver_to = channel.target if channel is not None and not channel.default else None
+        await self.append("session.thinking.append", delegation_id, P.split_note(self.names, parts))
+        await self.acknowledge(delegation_id, P.ack_parts(len(parts)))
+        self.route_timings.update({f"{delegation_id}-p{i}": self.route_timings.get(delegation_id, 0)
+                                   for i in range(len(parts))})
+        await asyncio.gather(*(self.start_task(f"{delegation_id}-p{i}", revision, context, part, focus=part,
+                                               voice_id=delegation_id, deliver_to=deliver_to)
+                               for i, part in enumerate(parts)))
+
+    async def start_routed(self, delegation_id: str, revision: int, context: str, request: str,
+                           choice: channels.Choice) -> None:
+        """A new task, placed by channel routing: ask when unclear, open a thread where the
+        channel wants one (and Hermes can), else run here and post the answer to the channel."""
+        if choice.clarify:
+            self.handoff_at.pop(delegation_id, None)
+            await self.append("session.commentary.append", delegation_id, choice.clarify)
+            return
+        channel = choice.channel
+        routed = channel is not None and not channel.default
+        runner = self.rt.threads
+        if channel is not None and channel.new_thread and runner is not None:
+            available = await asyncio.to_thread(runner.available, channel.target)
+            if available:
+                await self.start_thread_task(delegation_id, revision, context, request, channel)
+                return
+        if routed:
+            await self.start_task(delegation_id, revision, context, request, deliver_to=channel.target,
+                                  ack=P.ack_channel_post(channel.label))
+            return
+        await self.start_task(delegation_id, revision, context, request)
 
     async def match_conversation(self, request: str) -> continuity.Conversation | None:
         if not request or not self.rt.settings()["continuity"]["enabled"]:
@@ -559,13 +675,16 @@ class SidebandWorker:
                 with self.interaction.lock:
                     self.interaction.latest_delegation_id = target.delegation_id
                 self.publish()
-                await self.append("session.commentary.append", delegation_id, P.added_to_task_note(earlier))
+                await self.append("session.thinking.append", delegation_id, P.added_to_task_note(earlier))
+                await self.acknowledge(delegation_id, P.ack_follow_up(self.store.title(key) or earlier))
                 return
         work = self.store.work(idem_key=key) or {}
         result = notice_text((work.get("result") or {}).get("spoken"), 300)
         focus = P.follow_up_focus(part.request, earlier, result, status)
         await self.start_task(delegation_id, revision, context, f"{part.request} (following up: {earlier})",
-                              focus=focus, session_id=self.store.session_for(key), replaces=target.delegation_id)
+                              focus=focus, session_id=self.store.session_for(key), replaces=target.delegation_id,
+                              deliver_to=target.deliver_to,
+                              ack=P.ack_follow_up(self.store.title(key) or earlier))
 
     def _register(self, task_id: str, backend: BackendRun, replaces: str | None = None) -> str | None:
         replaced_key = None
@@ -583,9 +702,10 @@ class SidebandWorker:
 
     async def start_task(self, task_id: str, revision: int, context: str, request: str,
                          focus: str | None = None, voice_id: str | None = None,
-                         session_id: str | None = None, replaces: str | None = None) -> None:
+                         session_id: str | None = None, replaces: str | None = None,
+                         deliver_to: str | None = None, ack: str | None = None) -> None:
         idem = self._idem(task_id, revision)
-        backend = BackendRun(task_id, revision, idem, voice_id=voice_id)
+        backend = BackendRun(task_id, revision, idem, voice_id=voice_id, deliver_to=deliver_to)
         delegation_id = backend.say_id
         replaced_key = self._register(task_id, backend, replaces)
         if replaced_key:
@@ -593,7 +713,8 @@ class SidebandWorker:
         self.publish()
         if not session_id:
             session_id = TASK_SESSION_PREFIX + hashlib.sha256(idem.encode()).hexdigest()[:24]
-        prompt = P.build_task_prompt(self.names, revision, context, focus, self.rt.delivery_label())
+        label = self.rt.channel_label(deliver_to) if deliver_to else self.rt.delivery_label()
+        prompt = P.build_task_prompt(self.names, revision, context, focus, label)
         state, known_run = self.store.reserve_run(idem, self.interaction.interaction_id, task_id, revision)
         if state != "created":
             if known_run:
@@ -602,6 +723,7 @@ class SidebandWorker:
             self.publish()
             return
         self.store.set_session(idem, session_id)
+        self.record_timing(task_id, idem)
         if request:
             self.store.progress(idem, "request", request)
             self.store.set_title(idem, short_title(request))
@@ -611,6 +733,7 @@ class SidebandWorker:
         parallel = [r for r in (notice_text(self.store.request_text(k), 80) for k in others[-4:]) if r]
         if voice_id is None:
             await self.append("session.thinking.append", delegation_id, P.work_started_note(parallel))
+            await self.acknowledge(delegation_id, ack or P.ack_new(idem), force=bool(deliver_to and not replaces))
         try:
             run_id = await asyncio.to_thread(self.hermes.start_run, prompt, idem, session_id)
             self.store.update_run(idem, run_id, "running")
@@ -656,12 +779,14 @@ class SidebandWorker:
             self.publish()
             return
         where = notice_text(conv.where, 100) or "that"
+        self.record_timing(task_id, idem)
         self.store.set_continued(idem, conv.session_id, conv.where)
         self.store.progress(idem, "request", request)
         self.store.set_title(idem, short_title(request))
         self.store.progress(idem, "milestone", f"Continuing in {where}")
         self.publish()
-        await self.append("session.commentary.append", delegation_id, P.continuing_in_note(where))
+        await self.append("session.thinking.append", delegation_id, P.continuing_in_note(where))
+        await self.acknowledge(delegation_id, P.ack_continuing(conv.label))
         waited = 0
         while await asyncio.to_thread(continuity.session_busy, self.rt.state_db, conv.session_id):
             if waited == 0:
@@ -712,6 +837,60 @@ class SidebandWorker:
             self.publish()
             await self.append("session.commentary.append", delegation_id, P.continuing_failed_note(where))
 
+    async def start_thread_task(self, task_id: str, revision: int, context: str, request: str,
+                                channel: channels.Channel) -> None:
+        """Open a new thread in the channel and run the task there, as if typed in it: the user can
+        follow up in that thread, and the call hears its first answer. Falls back to running here
+        and posting the answer to the channel when Hermes can't open the thread."""
+        from .threads import ThreadError
+        idem = self._idem(task_id, revision)
+        backend = BackendRun(task_id, revision, idem, deliver_to=channel.target)
+        delegation_id = backend.say_id
+        self._register(task_id, backend)
+        self.publish()
+        summary = notice_text(request, 200) or "voice request"
+        message = P.thread_task_message(self.names, request, summary, context)
+        try:
+            opened = await asyncio.to_thread(self.rt.threads.open, channel.target, message=message,
+                                             title=short_title(request) or "Voice task", delivery_id=idem)
+        except (ThreadError, OSError) as exc:
+            logger.info("speakeasy: new thread unavailable, posting to the channel instead (%s)", exc)
+            await self.start_task(task_id, revision, context, request, deliver_to=channel.target,
+                                  ack=P.ack_channel_post(channel.label))
+            return
+        state, _ = self.store.reserve_run(idem, self.interaction.interaction_id, task_id, revision)
+        if state != "created":
+            self.publish()
+            return
+        where = f"a new {channel.label} thread"
+        self.record_timing(task_id, idem)
+        self.store.progress(idem, "request", request)
+        self.store.set_title(idem, short_title(request))
+        self.store.update_run(idem, None, "running")
+        self.store.progress(idem, "milestone", f"Started in {where}")
+        with self.interaction.lock:
+            backend.status = "running"
+        self.publish()
+        await self.acknowledge(delegation_id, P.ack_channel_thread(channel.label), force=True)
+
+        def on_session(session_id: str) -> None:
+            # Follow-ups to this task continue inside the thread (thread continuity).
+            self.store.set_continued(idem, session_id, f"{channel.label} thread")
+
+        try:
+            answer = await asyncio.to_thread(self.rt.threads.wait, opened, on_session)
+        except Exception as exc:
+            answer, backend.error = None, type(exc).__name__
+        if answer is None:
+            self.store.user_progress(idem, "In the thread", f"The answer will land in {where}")
+            self.store.update_run(idem, None, "ambiguous")
+            with self.interaction.lock:
+                backend.status = "ambiguous"
+            self.publish()
+            return
+        await self.handle_hermes_event(backend, {"event": "run.completed", "output": P.without_voice_header(answer),
+                                                 "continued": True})
+
     async def reconcile_stream_end(self, backend: BackendRun, cause: Exception | None = None) -> None:
         if not backend.run_id:
             raise ServiceError(502, "Hermes stream ended before a run ID was assigned")
@@ -755,6 +934,7 @@ class SidebandWorker:
                     self.store.user_progress(idem, *progress)
                     self.store.progress(idem, "milestone", progress[1])
                     await self.append("session.thinking.append", delegation_id, progress[1])
+                    await self.maybe_speak_progress(backend, progress[0])
             elif backend.status != "ambiguous":
                 derived = derive_tool_status(event.get("tool"), event.get("preview"))
                 if derived:
@@ -799,7 +979,7 @@ class SidebandWorker:
             if status != "completed" and backend.run_id:
                 self.notices.stopped(backend.run_id, status, self.store.request_text(idem))
             if status == "completed" and backend.run_id and result and not event.get("continued"):
-                self.notices.answered(backend.run_id, delivery_text(result))
+                self.notices.answered(backend.run_id, delivery_text(result), backend.deliver_to)
             for draft in stored_drafts:
                 if not self.call_connected():
                     self.notices.draft_waiting(draft["draft_id"], draft.get("subject"))

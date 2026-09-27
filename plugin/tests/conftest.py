@@ -8,6 +8,15 @@ import pytest
 from fakes import FakeHermesServer, FakeLiveWorker, FakeTransport, make_home, http  # noqa: F401
 
 
+@pytest.fixture(autouse=True)
+def no_real_routing_model(monkeypatch):
+    """Never call the user's real auxiliary model from tests: routing falls back to the rules
+    unless a test passes its own ``route_call``."""
+    from speakeasy import router
+    monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S: None)
+    monkeypatch.setattr(router, "routing_model", lambda config=None: "Hermes auxiliary default (auto)")
+
+
 @pytest.fixture
 def hermes():
     server = FakeHermesServer()

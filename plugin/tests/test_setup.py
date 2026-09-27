@@ -17,7 +17,8 @@ class Fake:
     """Records commands; answers like a machine with Codex signed in and Hermes running."""
 
     def __init__(self, *, codex_signed_in=True, codex_installed=True, restart_ok=True, comes_up=True,
-                 brew=True, answers=None, secret="", interactive=True, tailscale_dns="box.tail123.ts.net"):
+                 brew=True, answers=None, secret="", interactive=True, tailscale_dns="box.tail123.ts.net",
+                 tailscale="missing", serve_error=""):
         self.cmds: list[list[str]] = []
         self.lines: list[str] = []
         self.codex_signed_in, self.codex_installed = codex_signed_in, codex_installed
@@ -25,6 +26,7 @@ class Fake:
         self.answers = list(answers or [])
         self.secret_value, self.interactive, self.dns = secret, interactive, tailscale_dns
         self.restarted = False
+        self.tailscale, self.serve_error = tailscale, serve_error
         self.health_checks = 0
         self.now = 0.0
 
@@ -45,9 +47,11 @@ class Fake:
             self.codex_installed = True
             return SimpleNamespace(returncode=0)
         if "status" in cmd and "--json" in cmd:
-            return SimpleNamespace(returncode=0, stdout='{"Self": {"DNSName": "%s."}}' % self.dns, stderr="")
+            state = "Running" if self.tailscale == "running" else "Stopped"
+            return SimpleNamespace(returncode=0, stdout='{"BackendState": "%s", "Self": {"DNSName": "%s."}}'
+                                   % (state, self.dns if state == "Running" else ""), stderr="")
         if "serve" in cmd:
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(returncode=1 if self.serve_error else 0, stdout="", stderr=self.serve_error)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     def ask(self, prompt):
@@ -60,7 +64,7 @@ class Fake:
 
     def which(self, name):
         return {"brew": "/opt/homebrew/bin/brew" if self.brew else None,
-                "tailscale": "/usr/local/bin/tailscale"}.get(name)
+                "tailscale": None if self.tailscale == "missing" else "/usr/local/bin/tailscale"}.get(name)
 
     def env(self):
         return F.Env(run=self.run, ask=self.ask, secret=lambda p: self.secret_value, out=self.lines.append,
@@ -89,7 +93,7 @@ def _codex(tmp_path, holder):
 
 
 def args(**kw):
-    base = dict(voice_command="setup", server="", tailscale=False, api_key=False, send="", yes=False,
+    base = dict(voice_command="setup", server="", tailscale=False, no_tailscale=False, api_key=False, send="", yes=False,
                 no_restart=False, no_open=True)
     base.update(kw)
     return Namespace(**base)
@@ -172,13 +176,79 @@ def test_rejects_something_that_is_not_an_api_key(home):
 
 
 def test_tailscale_serves_tailnet_only_and_links_to_it(home):
-    fake = Fake()
+    fake = Fake(tailscale="running")
     rc, _ = run_setup(fake, tailscale=True, yes=True)
     assert rc == 0
     serve = next(c for c in fake.cmds if "serve" in c)
     assert "funnel" not in " ".join(serve) and "--bg" in serve
     text = "\n".join(fake.lines)
     assert "https%3A%2F%2Fbox.tail123.ts.net%3A8795" in text
+
+
+def test_running_tailnet_is_imported_without_a_flag_and_remembered_for_pair(home, capsys):
+    fake = Fake(tailscale="running", interactive=False)
+    rc, opened = run_setup(fake, yes=True, no_open=False)
+    assert rc == 0 and opened == []  # the Mac is elsewhere: never open the link on this host
+    text = "\n".join(fake.lines)
+    assert "✓ Tailscale detected" in text and "https://box.tail123.ts.net:8795" in text and "┏" in text
+    assert not any("funnel" in " ".join(c) for c in fake.cmds)
+    stored = S.Settings(home).get()["server"]
+    assert stored == {"advertised_url": "https://box.tail123.ts.net:8795", "tailscale_name": "box.tail123.ts.net"}
+    assert "Pairing code:" in text
+    assert cli.cmd_pair(Namespace(server="", send=""), home) == 0
+    assert "https%3A%2F%2Fbox.tail123.ts.net%3A8795" in capsys.readouterr().out
+
+
+def test_stopped_tailnet_warns_prominently_and_stays_local(home):
+    fake = Fake(tailscale="stopped")
+    rc, opened = run_setup(fake, yes=True, no_open=False)
+    assert rc == 0 and len(opened) == 1 and "127.0.0.1" in opened[0]
+    text = "\n".join(fake.lines)
+    assert "not connected" in text and "tailscale up" in text and "┏" in text
+    assert not any("serve" in c for c in fake.cmds)
+    assert S.Settings(home).get()["server"]["advertised_url"] == ""
+
+
+def test_no_tailscale_is_one_quiet_line(home):
+    fake = Fake(tailscale="missing")
+    rc, _ = run_setup(fake, yes=True)
+    text = "\n".join(fake.lines)
+    assert rc == 0 and "Tailscale not found" in text and "┏" not in text
+
+
+def test_no_tailscale_flag_skips_detection(home):
+    fake = Fake(tailscale="running")
+    rc, _ = run_setup(fake, yes=True, no_tailscale=True)
+    assert rc == 0 and not any(c and c[0].endswith("/tailscale") for c in fake.cmds)
+
+
+def test_serve_certificate_failure_prints_the_fix_and_falls_back(home):
+    fake = Fake(tailscale="running", serve_error="error: HTTPS certificates are not enabled for this tailnet")
+    rc, opened = run_setup(fake, yes=True, no_open=False)
+    text = "\n".join(fake.lines)
+    assert rc == 0 and "https://login.tailscale.com/admin/dns" in text and "HTTPS Certificates" in text
+    assert len(opened) == 1 and "127.0.0.1" in opened[0]
+    assert S.Settings(home).get()["server"]["advertised_url"] == ""
+
+
+def test_remote_pairing_offers_to_send_the_link_to_a_chat(home, monkeypatch):
+    import json as _json
+    (home / "gateway_state.json").write_text(_json.dumps({"platforms": {"telegram": {"state": "connected"}}}))
+    (home / "channel_directory.json").write_text(_json.dumps(
+        {"platforms": {"telegram": [{"id": "555000111", "name": "Sam", "type": "dm"}]}}))
+    sent = []
+    monkeypatch.setattr(cli, "_send_link", lambda h, target, link, out: sent.append((target, link)) or True)
+    fake = Fake(tailscale="running", answers=[""])
+    rc, opened = run_setup(fake, yes=True, no_open=False)
+    assert rc == 0 and opened == []
+    assert sent and sent[0][0] == "telegram:555000111" and "box.tail123.ts.net" in sent[0][1]
+    assert any("another computer" in line for line in fake.lines)
+
+
+def test_setup_prints_the_routing_model(home):
+    fake = Fake()
+    run_setup(fake, yes=True)
+    assert any("Task routing uses" in line and "speakeasy_router" in line for line in fake.lines)
 
 
 def test_existing_key_and_config_are_kept(home):

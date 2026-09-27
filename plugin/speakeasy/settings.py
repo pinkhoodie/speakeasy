@@ -28,10 +28,15 @@ DEFAULTS: dict[str, Any] = {
     "idle_pause_minutes": 5,
     "instructions_extra": "",
     "hermes_profile": "",
-    "delivery": {"target": "none", "new_thread_per_task": False},
+    # target: the default destination; new_thread: open a thread there per task (where supported);
+    # channels: extra opted-in destinations a new task is routed to by topic or by name.
+    "delivery": {"target": "none", "new_thread": False, "channels": []},
     "continuity": {"enabled": True},
     "brief": {"auto_refresh": True, "include_recent_voice": True},
     "image_roots": [],
+    # Written by `hermes voice setup`: the URL other devices use to reach this server (a tailnet
+    # HTTPS name when Tailscale was imported), reused by `hermes voice pair`.
+    "server": {"advertised_url": "", "tailscale_name": ""},
     # Set by POST /voice/onboarding (or `hermes voice config set`) when the user confirmed them.
     "onboarding": {"names_set": False, "delivery_set": False},
 }
@@ -39,6 +44,8 @@ DEFAULT_VOICES = {"codex": "cove", "openai": "marin"}
 
 # Hermes `hermes send` target: platform, platform:chat_id, platform:chat_id:thread_id, platform:#name.
 DELIVERY_TARGET_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}(?::(?:#[A-Za-z0-9_.-]{1,80}|[A-Za-z0-9_@+.=-]{1,128})(?::[A-Za-z0-9_.-]{1,64})?)?$")
+MAX_CHANNELS = 8
+CHANNEL_LABEL_RE = re.compile(r"^#?[^\x00-\x1f{}<>`#]{1,40}$")
 NAME_RE = re.compile(r"^[^\x00-\x1f{}<>`]{0,40}$")
 VOICE_RE = re.compile(r"^[a-z0-9_-]{0,32}$")
 PROFILE_RE = re.compile(r"^[A-Za-z0-9_-]{0,64}$")
@@ -89,11 +96,8 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
         raise SettingsError("instructions_extra must be at most 1000 characters")
     if not isinstance(s["hermes_profile"], str) or not PROFILE_RE.fullmatch(s["hermes_profile"]):
         raise SettingsError("hermes_profile must be a profile name")
-    delivery = s["delivery"]
-    if not valid_delivery_target(delivery.get("target")):
-        raise SettingsError("delivery.target must be none or a Hermes send target like telegram or discord:<chat_id>")
-    if not isinstance(delivery.get("new_thread_per_task"), bool):
-        raise SettingsError("delivery.new_thread_per_task must be true or false")
+    s["delivery"] = validate_delivery(s["delivery"])
+    s["server"] = validate_server(s["server"])
     for group, keys in (("continuity", ("enabled",)), ("brief", ("auto_refresh", "include_recent_voice")),
                         ("onboarding", ("names_set", "delivery_set"))):
         for key in keys:
@@ -104,6 +108,71 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
             isinstance(r, str) and Path(r).expanduser().is_absolute() for r in roots):
         raise SettingsError("image_roots must be a list of absolute paths")
     return s
+
+
+def validate_channel(raw: Any) -> dict[str, Any]:
+    """One opted-in delivery channel: {target, label, topic, new_thread}."""
+    if not isinstance(raw, dict):
+        raise SettingsError("delivery.channels entries must be objects")
+    target, label, topic = raw.get("target"), raw.get("label"), raw.get("topic", "")
+    if not valid_delivery_target(target) or target == "none":
+        raise SettingsError("delivery.channels[].target must be a Hermes send target like discord:<chat_id>")
+    if not isinstance(label, str) or not CHANNEL_LABEL_RE.fullmatch(label.strip()):
+        raise SettingsError("delivery.channels[].label must be a short name like #build (up to 40 characters)")
+    if not isinstance(topic, str) or len(topic.strip()) > 160 or any(c in topic for c in "{}<>`"):
+        raise SettingsError("delivery.channels[].topic must be a plain description (up to 160 characters)")
+    if not isinstance(raw.get("new_thread", False), bool):
+        raise SettingsError("delivery.channels[].new_thread must be true or false")
+    return {"target": target, "label": label.strip(), "topic": " ".join(topic.split()),
+            "new_thread": raw.get("new_thread", False)}
+
+
+ADVERTISED_URL_RE = re.compile(r"^https?://[A-Za-z0-9.\-\[\]:]{1,253}(?::\d{1,5})?/?$")
+
+
+def validate_server(server: dict[str, Any]) -> dict[str, Any]:
+    if set(server) - {"advertised_url", "tailscale_name"}:
+        raise SettingsError(f"unknown setting: server.{sorted(set(server) - {'advertised_url', 'tailscale_name'})[0]}")
+    url, name = server.get("advertised_url", ""), server.get("tailscale_name", "")
+    if not isinstance(url, str) or (url and not ADVERTISED_URL_RE.fullmatch(url)):
+        raise SettingsError("server.advertised_url must be an http(s) URL like https://host:8795")
+    if not isinstance(name, str) or len(name) > 253 or any(c in name for c in " /{}<>`"):
+        raise SettingsError("server.tailscale_name must be a host name")
+    return {"advertised_url": url.rstrip("/"), "tailscale_name": name}
+
+
+def validate_channels(raw: list[Any]) -> list[dict[str, Any]]:
+    channels = [validate_channel(c) for c in raw]
+    for field in ("target", "label"):
+        values = [c[field].lower().lstrip("#") for c in channels]
+        if len(values) != len(set(values)):
+            raise SettingsError(f"delivery.channels: two channels have the same {field}")
+    return channels
+
+
+def validate_delivery(delivery: dict[str, Any]) -> dict[str, Any]:
+    """The delivery block. Settings from before channels existed (``new_thread_per_task``) migrate:
+    that flag becomes ``new_thread`` on the default target."""
+    delivery = dict(delivery)
+    legacy = delivery.pop("new_thread_per_task", None)
+    if legacy is not None and not isinstance(legacy, bool):
+        raise SettingsError("delivery.new_thread_per_task must be true or false")
+    if legacy is True and delivery.get("new_thread") is False:
+        delivery["new_thread"] = True
+    unknown = set(delivery) - {"target", "new_thread", "channels"}
+    if unknown:
+        raise SettingsError(f"unknown setting: delivery.{sorted(unknown)[0]}")
+    if not valid_delivery_target(delivery.get("target")):
+        raise SettingsError("delivery.target must be none or a Hermes send target like telegram or discord:<chat_id>")
+    if not isinstance(delivery.get("new_thread"), bool):
+        raise SettingsError("delivery.new_thread must be true or false")
+    raw_channels = delivery.get("channels")
+    if not isinstance(raw_channels, list) or len(raw_channels) > MAX_CHANNELS:
+        raise SettingsError(f"delivery.channels must be a list of at most {MAX_CHANNELS} channels")
+    channels = validate_channels(raw_channels)
+    if delivery["target"] == "none":
+        delivery["new_thread"] = False
+    return {"target": delivery["target"], "new_thread": delivery["new_thread"], "channels": channels}
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -148,6 +217,12 @@ class Settings:
         unknown = set(patch) - set(DEFAULTS)
         if unknown:
             raise SettingsError(f"unknown setting: {sorted(unknown)[0]}")
+        delivery = patch.get("delivery")
+        if isinstance(delivery, dict) and "new_thread_per_task" in delivery and "new_thread" not in delivery:
+            # An older app sends the pre-channels flag: it means new_thread on the default target.
+            delivery = dict(delivery)
+            delivery["new_thread"] = delivery.pop("new_thread_per_task")
+            patch = {**patch, "delivery": delivery}
         return self.save(_merge(self.get(), patch))
 
     def ensure(self) -> dict[str, Any]:

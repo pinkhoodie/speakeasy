@@ -51,6 +51,9 @@ class StateStore:
                 draft_json TEXT NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL,
                 created REAL NOT NULL, updated REAL NOT NULL, action_run_id TEXT, error TEXT)""")
             self._db.execute("CREATE INDEX IF NOT EXISTS email_drafts_key ON email_drafts(idem_key, created)")
+            columns = {row[1] for row in self._db.execute("PRAGMA table_info(runs)")}
+            if "timings" not in columns:  # added after the first release
+                self._db.execute("ALTER TABLE runs ADD COLUMN timings TEXT")
 
     # -- session admission -------------------------------------------------------------
     def reserve_session(self, request_id: str, fingerprint: str, interaction_id: str) -> tuple[str, dict[str, Any] | None]:
@@ -146,6 +149,27 @@ class StateStore:
             cursor = self._db.execute(
                 f"UPDATE runs SET dismissed=1 WHERE idem_key=? AND status IN ({marks})", (key, *settled))
         return bool(cursor.rowcount)
+
+    def set_timing(self, key: str, name: str, ms: int) -> None:
+        """Internal per-task timings (e.g. routing latency), kept for diagnostics, never spoken."""
+        with self._lock, self._db:
+            row = self._db.execute("SELECT timings FROM runs WHERE idem_key=?", (key,)).fetchone()
+            if row is None:
+                return
+            try:
+                timings = json.loads(row[0] or "{}")
+            except ValueError:
+                timings = {}
+            timings[name] = int(ms)
+            self._db.execute("UPDATE runs SET timings=? WHERE idem_key=?", (json.dumps(timings), key))
+
+    def timings(self, key: str) -> dict[str, int]:
+        with self._lock:
+            row = self._db.execute("SELECT timings FROM runs WHERE idem_key=?", (key,)).fetchone()
+        try:
+            return json.loads(row[0]) if row and row[0] else {}
+        except ValueError:
+            return {}
 
     def update_run(self, key: str, run_id: str | None, status: str) -> None:
         now = time.time()

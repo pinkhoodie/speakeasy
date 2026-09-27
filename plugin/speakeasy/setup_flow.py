@@ -7,7 +7,8 @@ only opened once the voice server actually answers:
   2. Voice sign-in: ChatGPT through Codex (default), or an OpenAI API key.
   3. Restart the Hermes gateway (asked first; never from inside a Hermes chat) and wait for the
      voice server's /health.
-  4. Optionally publish the voice server on the user's tailnet (``--tailscale``).
+  4. Publish the voice server on the user's tailnet when Tailscale is connected (auto-detected;
+     ``--no-tailscale`` skips it) and remember that URL for `hermes voice pair`.
   5. Ask Hermes to write the voice brief, then create a pairing code and open/print the link.
 
 Every external command goes through ``Env.run`` so tests can replace it. Nothing here prints a
@@ -248,31 +249,79 @@ def start_voice_server(env: Env, home: Path, url: str, hermes_cmd: list[str], *,
 
 # -- 4. tailscale ---------------------------------------------------------------------------------
 
-def tailscale_url(env: Env, port: int) -> str | None:
-    """Publish the loopback voice server on the tailnet only (never Funnel) and return its URL."""
+TAILSCALE_HTTPS_FIX = ("Enable HTTPS in the Tailscale admin console: https://login.tailscale.com/admin/dns "
+                       "(HTTPS Certificates)")
+
+
+@dataclass(frozen=True)
+class Tailnet:
+    """What `tailscale status` says: state is "running", "stopped" or "missing"."""
+    state: str
+    dns: str = ""
+    binary: str = ""
+
+
+def banner(env: Env, lines: list[str]) -> None:
+    """A boxed block that is hard to miss in setup output."""
+    width = max(len(line) for line in lines) + 2
+    env.out("┏" + "━" * width + "┓")
+    for line in lines:
+        env.out("┃ " + line.ljust(width - 1) + "┃")
+    env.out("┗" + "━" * width + "┛")
+
+
+def tailnet_status(env: Env) -> Tailnet:
     binary = env.which("tailscale")
     if not binary:
-        env.out("✗ Tailscale isn't installed on this machine.")
-        return None
+        return Tailnet("missing")
     try:
-        status = env.run([binary, "status", "--json"], capture_output=True, text=True, timeout=15)
-        dns = (json.loads(getattr(status, "stdout", "") or "{}").get("Self") or {}).get("DNSName", "").rstrip(".")
-    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
-        dns = ""
-    if not dns:
-        env.out("✗ Couldn't read this machine's Tailscale name. Is Tailscale signed in?")
-        return None
+        done = env.run([binary, "status", "--json"], capture_output=True, text=True, timeout=15)
+        data = json.loads(getattr(done, "stdout", "") or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return Tailnet("stopped", binary=binary)
+    data = data if isinstance(data, dict) else {}
+    dns = str((data.get("Self") or {}).get("DNSName") or "").rstrip(".")
+    if data.get("BackendState") == "Running" and dns:
+        return Tailnet("running", dns, binary)
+    return Tailnet("stopped", binary=binary)
+
+
+def _serve_failure_is_https(done: Any) -> bool:
+    text = f"{getattr(done, 'stdout', '')}\n{getattr(done, 'stderr', '')}".lower()
+    return any(word in text for word in ("https", "certificate", "cert"))
+
+
+def tailscale_url(env: Env, port: int, *, forced: bool = False) -> tuple[str | None, str]:
+    """Publish the loopback voice server on the tailnet only (never Funnel).
+
+    Returns (url or None, tailnet DNS name or ""). Auto-detects: running → imported with a boxed
+    notice; installed but stopped → an equally prominent warning and local mode; not installed →
+    one quiet line (or an error when ``forced``)."""
+    net = tailnet_status(env)
+    if net.state == "missing":
+        env.out("✗ Tailscale isn't installed on this machine." if forced
+                else "• Tailscale not found; Speakeasy stays local to this machine.")
+        return None, ""
+    if net.state == "stopped":
+        banner(env, ["⚠ Tailscale is installed but not connected.",
+                     "  Speakeasy stays local to this machine for now.",
+                     "  Fix: run `tailscale up`, then `hermes voice setup` again."])
+        return None, ""
     try:
-        done = env.run([binary, "serve", "--bg", f"--https={port}", f"http://127.0.0.1:{port}"],
+        done = env.run([net.binary, "serve", "--bg", f"--https={port}", f"http://127.0.0.1:{port}"],
                        capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         done = None
     if done is None or getattr(done, "returncode", 1) != 0:
-        env.out("✗ `tailscale serve` failed. HTTPS certificates may need enabling in the Tailscale admin console.")
-        return None
-    url = f"https://{dns}:{port}"
-    env.out(f"✓ Reachable from your other devices on Tailscale at {url} (not on the public internet)")
-    return url
+        lines = ["⚠ Tailscale is connected, but `tailscale serve` failed.", "  Speakeasy stays local for now."]
+        if done is None or _serve_failure_is_https(done):
+            lines.append("  " + TAILSCALE_HTTPS_FIX)
+        banner(env, lines)
+        return None, ""
+    url = f"https://{net.dns}:{port}"
+    banner(env, [f"✓ Tailscale detected — Speakeasy is reachable from your other devices at {url}",
+                 "  (your tailnet only, never the public internet)"])
+    return url, net.dns
 
 
 def api_key_value() -> str:

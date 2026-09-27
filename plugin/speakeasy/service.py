@@ -27,12 +27,18 @@ from .devices import DeviceStore
 from .emails import canonical_json, extract_email_drafts
 from .hermes_api import HermesAPI, HermesError
 from .prompt import builder as P
+from .router import routing_model
+from .threads import THREAD_PLATFORMS
 from .settings import (OPENAI_KEY_NAME, Settings, SettingsError, default_voice, find_codex, hermes_api_base,
                        hermes_secret, valid_delivery_target)
 from .store import StateStore
+from .suggest import SuggestError, suggest
+from .threads import ThreadRunner, capability, sync_routes
 from .text import ID_RE, MAX_CARDS, TERMINAL, notice_text, split_result
 
 logger = logging.getLogger(__name__)
+
+ROUTING_HINT = "Change it with `hermes model` → auxiliary tasks, or in your Hermes config under auxiliary → speakeasy_router."
 
 MAX_SDP = 96 * 1024
 PAUSE_NOTICE_AFTER_S = 15 * 60
@@ -43,7 +49,9 @@ class VoiceService:
     def __init__(self, hermes_home: Path, *, hermes: Any = None, notifier: Any = None,
                  codex_factory: Callable[..., Any] | None = None, openai_negotiate: Callable[..., Any] | None = None,
                  openai_worker: Callable[..., Any] | None = None, codex_login: Callable[..., Any] | None = None,
-                 brief_run: Callable[[str, str], tuple[str, str]] | None = None, start_threads: bool = True):
+                 brief_run: Callable[[str, str], tuple[str, str]] | None = None, start_threads: bool = True,
+                 route_call: Callable[..., Any] | None = None, thread_runner: Any = None,
+                 suggest_run: Callable[[str, str], tuple[str, str]] | None = None):
         self.home = Path(hermes_home)
         self.dir = self.home / "speakeasy"
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -57,7 +65,10 @@ class VoiceService:
         self.notices = Notices(self.store, self.notifier, lambda: self.settings.get()["delivery"]["target"],
                                lambda: P.Names.from_settings(self.settings.get()))
         self.rt = Runtime(store=self.store, hermes=self.hermes, settings=self.settings.get, hermes_home=self.home,
-                          image_roots=self.image_roots, notices=self.notices, hermes_key=self.hermes_key)
+                          image_roots=self.image_roots, notices=self.notices, hermes_key=self.hermes_key,
+                          route_call=route_call,
+                          threads=thread_runner or ThreadRunner(self.home, D.threads_supported))
+        self._suggest_run = suggest_run or self._brief_run
         self.brief = BriefManager(self.home, brief_run or self._brief_run, self.settings.get,
                                   error_fn=lambda: getattr(self.hermes, "last_error", "") or "")
         self.interactions: dict[str, Interaction] = {}
@@ -132,7 +143,8 @@ class VoiceService:
         now = _dt.datetime.now().astimezone().strftime("%A %d %B %Y, %H:%M %Z")
         return P.build_live_instructions(names, brief=self.brief.text(), away=away, recent_voice=recent,
                                          resume=resume, extra=s["instructions_extra"], now=now,
-                                         delivery_label=D.target_label(s["delivery"]["target"]))
+                                         delivery_label=D.target_label(s["delivery"]["target"]),
+                                         channels=s["delivery"]["channels"])
 
     def create_session(self, body: dict[str, Any], request_id: str, device_id: str = "") -> dict[str, Any]:
         resume_from = body.get("resume_from")
@@ -617,9 +629,28 @@ class VoiceService:
 
     def patch_settings(self, body: dict[str, Any]) -> dict[str, Any]:
         try:
-            return {"settings": self.settings.patch(body)}
+            saved = self.settings.patch(body)
         except SettingsError as exc:
             raise ServiceError(400, str(exc)) from None
+        if isinstance(body, dict) and "delivery" in body:
+            self.sync_thread_routes(saved)
+        return {"settings": saved}
+
+    def thread_channels(self, s: dict[str, Any]) -> list[dict[str, Any]]:
+        """Every destination that wants a thread per task: opted-in channels, plus the default."""
+        wanted = [c for c in s["delivery"]["channels"] if c.get("new_thread")]
+        target = s["delivery"]["target"]
+        if s["delivery"]["new_thread"] and target != "none" and not any(c["target"] == target for c in wanted):
+            wanted.append({"target": target, "label": D.target_label(target), "new_thread": True})
+        return wanted
+
+    def sync_thread_routes(self, s: dict[str, Any]) -> None:
+        """Keep Hermes' webhook routes in step with the channels that open threads (hot-reloaded)."""
+        try:
+            sync_routes(self.home, self.thread_channels(s),
+                        supported=capability(self.home, D.threads_supported())["supported"])
+        except OSError as exc:
+            logger.warning("speakeasy: could not update thread routes (%s)", type(exc).__name__)
 
     def get_brief(self) -> dict[str, Any]:
         return self.brief.get()
@@ -660,14 +691,32 @@ class VoiceService:
             "codex_found": found, "codex_signed_in": signed_in, "codex_message": codex_message,
             "api_key_set": api_key_set, "brief_state": self.brief.status()["state"],
             "hermes_api_ok": self.hermes.health(), "hermes_api_key_set": bool(self.hermes_key()),
-            "delivery_target": s["delivery"]["target"], "threads_supported": D.threads_supported(),
+            "delivery_target": s["delivery"]["target"], **self.thread_status(),
             "continuity_enabled": s["continuity"]["enabled"], "devices": len(self.devices.devices()),
+            "routing_model": routing_model(), "routing_hint": ROUTING_HINT,
+            "advertised_url": s["server"]["advertised_url"], "tailscale_name": s["server"]["tailscale_name"],
             "version": __version__,
         }
 
+    def thread_status(self) -> dict[str, Any]:
+        cap = capability(self.home, D.threads_supported())
+        return {"threads_supported": cap["supported"], "threads_reason": cap["reason"],
+                "thread_platforms": sorted(THREAD_PLATFORMS)}
+
     def destinations(self) -> dict[str, Any]:
         return {**D.destinations(self.home), "current": self.settings.get()["delivery"]["target"],
-                "threads_supported": D.threads_supported()}
+                **self.thread_status()}
+
+    def suggest_channels(self) -> dict[str, Any]:
+        """One read-only Hermes run proposes channels; validated, never saved (the app asks)."""
+        entries = D.flat_chats(D.destinations(self.home))
+        threads_ok = self.thread_status()["threads_supported"]
+        try:
+            picked = suggest(self._suggest_run, entries, threads_ok)
+        except SuggestError as exc:
+            raise ServiceError(502, str(exc)) from None
+        return {"suggestions": [dict(c, new_thread=c["new_thread"] and c["target"].split(":", 1)[0] in THREAD_PLATFORMS)
+                                for c in picked]}
 
     def onboarding(self) -> dict[str, Any]:
         s = self.settings.get()
@@ -685,10 +734,11 @@ class VoiceService:
         required = ("paired", "voice_ready", "names_set", "delivery_set")
         return {"steps": steps, "complete": all(steps[k] for k in required), "brief_state": brief_state,
                 "codex_message": message, "assistant_name": s["assistant_name"], "user_name": s["user_name"],
-                "delivery_target": s["delivery"]["target"]}
+                "delivery_target": s["delivery"]["target"], "continuity_enabled": s["continuity"]["enabled"],
+                "advertised_url": s["server"]["advertised_url"], "tailscale_name": s["server"]["tailscale_name"]}
 
     def save_onboarding(self, body: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"assistant_name", "user_name", "delivery_target", "write_brief"}
+        allowed = {"assistant_name", "user_name", "delivery_target", "write_brief", "continuity_enabled"}
         if not isinstance(body, dict) or not set(body) <= allowed or not body:
             raise ServiceError(400, f"body may contain only: {', '.join(sorted(allowed))}")
         patch: dict[str, Any] = {}
@@ -703,6 +753,10 @@ class VoiceService:
                 raise ServiceError(400, "delivery_target must be none or a Hermes send target like telegram or discord:<chat_id>")
             patch["delivery"] = {"target": body["delivery_target"]}
             onboarding["delivery_set"] = True
+        if "continuity_enabled" in body:
+            if not isinstance(body["continuity_enabled"], bool):
+                raise ServiceError(400, "continuity_enabled must be true or false")
+            patch["continuity"] = {"enabled": body["continuity_enabled"]}
         if onboarding:
             patch["onboarding"] = onboarding
         if patch:

@@ -17,11 +17,29 @@ On the machine that runs Hermes:
 
 `hermes voice setup` turns on Hermes' local API, signs you in to ChatGPT through Codex (or asks
 for an OpenAI API key with `--api-key`), restarts Hermes so the voice server starts, waits until it
-answers, and then opens a one-time link that pairs the Speakeasy Mac app. Add `--tailscale` when
-the Mac and the Hermes machine are different computers on the same tailnet.
+answers, and then pairs the Speakeasy Mac app with a one-time link and 6-digit code.
 
-The app then asks for the microphone, what to call each other, and where finished work should
-go. It suggests the home channel of a connected chat such as Telegram or Discord.
+**Tailscale is picked up automatically.** When `tailscale` is installed and connected, setup
+serves the voice server to your tailnet only (`tailscale serve`, never Funnel), prints a
+`✓ Tailscale detected` box with the `https://<machine>.<tailnet>.ts.net:8795` address, and
+remembers it so `hermes voice pair` reuses it. If Tailscale is installed but stopped, setup says
+so loudly (run `tailscale up`) and stays local. If HTTPS certificates are off for your tailnet,
+turn them on at https://login.tailscale.com/admin/dns (HTTPS Certificates) and run setup again.
+`--tailscale` insists on it, `--no-tailscale` skips it, `--server <url>` sets the address by hand.
+
+When the Mac is another computer, setup doesn't open the link on the Hermes machine: it offers to
+send it to one of your connected Hermes chats (or `--send telegram`), and always prints the link
+and code.
+
+The app then asks for the microphone, what to call each other, where finished work should go
+(it suggests the home channel of a connected chat such as Telegram or Discord), and whether to
+continue existing conversations. In Settings › Delivery you can add more channels, each with a
+short topic, so a new task goes where it belongs ("start this in #build" works too), optionally
+in a new thread per task. **Suggest channels** asks your own Hermes to propose them.
+
+Routing (follow-up or new task, splitting "do X and Y", picking a channel) uses one quick call to
+your Hermes auxiliary model `speakeasy_router`; pick its model with `hermes model` → auxiliary
+tasks. If it's slow or fails, simple built-in rules take over.
 
 ## Tests
 

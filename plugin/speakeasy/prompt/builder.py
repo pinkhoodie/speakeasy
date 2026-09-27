@@ -6,6 +6,7 @@ personal context on top.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,9 +60,25 @@ def render(template: str, names: Names, **extra: str) -> str:
     return re.sub(r"\{([a-z_]+)\}", lambda m: values.get(m.group(1), m.group(0)), template)
 
 
-def rules_text(names: Names, delivery_label: str = "") -> str:
+def delivery_clause(delivery_label: str, channels: list[dict[str, Any]] | None = None) -> str:
+    """Where finished work goes, so the voice can answer "where will that go?"."""
     clause = f" and, when a task finishes after the call, in {delivery_label}" if delivery_label else ""
-    return render((PROMPT_DIR / "rules.md").read_text(encoding="utf-8"), names, delivery_clause=clause).strip()
+    if not channels:
+        return clause
+    listed = "; ".join(f"{c['label']} ({c.get('topic') or 'anything named for it'}"
+                       + (", each task in its own new thread" if c.get("new_thread") else "") + ")"
+                       for c in channels)
+    fallback = delivery_label or "the app only"
+    return (clause + ". New tasks can also go to these chats: " + listed + ". A task goes where "
+            + "{user_name} names (\"start this in <channel>\"), else to the channel whose topic fits, else to "
+            + fallback + "; follow-ups stay where their task runs. When a task starts, say in one short line where "
+            "it went")
+
+
+def rules_text(names: Names, delivery_label: str = "", channels: list[dict[str, Any]] | None = None) -> str:
+    template = (PROMPT_DIR / "rules.md").read_text(encoding="utf-8").replace(
+        "{delivery_clause}", delivery_clause(delivery_label, channels))
+    return render(template, names).strip()
 
 
 def truthfulness(names: Names) -> str:
@@ -141,13 +158,14 @@ def resume_input(history: list[dict[str, str]]) -> list[dict[str, Any]]:
 
 def build_live_instructions(names: Names, *, brief: str = "", away: list[dict[str, Any]] | None = None,
                             recent_voice: str = "", resume: str = "", extra: str = "", now: str = "",
-                            delivery_label: str = "", max_chars: int = MAX_INSTRUCTION_CHARS) -> str:
+                            delivery_label: str = "", channels: list[dict[str, Any]] | None = None,
+                            max_chars: int = MAX_INSTRUCTION_CHARS) -> str:
     """Product rules + optional voice brief + per-call context, under the budget.
 
     Rules are never trimmed. The brief is capped. Optional per-call blocks are dropped
     lowest-priority first (recent voice, then away) when over budget; resume is always kept.
     """
-    head = rules_text(names, delivery_label)
+    head = rules_text(names, delivery_label, channels)
     if extra.strip():
         head += "\n\n# Extra instructions from " + names.user + "\n" + extra.strip()[:1000]
     if brief.strip():
@@ -262,6 +280,19 @@ def continuation_message(names: Names, request: str, summary: str) -> str:
         possessive_approval=f"{names.possessive} explicit approval")
 
 
+def thread_task_message(names: Names, request: str, summary: str, context: str) -> str:
+    """The first message in a new chat thread opened for a voice task."""
+    recent = context.strip()[-3000:]
+    return (render("[Voice request from {user_name}, relayed by Speakeasy] ", names) + request
+            + (f"\n\nRecent voice conversation for context:\n{recent}" if recent else "") + "\n\n"
+            + render("Begin your reply with exactly one line: \"Voice: ", names) + summary + render(
+                "\" so this thread shows what was asked, then do the work. This thread is where {user_name} will "
+                "follow up, so write for reading here: lead with the outcome in one or two plain sentences. Approval "
+                "prompts cannot be answered from voice: if a step needs {possessive_approval}, stop before it and ask "
+                "{user_name} to confirm here in the thread.", names,
+                possessive_approval=f"{names.possessive} explicit approval"))
+
+
 def without_voice_header(text: str) -> str:
     """The reply minus its "Voice:" header line (the task list already names the task)."""
     return re.sub(r"^\s*(?:\U0001f399\ufe0f?\s*)?Voice:[^\n]*\n*", "", text or "", count=1).strip()
@@ -297,6 +328,65 @@ def work_started_note(parallel: list[str]) -> str:
     if parallel:
         note += " Still running in parallel: " + "; ".join(parallel) + "."
     return note
+
+
+# Spoken by the server itself the moment work starts (appendSpeech), so the call is never silent
+# while a task runs. First person, at most six words, never names a backend.
+_ACK_NEW = ("On it.", "Looking now.", "Checking now.", "Let me look.", "On it, one sec.")
+_PROGRESS_LEADS = ("Still on it:", "Quick update:", "Progress:")
+
+
+def _pick(options: tuple[str, ...], seed: str) -> str:
+    return options[int(hashlib.sha256(seed.encode()).hexdigest()[:8], 16) % len(options)]
+
+
+def short_task_name(name: str | None, words: int = 2) -> str:
+    """The first words of a task name, for a line that must stay short (\"the Rome trip task\")."""
+    picked = re.findall(r"[A-Za-z0-9#'&+-]+", name or "")[:words]
+    return " ".join(picked) or "that"
+
+
+def ack_new(seed: str) -> str:
+    return _pick(_ACK_NEW, seed)
+
+
+def ack_parts(count: int) -> str:
+    words = {2: "two", 3: "three", 4: "four"}
+    return f"On it, {words.get(count, str(count))} things at once."
+
+
+def ack_follow_up(task_name: str | None) -> str:
+    return f"Adding that to the {short_task_name(task_name)} task."
+
+
+def ack_continuing(label: str | None) -> str:
+    return f"Picking that up in {short_task_name(label, 3)}."
+
+
+def ack_channel_thread(label: str) -> str:
+    return f"Started that in a new {short_task_name(label, 1)} thread."
+
+
+def ack_channel_post(label: str) -> str:
+    return f"On it; results go to {short_task_name(label, 1)}."
+
+
+def progress_line(seed: str, milestone: str) -> str:
+    """A brief spoken progress update for a long task (the milestone is Hermes' own short line)."""
+    text = re.sub(r"\s+", " ", milestone or "").strip().rstrip(".")
+    words = text.split(" ")
+    if len(words) > 10:
+        text = " ".join(words[:10]) + "…"
+    return f"{_pick(_PROGRESS_LEADS, seed)} {text}."
+
+
+def clarify_channel(named: list[str], known: list[str]) -> str:
+    """Asked instead of starting work: two channels were named, or one that is not set up."""
+    if len(named) >= 2:
+        return f"Should that go in {named[0]} or {named[1]}?"
+    if known:
+        return f"I don't have that channel. I have {', '.join(known[:4])}; which one?"
+    return "I don't have that channel. Where should it go?"
 
 
 def split_note(names: Names, parts: list[str]) -> str:

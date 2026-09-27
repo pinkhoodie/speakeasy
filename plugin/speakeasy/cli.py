@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from .devices import PAIR_TTL_S, DeviceStore
 from .settings import DEFAULT_PORT, Settings, SettingsError, get_path, patch_for, read_env_file
@@ -36,7 +36,8 @@ def setup_parser(parser) -> None:
     setup = sub.add_parser("setup", help="Set up Speakeasy for this Hermes profile and pair a Mac")
     setup.add_argument("--server", default="", help="URL the Mac will use (default http://127.0.0.1:<port>)")
     setup.add_argument("--tailscale", action="store_true",
-                       help="Also reach the voice server from your other devices over Tailscale (tailnet only)")
+                       help="Require Tailscale (tailnet only); it is auto-detected without this flag")
+    setup.add_argument("--no-tailscale", action="store_true", help="Stay local; don't publish on Tailscale")
     setup.add_argument("--api-key", action="store_true",
                        help="Use an OpenAI API key for voice instead of your ChatGPT sign-in")
     setup.add_argument("--send", default="", help="Send the pairing link to a Hermes chat (e.g. telegram)")
@@ -44,7 +45,8 @@ def setup_parser(parser) -> None:
     setup.add_argument("--no-restart", action="store_true", help="Don't restart Hermes; print what to do instead")
     setup.add_argument("--no-open", action="store_true", help="Print the pairing link instead of opening it")
     pair = sub.add_parser("pair", help="Show a one-time code to pair a Mac")
-    pair.add_argument("--server", default="", help="URL the Mac will use (default http://127.0.0.1:<port>)")
+    pair.add_argument("--server", default="",
+                      help="URL the Mac will use (default: the URL setup advertised, else http://127.0.0.1:<port>)")
     pair.add_argument("--send", default="", help="Also send the pairing link via `hermes send --to <target>`")
     sub.add_parser("devices", help="List paired devices")
     revoke = sub.add_parser("revoke", help="Revoke a paired device")
@@ -186,14 +188,13 @@ def cmd_setup(args, home: Path, env=None) -> int:
     else:
         up = F.start_voice_server(env, home, local, _hermes_cmd(home), assume=assume)
 
-    server = args.server
-    if getattr(args, "tailscale", False):
-        server = F.tailscale_url(env, port) or server
-    server = server or local
+    server = _advertise(args, env, settings, port) or local
 
     if up:
         out("✓ Your agent will write a short voice brief in the background: what the voice should know about "
             "you and what it can hand off. You can read and edit it in the app.")
+    _print_routing_model(out)
+    _sync_thread_routes(home, settings, out)
 
     code = _store(home).new_pairing_code()
     link = pairing_link(server, code)
@@ -202,22 +203,95 @@ def cmd_setup(args, home: Path, env=None) -> int:
         out(f"Pairing code {code} is ready, but the voice server isn't running yet, so pairing will fail until it is.")
         out(f"Pairing link: {link}")
         return 1
-    opened = False
-    if not args.no_open and not getattr(args, "send", "") and server.startswith("http://127.0.0.1"):
-        opened = _open(link)
-    if getattr(args, "send", ""):
-        _send_link(home, args.send, link, out)
-    if opened:
+    delivered = _deliver_link(args, env, home, settings, server, link)
+    if delivered == "opened":
         out("✓ Opened Speakeasy to pair. Finish setup there (about a minute).")
-    else:
-        if not getattr(args, "send", ""):
-            out("Open this link on the Mac you'll talk from (Speakeasy must be installed there):")
-        out(f"  {link}")
-    out(f"Or type code {code} in Speakeasy › Connect. It works once and expires in {PAIR_TTL_S // 60} minutes.")
+    elif delivered != "sent":
+        out("Open this link on the Mac you'll talk from (Speakeasy must be installed there):")
+    out(f"  Pairing link: {link}")
+    out(f"  Pairing code: {code}  (type it in Speakeasy › Connect; works once, expires in {PAIR_TTL_S // 60} minutes)")
     if not voice_ok:
         out("Voice isn't signed in yet; the app will show how to finish that.")
         return 1
     return 0
+
+
+def is_local_url(url: str) -> bool:
+    """True when the URL only works on this machine (a Mac elsewhere can't use it)."""
+    host = (urlparse(url).hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _advertise(args, env, settings: Settings, port: int) -> str:
+    """The URL other devices use: --server, else a detected tailnet (stored for `hermes voice pair`)."""
+    from . import setup_flow as F
+    if args.server:
+        settings.patch({"server": {"advertised_url": args.server.rstrip("/"), "tailscale_name": ""}})
+        return args.server
+    if getattr(args, "no_tailscale", False):
+        env.out("• Tailscale skipped (--no-tailscale); Speakeasy stays local to this machine.")
+        settings.patch({"server": {"advertised_url": "", "tailscale_name": ""}})
+        return ""
+    url, name = F.tailscale_url(env, port, forced=getattr(args, "tailscale", False))
+    settings.patch({"server": {"advertised_url": url or "", "tailscale_name": name}})
+    return url or ""
+
+
+def _sync_thread_routes(home: Path, settings: Settings, out) -> None:
+    """Channels that open a thread per task need a webhook route each (Hermes hot-reloads them)."""
+    from .service import VoiceService
+    service = VoiceService(home, start_threads=False)
+    try:
+        wanted = service.thread_channels(settings.get())
+        if wanted:
+            service.sync_thread_routes(settings.get())
+            status = service.thread_status()
+            out("• New-thread channels: " + ("ready." if status["threads_supported"] else status["threads_reason"]))
+    finally:
+        service.close()
+
+
+def _print_routing_model(out) -> None:
+    from .router import AUX_TASK, routing_model
+    out(f"• Task routing uses: {routing_model()}. Change it with `hermes model` → auxiliary tasks, or "
+        f"auxiliary.{AUX_TASK} in config.yaml.")
+
+
+def _deliver_link(args, env, home: Path, settings: Settings, server: str, link: str) -> str:
+    """"opened" | "sent" | "": open the link here when the Mac is this machine; otherwise offer
+    to send it to a connected Hermes chat (``--send`` does that without asking)."""
+    if getattr(args, "send", ""):
+        return "sent" if _send_link(home, args.send, link, env.out) else ""
+    if is_local_url(server):
+        return "opened" if not args.no_open and _open(link) else ""
+    target = _pick_chat(env, home, settings)
+    if target and _send_link(home, target, link, env.out):
+        return "sent"
+    return ""
+
+
+def _pick_chat(env, home: Path, settings: Settings) -> str:
+    """Ask which connected chat gets the pairing link (Enter = the default chat, n = none)."""
+    from .delivery import destinations, flat_chats
+    if not env.interactive:
+        return ""
+    dest = destinations(home)
+    entries = flat_chats(dest)
+    if not entries:
+        return ""
+    current = settings.get()["delivery"]["target"]
+    default = next((t for t in (current, dest.get("suggested")) if any(e["target"] == t for e in entries)),
+                   entries[0]["target"])
+    env.out("• Your Mac looks like another computer. Send the pairing link to one of your chats?")
+    for i, entry in enumerate(entries[:9], 1):
+        mark = "  (default)" if entry["target"] == default else ""
+        env.out(f"  {i}. {entry.get('label') or entry['target']}{mark}")
+    answer = env.ask("  Number, Enter for the default, or n to skip: ").strip().lower()
+    if answer in {"n", "no"}:
+        return ""
+    if answer.isdigit() and 1 <= int(answer) <= min(len(entries), 9):
+        return entries[int(answer) - 1]["target"]
+    return default if default and default != "none" else ""
 
 
 def _send_link(home: Path, target: str, link: str, out) -> bool:
@@ -234,7 +308,8 @@ def _send_link(home: Path, target: str, link: str, out) -> bool:
 
 def cmd_pair(args, home: Path) -> int:
     code = _store(home).new_pairing_code()
-    server = args.server or f"http://127.0.0.1:{voice_port(home)}"
+    server = (args.server or Settings(home).get()["server"]["advertised_url"]
+              or f"http://127.0.0.1:{voice_port(home)}")
     link = pairing_link(server, code)
     print(f"Pairing code: {code}  (single use, expires in {PAIR_TTL_S // 60} minutes)")
     print(f"Pairing link: {link}")

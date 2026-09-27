@@ -209,3 +209,21 @@ def target_label(target: str) -> str:
     if not target or target == "none":
         return ""
     return "your " + target.split(":", 1)[0].title()
+
+
+def flat_chats(dest: dict[str, Any]) -> list[dict[str, str]]:
+    """Every concrete chat in a destinations() result as {target, label, platform}, home first."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in dest.get("destinations") or []:
+        platform = str(entry.get("platform") or "")
+        chats = ([dict(entry["home_channel"], name=f"{entry['home_channel']['name']} (home)")]
+                 if entry.get("home_channel") else []) + list(entry.get("chats") or [])
+        for chat in chats:
+            target = chat.get("target")
+            if not target or target in seen:
+                continue
+            seen.add(target)
+            out.append({"target": target, "label": f"{platform.title()}: {chat.get('name') or target}"[:140],
+                        "platform": platform})
+    return out

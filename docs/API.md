@@ -41,6 +41,7 @@ used in the tests (timestamps and IDs will differ).
 | POST | `/voice/brief/rewrite` | device | Ask Hermes to rewrite the brief |
 | GET | `/voice/status` | device | Provider, Hermes API, brief readiness |
 | GET | `/voice/destinations` | device | Where finished results can be posted |
+| POST | `/voice/destinations/suggest` | device | Ask Hermes to propose delivery channels (never saved) |
 | GET, POST | `/voice/onboarding` | device | First-run checklist |
 
 ## GET /health
@@ -539,8 +540,10 @@ partial object (nested objects merge); unknown keys or invalid values are 400.
 | `instructions_extra` | `""` | extra voice instructions (up to 1,000 characters) |
 | `hermes_profile` | `""` | Hermes profile for runs; empty = this gateway's |
 | `delivery.target` | `"none"` | post finished results to a Hermes chat: `none`, `telegram`, `discord`, `discord:<chat_id>`, `telegram:<chat_id>[:<thread_id>]`, ... |
-| `delivery.new_thread_per_task` | `false` | open a new thread per task when Hermes supports it (`threads_supported`); otherwise ignored |
-| `continuity.enabled` | `true` | continue a matching recent Hermes chat instead of starting fresh |
+| `delivery.new_thread` | `false` | run each task in a new thread of the default target when `threads_supported` (older `new_thread_per_task` is accepted and migrated) |
+| `delivery.channels` | `[]` | up to 8 opted-in channels: `{target, label, topic, new_thread}`. A new task goes to the channel named in the request ("start this in #build"), else the one whose `topic` fits (routing model), else `delivery.target`. `new_thread` runs the task in a new thread there (Discord, Telegram, Slack, Matrix; needs `threads_supported`), otherwise the answer is posted there. Follow-ups stay where their task runs |
+| `continuity.enabled` | `true` | when a request is about something already being discussed in a Hermes chat or thread, continue inside that conversation (with its history) and post the reply there |
+| `server.advertised_url`, `server.tailscale_name` | `""` | set by `hermes voice setup`: the address other devices use (e.g. the tailnet URL) |
 | `brief.auto_refresh` | `true` | daily background brief refresh when its inputs change |
 | `brief.include_recent_voice` | `true` | include recent voice turns in a new call's context |
 | `image_roots` | `[]` | extra directories image cards may come from (the Hermes home is always allowed) |
@@ -564,7 +567,8 @@ partial object (nested objects merge); unknown keys or invalid values are 400.
     "hermes_profile": "",
     "delivery": {
       "target": "none",
-      "new_thread_per_task": false
+      "new_thread": false,
+      "channels": []
     },
     "continuity": {
       "enabled": true
@@ -616,7 +620,7 @@ is not configured. Poll GET or `/voice/status` → `brief_state`.
 
 ## GET /voice/status
 
-Readiness. `voice_ready` is true when the chosen provider can start a call. When Codex is missing or signed out, `codex_message` says what to do. `threads_supported` reports whether this Hermes can open a new thread per task.
+Readiness. `voice_ready` is true when the chosen provider can start a call. When Codex is missing or signed out, `codex_message` says what to do. `threads_supported` reports whether this Hermes can open a new thread per task (its webhook platform must be on; `threads_reason` says why not). `routing_model` names the model task routing uses (`auxiliary.speakeasy_router`), `routing_hint` how to change it. `advertised_url` / `tailscale_name` are the address setup advertised (empty = local only).
 
 `200`
 ```json
@@ -635,8 +639,14 @@ Readiness. `voice_ready` is true when the chosen provider can start a call. When
   "hermes_api_key_set": true,
   "delivery_target": "none",
   "threads_supported": true,
+  "threads_reason": "",
+  "thread_platforms": ["discord", "matrix", "slack", "telegram"],
   "continuity_enabled": true,
   "devices": 1,
+  "routing_model": "Hermes auxiliary default (auto)",
+  "routing_hint": "Change it with `hermes model` → auxiliary tasks, or in your Hermes config under auxiliary → speakeasy_router.",
+  "advertised_url": "",
+  "tailscale_name": "",
   "version": "0.2.0"
 }
 ```
@@ -656,7 +666,9 @@ string ready for `delivery.target`.
     "name": "Don't post results anywhere"
   },
   "current": "none",
-  "threads_supported": true
+  "threads_supported": true,
+  "threads_reason": "",
+  "thread_platforms": ["discord", "matrix", "slack", "telegram"]
 }
 ```
 
@@ -666,6 +678,19 @@ With platforms connected, each entry looks like:
  "home_channel": {"name": "Home", "target": "telegram:123456"},
  "chats": [{"name": "Trip planning", "type": "group", "target": "telegram:-100222"}]}
 ```
+
+## POST /voice/destinations/suggest
+
+Body `{}`. Runs one read-only Hermes turn (up to 90 s) that sees only the chat labels and targets
+from `/voice/destinations` and proposes up to 5 channels from what it knows about the user. Every
+item is checked against those targets and the `delivery.channels` rules; anything else is dropped.
+Nothing is saved: the app shows the list and the user picks.
+
+`200`
+```json
+{"suggestions": [{"target": "discord:9000000000001", "label": "#general", "topic": "everyday questions", "new_thread": false}]}
+```
+`502` with a plain `error` when Hermes can't answer or suggests nothing usable.
 
 ## GET /voice/onboarding, POST /voice/onboarding
 
@@ -687,11 +712,14 @@ The first-run checklist. `complete` is true when the device is paired, voice is 
   "codex_message": "Signed in to Codex.",
   "assistant_name": "Hermes",
   "user_name": "",
-  "delivery_target": "none"
+  "delivery_target": "none",
+  "continuity_enabled": true,
+  "advertised_url": "",
+  "tailscale_name": ""
 }
 ```
 
-POST confirms any of `assistant_name`, `user_name`, `delivery_target`, and can start the first
+POST confirms any of `assistant_name`, `user_name`, `delivery_target`, `continuity_enabled`, and can start the first
 brief write with `"write_brief": true`. It returns the checklist plus the updated `settings`.
 ```json
 {"assistant_name": "Nova", "user_name": "Sam", "delivery_target": "none"}
