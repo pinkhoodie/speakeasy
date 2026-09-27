@@ -61,8 +61,19 @@ class VoiceAdapter(BasePlatformAdapter):
             return False
         self._server.start()
         self._mark_connected(listener_base=self._server.base_url)
+        self._send_pending_link()
         logger.info("Speakeasy voice platform listening on %s", self._server.base_url)
         return True
+
+    def _send_pending_link(self) -> None:
+        """`hermes voice setup` ran before this restart and asked for the pairing link in a chat."""
+        try:
+            from .handoff import start_pending_delivery
+            from .settings import Settings
+            server = Settings(self.hermes_home).get()["server"]["advertised_url"] or self._server.base_url
+            start_pending_delivery(self.hermes_home, server)
+        except Exception as exc:  # never let this stop the voice platform
+            logger.warning("speakeasy: pending pairing link not sent: %s", exc)
 
     async def disconnect(self) -> None:
         self._mark_disconnected()

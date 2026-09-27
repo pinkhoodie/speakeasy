@@ -13,6 +13,7 @@ public struct PairingLink: Equatable, Sendable {
     }
 
     public static func parse(_ url: URL) -> Result<PairingLink, ParseError> {
+        if let web = webPairLink(url) { return web }
         guard url.scheme?.lowercased() == "speakeasy" else { return .failure(.notSpeakeasy) }
         // `speakeasy://pair?...` puts "pair" in the host; `speakeasy:pair?...` in the path.
         let target = (url.host ?? url.path).trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
@@ -27,6 +28,30 @@ public struct PairingLink: Equatable, Sendable {
         }
         return .success(PairingLink(server: server, code: code))
     }
+}
+
+/// `https://speakeasyvoice.ai/pair#server=…&code=…` (what agents send in chat). The details sit in
+/// the fragment, which browsers never send to the website. nil when the URL isn't that page.
+private func webPairLink(_ url: URL) -> Result<PairingLink, PairingLink.ParseError>? {
+    guard url.scheme?.lowercased() == "https", url.host?.lowercased() == "speakeasyvoice.ai",
+          url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased() == "pair" else { return nil }
+    // Read the fragment still percent-encoded, then decode it as a query string exactly once.
+    var parts = URLComponents()
+    parts.percentEncodedQuery = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedFragment ?? ""
+    let items = parts.queryItems ?? []
+    guard let rawServer = items.first(where: { $0.name == "server" })?.value, !rawServer.isEmpty else {
+        return .failure(.missingServer)
+    }
+    guard let server = trustedServerBaseURL(rawServer) else { return .failure(.untrustedServer) }
+    guard let code = normalizedPairingCode(items.first(where: { $0.name == "code" })?.value ?? "") else {
+        return .failure(.invalidCode)
+    }
+    return .success(PairingLink(server: server, code: code))
+}
+
+/// The message a user sends their Hermes agent to set Speakeasy up (same text as the website).
+public enum SetupPrompt {
+    public static let text = "Set up Speakeasy for me, so I can talk to you by voice from my Mac. Follow the instructions at https://speakeasyvoice.ai/setup.md"
 }
 
 /// Six digits; spaces and dashes a user types ("123 456", "123-456") are ignored.

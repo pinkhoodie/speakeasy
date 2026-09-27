@@ -8,6 +8,8 @@ pairing link. See setup_flow.py.
 """
 from __future__ import annotations
 
+import argparse
+
 import json
 import os
 import secrets
@@ -19,7 +21,7 @@ from typing import Any
 from urllib.parse import quote, urlparse
 
 from .devices import PAIR_TTL_S, DeviceStore
-from .settings import DEFAULT_PORT, Settings, SettingsError, get_path, patch_for, read_env_file
+from .settings import valid_delivery_target, DEFAULT_PORT, Settings, SettingsError, get_path, patch_for, read_env_file
 
 
 def _home() -> Path:
@@ -40,9 +42,10 @@ def setup_parser(parser) -> None:
     setup.add_argument("--no-tailscale", action="store_true", help="Stay local; don't publish on Tailscale")
     setup.add_argument("--api-key", action="store_true",
                        help="Use GPT-Live-1 through the OpenAI API (an API key) instead of Codex OAuth (your ChatGPT sign-in)")
-    setup.add_argument("--send", default="", help="Send the pairing link to a Hermes chat (e.g. telegram)")
-    setup.add_argument("--yes", "-y", action="store_true", help="Answer yes to every question (restart, install)")
-    setup.add_argument("--no-restart", action="store_true", help="Don't restart Hermes; print what to do instead")
+    setup.add_argument("--send", default="", help="Send the pairing link to this Hermes chat (e.g. telegram or discord:<chat_id>); "
+                            "if Hermes needs a restart first, it is sent once Hermes is back")
+    setup.add_argument("--yes", "-y", action="store_true", help="Answer yes to every question (installing Codex)")
+    setup.add_argument("--no-restart", action="store_true", help=argparse.SUPPRESS)  # setup never restarts Hermes now
     setup.add_argument("--no-open", action="store_true", help="Print the pairing link instead of opening it")
     pair = sub.add_parser("pair", help="Show a one-time code to pair a Mac")
     pair.add_argument("--server", default="",
@@ -133,7 +136,8 @@ def voice_port(home: Path) -> int:
 
 
 def pairing_link(server: str, code: str) -> str:
-    return f"speakeasy://pair?server={quote(server, safe='')}&code={code}"
+    from .handoff import app_link
+    return app_link(server, code)
 
 
 def _hermes_cmd(home: Path) -> list[str]:
@@ -169,6 +173,7 @@ def _prepare_profile(home: Path, port: int, out) -> None:
 
 
 def cmd_setup(args, home: Path, env=None) -> int:
+    from . import handoff as H
     from . import setup_flow as F
     env = env or F.Env()
     out = env.out
@@ -180,40 +185,43 @@ def cmd_setup(args, home: Path, env=None) -> int:
 
     settings = Settings(home)
     voice_ok = F.voice_sign_in(env, home, settings, api_key=getattr(args, "api_key", False), assume=assume)
-
-    if getattr(args, "no_restart", False):
-        up = (env.health or F.voice_health)(local)
-        if not up:
-            out("• Restart Hermes to start the voice server (`hermes gateway restart`), then run `hermes voice pair`.")
-    else:
-        up = F.start_voice_server(env, home, local, _hermes_cmd(home), assume=assume)
-
+    up = F.voice_server_running(env, local)
     server = _advertise(args, env, settings, port) or local
 
     if up:
+        out("✓ Voice server is running")
         out("✓ Your agent will write a short voice brief in the background: what the voice should know about "
             "you and what it can hand off. You can read and edit it in the app.")
     _print_routing_model(out)
     _sync_thread_routes(home, settings, out)
-
-    code = _store(home).new_pairing_code()
-    link = pairing_link(server, code)
     out("")
+
+    target = getattr(args, "send", "") or ""
     if not up:
-        out(f"Pairing code {code} is ready, but the voice server isn't running yet, so pairing will fail until it is.")
-        out(f"Pairing link: {link}")
-        return 1
-    delivered = _deliver_link(args, env, home, settings, server, link)
-    if delivered == "opened":
-        out("✓ Opened Speakeasy to pair. Finish setup there (about a minute).")
-    elif delivered != "sent":
-        out("Open this link on the Mac you'll talk from (Speakeasy must be installed there):")
-    out(f"  Pairing link: {link}")
-    out(f"  Pairing code: {code}  (type it in Speakeasy › Connect; works once, expires in {PAIR_TTL_S // 60} minutes)")
+        out(f"• {F.RESTART_NOTE}")
+        if target and valid_delivery_target(target) and target != "none":
+            H.save_pending(home, target)
+            out(f"  Once Hermes is back, the pairing link arrives in {_chat_name(target)} by itself.")
+        else:
+            out("  Then run `hermes voice pair` for the pairing link.")
+        out(f"  No Speakeasy on your Mac yet? Download it: {H.DOWNLOAD_PAGE}")
+        return 2 if voice_ok else 1
+
+    H.clear_pending(home)
+    delivered = _deliver_link(args, env, home, settings, server)
+    if not delivered:
+        code = _store(home).new_pairing_code(ttl=H.LINK_TTL_S)
+        out("Open this link on the Mac you'll talk from. It connects Speakeasy, or offers the download first:")
+        out(f"  {H.web_link(server, code)}")
+        out(f"  Or type code {code} in Speakeasy › Connect (works once, for {H.LINK_TTL_S // 60} minutes).")
     if not voice_ok:
         out("Voice isn't signed in yet; the app will show how to finish that.")
         return 1
     return 0
+
+
+def _chat_name(target: str) -> str:
+    return target.split(":", 1)[0].title()
 
 
 def is_local_url(url: str) -> bool:
@@ -257,17 +265,30 @@ def _print_routing_model(out) -> None:
         f"auxiliary.{AUX_TASK} in config.yaml.")
 
 
-def _deliver_link(args, env, home: Path, settings: Settings, server: str, link: str) -> str:
-    """"opened" | "sent" | "": open the link here when the Mac is this machine; otherwise offer
-    to send it to a connected Hermes chat (``--send`` does that without asking)."""
+def _deliver_link(args, env, home: Path, settings: Settings, server: str) -> str:
+    """"opened" | "sent" | "": open the app here only when the voice server is local to this Mac;
+    otherwise send a link to a Hermes chat (``--send``, or pick one when run in a terminal).
+    Hermes may run on a different machine than the user's Mac, so nothing is opened remotely."""
+    from .handoff import LINK_TTL_S, app_link, chat_message, web_link
     if getattr(args, "send", ""):
-        return "sent" if _send_link(home, args.send, link, env.out) else ""
-    if is_local_url(server):
-        return "opened" if not args.no_open and _open(link) else ""
+        code = _store(home).new_pairing_code(ttl=LINK_TTL_S)
+        return "sent" if _send_link(home, args.send, web_link(server, code), env.out) else ""
+    if is_local_url(server) and not args.no_open and _app_installed():
+        code = _store(home).new_pairing_code(ttl=LINK_TTL_S)
+        if _open(app_link(server, code)):
+            env.out("✓ Opened Speakeasy to pair. Finish setup there (about a minute).")
+            return "opened"
     target = _pick_chat(env, home, settings)
-    if target and _send_link(home, target, link, env.out):
-        return "sent"
+    if target:
+        code = _store(home).new_pairing_code(ttl=LINK_TTL_S)
+        if _send_link(home, target, web_link(server, code), env.out):
+            return "sent"
     return ""
+
+
+def _app_installed() -> bool:
+    return any(Path(p).exists() for p in ("/Applications/Speakeasy.app",
+                                          str(Path.home() / "Applications/Speakeasy.app")))
 
 
 def _pick_chat(env, home: Path, settings: Settings) -> str:
@@ -300,18 +321,20 @@ def _send_link(home: Path, target: str, link: str, out) -> bool:
     if not valid_delivery_target(target) or target == "none":
         out("✗ --send needs a Hermes chat like telegram or discord:<chat_id>")
         return False
-    ok = HermesSendNotifier(home).send(target, f"Pair Speakeasy on your Mac: {link}")
-    out(f"✓ Sent the pairing link to {target.split(':', 1)[0].title()}. Open it on your Mac." if ok
+    from .handoff import chat_message
+    ok = HermesSendNotifier(home).send(target, chat_message(link))
+    out(f"✓ Sent the pairing link to {_chat_name(target)}. Open it on your Mac." if ok
         else "✗ Couldn't send the pairing link.")
     return ok
 
 
 def cmd_pair(args, home: Path) -> int:
-    code = _store(home).new_pairing_code()
+    from .handoff import LINK_TTL_S, web_link
+    code = _store(home).new_pairing_code(ttl=LINK_TTL_S)
     server = (args.server or Settings(home).get()["server"]["advertised_url"]
               or f"http://127.0.0.1:{voice_port(home)}")
-    link = pairing_link(server, code)
-    print(f"Pairing code: {code}  (single use, expires in {PAIR_TTL_S // 60} minutes)")
+    link = web_link(server, code)
+    print(f"Pairing code: {code}  (single use, expires in {LINK_TTL_S // 60} minutes)")
     print(f"Pairing link: {link}")
     if args.send:
         return 0 if _send_link(home, args.send, link, print) else 1

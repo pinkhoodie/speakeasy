@@ -234,34 +234,65 @@ private struct StepButtons: View {
 private struct ConnectStep: View {
     @ObservedObject var flow: OnboardingFlow
     @EnvironmentObject var app: AppModel
+    @State private var manual = false
+    @State private var copied = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            StepHeader(title: "Connect to Hermes",
-                       subtitle: "Run hermes voice setup on the Mac that runs Hermes. It opens a pairing link that connects this app automatically. On another Mac, run hermes voice pair and enter the address and code here.")
-            Form {
-                TextField("Server address", text: $flow.server, prompt: Text("http://127.0.0.1:8795"))
-                    .accessibilityHint("This Mac, or an https Tailscale address ending in .ts.net")
-                TextField("Pairing code", text: $flow.code, prompt: Text("6 digits"))
-                    .font(.system(.body, design: .monospaced))
-                    .onSubmit { if normalizedPairingCode(flow.code) != nil { flow.pair() } }
+        VStack(alignment: .leading, spacing: 12) {
+            StepHeader(title: "Connect to your Hermes",
+                       subtitle: "Your Hermes agent sets this up. Send it this message in any chat you use with it. It installs what's needed and sends you a link that connects this app.")
+            HStack(alignment: .top, spacing: 12) {
+                Text(setupPrompt)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button(copied ? "Copied" : "Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(setupPrompt, forType: .string)
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { copied = false }
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityHint("Copies the setup message for your Hermes agent")
             }
-            .formStyle(.grouped)
-            .frame(height: 130)
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.06)))
+
+            if flow.pairing {
+                Label("Connecting…", systemImage: "link").foregroundStyle(.secondary)
+            } else {
+                Label("Waiting for the link from your agent. Click it and this moves on by itself.",
+                      systemImage: "hourglass")
+                    .foregroundStyle(.secondary).font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let error = flow.pairError {
                 Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let host = URL(string: flow.server)?.host {
-                Label(host.hasSuffix(".ts.net") ? "Connecting over Tailscale: \(host)" : "Local only: this Mac",
-                      systemImage: host.hasSuffix(".ts.net") ? "lock.shield.fill" : "desktopcomputer")
-                    .font(.headline)
-            }
             if let offer = app.tailnetOffer { TailnetOffer(url: offer) }
+
+            DisclosureGroup("Have a code instead?", isExpanded: $manual) {
+                Form {
+                    TextField("Server address", text: $flow.server, prompt: Text("https://your-machine.your-tailnet.ts.net:8795"))
+                        .accessibilityHint("The address your agent gave you: this Mac, or an https Tailscale address ending in .ts.net")
+                    TextField("Pairing code", text: $flow.code, prompt: Text("6 digits"))
+                        .font(.system(.body, design: .monospaced))
+                        .onSubmit { if normalizedPairingCode(flow.code) != nil { flow.pair() } }
+                }
+                .formStyle(.grouped)
+                .frame(height: 120)
+            }
             Spacer()
-            StepButtons(primary: "Connect", primaryDisabled: normalizedPairingCode(flow.code) == nil, busy: flow.pairing,
-                        action: flow.pair)
+            if manual {
+                StepButtons(primary: "Connect", primaryDisabled: normalizedPairingCode(flow.code) == nil, busy: flow.pairing,
+                            action: flow.pair)
+            }
         }
     }
+
+    private var setupPrompt: String { SetupPrompt.text }
 }
 
 // MARK: (b) Microphone

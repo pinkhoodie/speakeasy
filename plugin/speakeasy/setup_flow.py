@@ -5,11 +5,13 @@ only opened once the voice server actually answers:
 
   1. Turn on what Speakeasy needs in this profile (Hermes API server on loopback, voice platform).
   2. Voice sign-in: ChatGPT through Codex (default), or an OpenAI API key.
-  3. Restart the Hermes gateway (asked first; never from inside a Hermes chat) and wait for the
-     voice server's /health.
+  3. Check whether the voice server is already running. Setup never restarts or starts Hermes:
+     that is the user's call, so it says a restart is needed and stops there.
   4. Publish the voice server on the user's tailnet when Tailscale is connected (auto-detected;
      ``--no-tailscale`` skips it) and remember that URL for `hermes voice pair`.
-  5. Ask Hermes to write the voice brief, then create a pairing code and open/print the link.
+  5. Ask Hermes to write the voice brief, then hand over the pairing link: opened directly when
+     the Mac is this machine, else sent to a chat (see handoff.py). When Hermes still needs a
+     restart, the link is sent automatically once it's back.
 
 Every external command goes through ``Env.run`` so tests can replace it. Nothing here prints a
 secret; the API key prompt is hidden and the key is written only to this profile's ``.env``.
@@ -207,44 +209,13 @@ def wait_for_voice(env: Env, url: str, timeout_s: float = HEALTH_TIMEOUT_S) -> b
         env.sleep(1.0)
 
 
-def start_voice_server(env: Env, home: Path, url: str, hermes_cmd: list[str], *, assume: bool | None) -> bool:
-    """Make the running gateway load Speakeasy. True once the voice server answers."""
-    check = env.health or voice_health
-    if check(url):
-        env.out("✓ Voice server is running")
-        return True
-    child_env = {**os.environ, "HERMES_HOME": str(home)}
-    if os.environ.get("_HERMES_GATEWAY"):
-        # Running inside a Hermes chat: restarting would end this very conversation.
-        env.out("• Hermes needs a restart to start the voice server. Run `hermes gateway restart` in Terminal.")
-        return False
-    if gateway_running(home):
-        env.out("• The voice server starts when Hermes restarts. Chats pause for a few seconds and pick up again.")
-        if not env.confirm("  Restart Hermes now?", True, assume):
-            env.out("  Skipped. Run `hermes gateway restart` when ready, then `hermes voice pair`.")
-            return False
-        cmd = [*hermes_cmd, "gateway", "restart"]
-    else:
-        env.out("• Hermes' background service isn't running.")
-        if not env.confirm("  Start it now?", True, assume):
-            env.out("  Skipped. Start it with `hermes gateway start` (or `hermes gateway run`), then `hermes voice pair`.")
-            return False
-        cmd = [*hermes_cmd, "gateway", "start"]
-    try:
-        done = env.run(cmd, capture_output=True, text=True, timeout=120, env=child_env)
-    except (OSError, subprocess.SubprocessError):
-        done = None
-    if done is None or getattr(done, "returncode", 1) != 0:
-        env.out("✗ Couldn't restart Hermes automatically. If you run it with `hermes gateway run`, stop it and "
-                "start it again, then run `hermes voice pair`.")
-        return False
-    env.out("  Waiting for the voice server…")
-    if wait_for_voice(env, url):
-        env.out("✓ Voice server is running")
-        return True
-    env.out("✗ Hermes restarted but the voice server didn't come up. Check `hermes gateway status` and the "
-            "gateway log for \"speakeasy\".")
-    return False
+def voice_server_running(env: Env, url: str) -> bool:
+    """True when the voice server answers. Setup never restarts or starts Hermes itself."""
+    return bool((env.health or voice_health)(url))
+
+
+RESTART_NOTE = ("Hermes needs a restart to turn Speakeasy on. Restart it the way you normally do "
+                "(for example `hermes gateway restart`). Chats pause for a few seconds.")
 
 
 # -- 4. tailscale ---------------------------------------------------------------------------------

@@ -124,8 +124,9 @@ def test_settings_file_is_private_and_rejects_unknown(tmp_path):
         store.patch({"openai_api_key": "x"})
 
 
-def test_cli_setup_without_restart_prepares_profile(tmp_path, monkeypatch):
-    """--no-restart: profile is prepared, but no link is offered as ready while the server is down."""
+def test_cli_setup_before_restart_prepares_profile(tmp_path, monkeypatch):
+    """Voice server not running yet: profile is prepared, the user is told to restart Hermes, and no
+    link is offered while the server is down (setup never restarts Hermes itself)."""
     from speakeasy import cli, setup_flow as F
     lines: list[str] = []
     env = F.Env(run=lambda *a, **k: type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
@@ -142,7 +143,7 @@ def test_cli_setup_without_restart_prepares_profile(tmp_path, monkeypatch):
     assert config["gateway"]["platforms"]["voice"]["enabled"] is True and "speakeasy" in config["plugins"]["enabled"]
     assert (tmp_path / "speakeasy" / "settings.json").exists()
     text = "\n".join(lines)
-    assert "hermes gateway restart" in text and "isn't running yet" in text
+    assert "needs a restart" in text and "hermes gateway restart" in text and "#server=" not in text
     assert values["API_SERVER_KEY"] not in text
 
 

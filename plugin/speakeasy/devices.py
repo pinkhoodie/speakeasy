@@ -52,13 +52,13 @@ class DeviceStore:
         os.replace(tmp, self.path)
 
     # -- pairing -----------------------------------------------------------------------
-    def new_pairing_code(self, now: float | None = None) -> str:
-        """A single-use 6-digit code valid for 10 minutes. Issuing one expires older ones."""
+    def new_pairing_code(self, now: float | None = None, ttl: float = PAIR_TTL_S) -> str:
+        """A single-use 6-digit code (10 minutes by default). Issuing one expires older ones."""
         now = time.time() if now is None else now
         code = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(6))
         with self._lock:
             data = self._load()
-            data["pairing"] = {_hash(code): now + PAIR_TTL_S}
+            data["pairing"] = {_hash(code): now + ttl}
             self._save(data)
         return code
 

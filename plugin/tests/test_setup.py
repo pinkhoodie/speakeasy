@@ -1,5 +1,6 @@
-"""`hermes voice setup` end to end with every side effect faked: order of steps, restart, voice
-sign-in, Tailscale, and that the pairing link only opens once the voice server answers."""
+"""`hermes voice setup` end to end with every side effect faked: order of steps, voice sign-in,
+Tailscale, never restarting Hermes, and that the pairing link is only handed over once the voice
+server answers (or queued for delivery after the user restarts Hermes)."""
 from __future__ import annotations
 
 import os
@@ -16,16 +17,15 @@ from speakeasy import settings as S
 class Fake:
     """Records commands; answers like a machine with Codex signed in and Hermes running."""
 
-    def __init__(self, *, codex_signed_in=True, codex_installed=True, restart_ok=True, comes_up=True,
+    def __init__(self, *, codex_signed_in=True, codex_installed=True, running=True,
                  brew=True, answers=None, secret="", interactive=True, tailscale_dns="box.tail123.ts.net",
                  tailscale="missing", serve_error=""):
         self.cmds: list[list[str]] = []
         self.lines: list[str] = []
         self.codex_signed_in, self.codex_installed = codex_signed_in, codex_installed
-        self.restart_ok, self.comes_up, self.brew = restart_ok, comes_up, brew
+        self.running, self.brew = running, brew
         self.answers = list(answers or [])
         self.secret_value, self.interactive, self.dns = secret, interactive, tailscale_dns
-        self.restarted = False
         self.tailscale, self.serve_error = tailscale, serve_error
         self.health_checks = 0
         self.now = 0.0
@@ -40,9 +40,6 @@ class Fake:
         if cmd[-1] == "login":
             self.codex_signed_in = True
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if "gateway" in cmd and ("restart" in cmd or "start" in cmd):
-            self.restarted = self.restart_ok
-            return SimpleNamespace(returncode=0 if self.restart_ok else 1, stdout="", stderr="")
         if cmd[:2] == ["brew", "install"]:
             self.codex_installed = True
             return SimpleNamespace(returncode=0)
@@ -60,7 +57,7 @@ class Fake:
 
     def health(self, url):
         self.health_checks += 1
-        return self.restarted and self.comes_up
+        return self.running
 
     def which(self, name):
         return {"brew": "/opt/homebrew/bin/brew" if self.brew else None,
@@ -99,49 +96,78 @@ def args(**kw):
     return Namespace(**base)
 
 
-def run_setup(fake, **kw):
+def run_setup(fake, app_installed=True, **kw):
     fake_holder["fake"] = fake
     opened = []
-    orig = cli._open
+    orig_open, orig_installed = cli._open, cli._app_installed
     cli._open = lambda link: opened.append(link) or True
+    cli._app_installed = lambda: app_installed
     try:
         rc = cli.cmd_setup(args(**kw), cli._home(), env=fake.env())
     finally:
-        cli._open = orig
+        cli._open, cli._app_installed = orig_open, orig_installed
     return rc, opened
 
 
-def test_happy_path_restarts_waits_then_opens_link(home):
+def never_restarts(fake):
+    return not any("gateway" in c and ({"restart", "start", "stop"} & set(c)) for c in fake.cmds)
+
+
+def test_happy_path_opens_the_app_when_it_is_on_this_mac(home):
     fake = Fake()
     rc, opened = run_setup(fake, no_open=False)
-    assert rc == 0
-    assert any("gateway" in c and "restart" in c for c in fake.cmds)
-    assert fake.restarted and fake.health_checks >= 1
+    assert rc == 0 and never_restarts(fake)
     assert len(opened) == 1 and opened[0].startswith("speakeasy://pair?server=http%3A%2F%2F127.0.0.1")
     text = "\n".join(fake.lines)
     assert "✓ Voice: GPT-Live-1 through Codex OAuth" in text and "✓ Voice server is running" in text
     assert "Opened Speakeasy" in text
 
 
-def test_link_is_not_opened_when_the_voice_server_never_comes_up(home):
-    fake = Fake(comes_up=False)
-    rc, opened = run_setup(fake, no_open=False)
-    assert rc == 1 and opened == []
-    assert "didn't come up" in "\n".join(fake.lines)
+def test_app_not_on_this_mac_prints_a_web_link_that_offers_the_download(home):
+    fake = Fake(interactive=False)
+    rc, opened = run_setup(fake, no_open=False, app_installed=False)
+    text = "\n".join(fake.lines)
+    assert rc == 0 and opened == []
+    assert "https://speakeasyvoice.ai/pair#server=http%3A%2F%2F127.0.0.1" in text and "download" in text
 
 
-def test_declining_restart_explains_and_does_not_open(home):
-    fake = Fake(answers=["n"])
+def test_needs_restart_says_so_and_never_restarts(home):
+    fake = Fake(running=False)
     rc, opened = run_setup(fake, no_open=False)
-    assert rc == 1 and opened == [] and not fake.restarted
-    assert not any("restart" in c for c in fake.cmds)
+    text = "\n".join(fake.lines)
+    assert rc == 2 and opened == [] and never_restarts(fake)
+    assert "needs a restart" in text and "hermes voice pair" in text
+    assert "speakeasyvoice.ai" in text  # download link for someone without the app yet
+    assert "Pairing code" not in text and "#server=" not in text  # no link that can't work yet
+
+
+def test_needs_restart_with_send_queues_the_link_for_after_the_restart(home):
+    from speakeasy import handoff as H
+    fake = Fake(running=False)
+    rc, _ = run_setup(fake, send="telegram", yes=True)
+    text = "\n".join(fake.lines)
+    assert rc == 2 and never_restarts(fake)
+    assert "arrives in Telegram by itself" in text
+    assert H.pending_target(home) == "telegram"
 
 
 def test_inside_a_hermes_chat_never_restarts(home, monkeypatch):
     monkeypatch.setenv("_HERMES_GATEWAY", "1")
-    fake = Fake()
-    rc, _ = run_setup(fake, yes=True)
-    assert rc == 1 and not any("restart" in c for c in fake.cmds)
+    fake = Fake(running=False)
+    rc, _ = run_setup(fake, yes=True, send="telegram")
+    assert rc == 2 and never_restarts(fake)
+
+
+def test_send_delivers_a_web_link_now_when_already_running(home, monkeypatch):
+    from speakeasy import handoff as H
+    sent = []
+    monkeypatch.setattr(cli, "_send_link", lambda h, target, link, out: sent.append((target, link)) or True)
+    fake = Fake(tailscale="running")
+    rc, opened = run_setup(fake, yes=True, send="telegram", no_open=False)
+    assert rc == 0 and opened == [] and never_restarts(fake)
+    assert sent and sent[0][0] == "telegram"
+    assert sent[0][1].startswith("https://speakeasyvoice.ai/pair#server=https%3A%2F%2Fbox.tail123.ts.net%3A8795&code=")
+    assert H.pending_target(home) == ""
 
 
 def test_signs_in_to_codex_when_needed(home):
@@ -182,7 +208,7 @@ def test_tailscale_serves_tailnet_only_and_links_to_it(home):
     serve = next(c for c in fake.cmds if "serve" in c)
     assert "funnel" not in " ".join(serve) and "--bg" in serve
     text = "\n".join(fake.lines)
-    assert "https%3A%2F%2Fbox.tail123.ts.net%3A8795" in text
+    assert "https%3A%2F%2Fbox.tail123.ts.net%3A8795" in text and never_restarts(fake)
 
 
 def test_running_tailnet_is_imported_without_a_flag_and_remembered_for_pair(home, capsys):
@@ -194,9 +220,9 @@ def test_running_tailnet_is_imported_without_a_flag_and_remembered_for_pair(home
     assert not any("funnel" in " ".join(c) for c in fake.cmds)
     stored = S.Settings(home).get()["server"]
     assert stored == {"advertised_url": "https://box.tail123.ts.net:8795", "tailscale_name": "box.tail123.ts.net"}
-    assert "Pairing code:" in text
+    assert "speakeasyvoice.ai/pair#server=https%3A%2F%2Fbox.tail123.ts.net%3A8795" in text
     assert cli.cmd_pair(Namespace(server="", send=""), home) == 0
-    assert "https%3A%2F%2Fbox.tail123.ts.net%3A8795" in capsys.readouterr().out
+    assert "speakeasyvoice.ai/pair#server=https%3A%2F%2Fbox.tail123.ts.net%3A8795" in capsys.readouterr().out
 
 
 def test_stopped_tailnet_warns_prominently_and_stays_local(home):
@@ -242,6 +268,7 @@ def test_remote_pairing_offers_to_send_the_link_to_a_chat(home, monkeypatch):
     rc, opened = run_setup(fake, yes=True, no_open=False)
     assert rc == 0 and opened == []
     assert sent and sent[0][0] == "telegram:555000111" and "box.tail123.ts.net" in sent[0][1]
+    assert sent[0][1].startswith("https://speakeasyvoice.ai/pair#")
     assert any("another computer" in line for line in fake.lines)
 
 
@@ -266,10 +293,9 @@ def test_rerunning_setup_is_harmless(home):
     assert run_setup(fake, yes=True)[0] == 0
     before = (home / "config.yaml").read_text()
     fake2 = Fake()
-    fake2.restarted = True  # already running with the voice server up: no restart needed
     assert run_setup(fake2, yes=True)[0] == 0
     assert (home / "config.yaml").read_text() == before
-    assert not any("restart" in c for c in fake2.cmds)
+    assert never_restarts(fake2)
 
 
 def test_setup_turns_voice_on_for_the_real_gateway_loader(home):

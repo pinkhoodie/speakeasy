@@ -25,14 +25,30 @@ talks and hands off; the actual work runs on whatever model your Hermes uses.
 
 ## Install
 
-On the machine that runs Hermes:
+**Let your agent do it.** Send this to your Hermes agent in any chat you already use with it:
+
+> Set up Speakeasy for me, so I can talk to you by voice from my Mac. Follow the instructions at https://speakeasyvoice.ai/setup.md
+
+The agent installs the plugin on the machine Hermes runs on, turns on voice, and sends you one link.
+Two things are yours to do:
+
+1. **Restart Hermes when it asks.** Setup never restarts anything itself. Once Hermes is back, the
+   link arrives in that chat by itself.
+2. **Open the link on the Mac you'll talk from.** It opens Speakeasy and connects it. If the app
+   isn't installed yet, the page offers the download first, and the same link connects it after.
+
+Nothing assumes Hermes can reach your Mac: Hermes can run on another computer, and the link is the
+only handoff. [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md) is the exact guide the agent follows.
+
+**By hand**, on the machine that runs Hermes:
 
     hermes plugins install rungmc357/speakeasy#plugin/speakeasy --enable
-    hermes voice setup
+    hermes voice setup --send telegram      # the chat that should get the link: discord, slack…
 
-`hermes voice setup` turns on Hermes' local API, signs you in to GPT-Live-1 with your ChatGPT account
-through Codex OAuth (or asks for an OpenAI API key with `--api-key`), restarts Hermes so the voice server starts, waits until it
-answers, and then pairs the Speakeasy Mac app with a one-time link and 6-digit code.
+Setup turns on Hermes' local API, signs you in to GPT-Live-1 with your ChatGPT account through
+Codex OAuth (or asks for an OpenAI API key with `--api-key`), and sends the pairing link. If
+Hermes has to restart first, setup says so, and the link is sent once you've restarted it.
+When Hermes and the app are on the same Mac, setup opens the link directly.
 
 **Tailscale is picked up automatically.** When `tailscale` is installed and connected, setup
 serves the voice server to your tailnet only (`tailscale serve`, never Funnel), prints a
@@ -42,9 +58,9 @@ so loudly (run `tailscale up`) and stays local. If HTTPS certificates are off fo
 turn them on at https://login.tailscale.com/admin/dns (HTTPS Certificates) and run setup again.
 `--tailscale` insists on it, `--no-tailscale` skips it, `--server <url>` sets the address by hand.
 
-When the Mac is another computer, setup doesn't open the link on the Hermes machine: it offers to
-send it to one of your connected Hermes chats (or `--send telegram`), and always prints the link
-and code.
+Links sent to a chat go to `https://speakeasyvoice.ai/pair#…`; the server address and one-time code
+sit after the `#`, which browsers never send to the website. Each link works once and expires after
+30 minutes; `hermes voice pair --send <chat>` makes a new one.
 
 The app then asks for the microphone, what to call each other, where finished work should go
 (it suggests the home channel of a connected chat such as Telegram or Discord), and whether to
