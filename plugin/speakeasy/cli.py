@@ -2,8 +2,9 @@
 
 ``setup`` touches only this profile: it enables the Hermes API server on loopback (generating
 ``API_SERVER_KEY`` into the profile ``.env`` only if it is missing, never overwriting values),
-enables the ``voice`` platform in ``config.yaml``, creates Speakeasy settings, prints the pairing
-link and starts the first voice-brief write.
+enables the ``voice`` platform in ``config.yaml``, sets up voice sign-in, restarts Hermes (asked
+first) and waits for the voice server, starts the first voice-brief write and only then opens the
+pairing link. See setup_flow.py.
 """
 from __future__ import annotations
 
@@ -18,8 +19,7 @@ from typing import Any
 from urllib.parse import quote
 
 from .devices import PAIR_TTL_S, DeviceStore
-from .settings import (DEFAULT_PORT, Settings, SettingsError, find_codex, get_path, hermes_api_base, hermes_secret,
-                       patch_for, read_env_file)
+from .settings import DEFAULT_PORT, Settings, SettingsError, get_path, patch_for, read_env_file
 
 
 def _home() -> Path:
@@ -33,10 +33,16 @@ def _store(home: Path | None = None) -> DeviceStore:
 
 def setup_parser(parser) -> None:
     sub = parser.add_subparsers(dest="voice_command")
-    setup = sub.add_parser("setup", help="Enable Speakeasy for this Hermes profile and pair a Mac")
+    setup = sub.add_parser("setup", help="Set up Speakeasy for this Hermes profile and pair a Mac")
     setup.add_argument("--server", default="", help="URL the Mac will use (default http://127.0.0.1:<port>)")
+    setup.add_argument("--tailscale", action="store_true",
+                       help="Also reach the voice server from your other devices over Tailscale (tailnet only)")
+    setup.add_argument("--api-key", action="store_true",
+                       help="Use an OpenAI API key for voice instead of your ChatGPT sign-in")
+    setup.add_argument("--send", default="", help="Send the pairing link to a Hermes chat (e.g. telegram)")
+    setup.add_argument("--yes", "-y", action="store_true", help="Answer yes to every question (restart, install)")
+    setup.add_argument("--no-restart", action="store_true", help="Don't restart Hermes; print what to do instead")
     setup.add_argument("--no-open", action="store_true", help="Print the pairing link instead of opening it")
-    setup.add_argument("--no-brief", action="store_true", help="Skip the first voice-brief write")
     pair = sub.add_parser("pair", help="Show a one-time code to pair a Mac")
     pair.add_argument("--server", default="", help="URL the Mac will use (default http://127.0.0.1:<port>)")
     pair.add_argument("--send", default="", help="Also send the pairing link via `hermes send --to <target>`")
@@ -133,68 +139,97 @@ def _hermes_cmd(home: Path) -> list[str]:
     return hermes_command()
 
 
-def _open(url: str) -> None:
+def _open(url: str) -> bool:
+    """Open the link; False when nothing handles speakeasy:// (the app isn't installed)."""
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     try:
-        subprocess.run([opener, url], check=False, timeout=10, capture_output=True)
+        return subprocess.run([opener, url], check=False, timeout=10, capture_output=True).returncode == 0
     except (OSError, subprocess.SubprocessError):
-        pass
+        return False
 
 
 # -- commands -------------------------------------------------------------------------------------
 
-def cmd_setup(args, home: Path) -> int:
-    port = voice_port(home)
+def _prepare_profile(home: Path, port: int, out) -> None:
+    """Step 1: what Speakeasy needs in this profile. Never overwrites an existing value."""
     added = append_env_if_missing(home / ".env", {
         "API_SERVER_KEY": secrets.token_urlsafe(32),
         "API_SERVER_HOST": "127.0.0.1",
     })
     host = read_env_file(home / ".env").get("API_SERVER_HOST", "127.0.0.1")
     if host not in {"127.0.0.1", "localhost", "::1"}:
-        print(f"Note: API_SERVER_HOST is {host}; Speakeasy only talks to it over loopback.")
-    for key in added:
-        print(f"Added {key} to {home / '.env'}")
-    if enable_voice_platform(home, port):
-        print("Enabled the voice platform in config.yaml")
+        out(f"  Note: API_SERVER_HOST is {host}; Speakeasy only talks to it over loopback.")
+    if added:
+        out("✓ Turned on Hermes' local API (Speakeasy uses it to hand work to your agent)")
+    enable_voice_platform(home, port)
+    Settings(home).ensure()  # settings.json (0600) with defaults
+    out("✓ Speakeasy is enabled in this Hermes profile")
+
+
+def cmd_setup(args, home: Path, env=None) -> int:
+    from . import setup_flow as F
+    env = env or F.Env()
+    out = env.out
+    assume = True if getattr(args, "yes", False) else None
+    port = voice_port(home)
+    local = f"http://127.0.0.1:{port}"
+    out("Setting up Speakeasy…")
+    _prepare_profile(home, port, out)
+
     settings = Settings(home)
-    settings.ensure()  # creates settings.json (0600) with defaults
-    print(f"Settings: {settings.path}")
-    binary = find_codex(settings.get()["voice"]["codex_path"])
-    if binary is None:
-        print("Codex CLI not found. Install it and run `codex login`, or set voice.codex_path.")
+    voice_ok = F.voice_sign_in(env, home, settings, api_key=getattr(args, "api_key", False), assume=assume)
+
+    if getattr(args, "no_restart", False):
+        up = (env.health or F.voice_health)(local)
+        if not up:
+            out("• Restart Hermes to start the voice server (`hermes gateway restart`), then run `hermes voice pair`.")
+    else:
+        up = F.start_voice_server(env, home, local, _hermes_cmd(home), assume=assume)
+
+    server = args.server
+    if getattr(args, "tailscale", False):
+        server = F.tailscale_url(env, port) or server
+    server = server or local
+
+    if up:
+        out("✓ Your agent will write a short voice brief in the background: what the voice should know about "
+            "you and what it can hand off. You can read and edit it in the app.")
+
     code = _store(home).new_pairing_code()
-    server = args.server or f"http://127.0.0.1:{port}"
     link = pairing_link(server, code)
-    print(f"Pairing code: {code}  (single use, expires in {PAIR_TTL_S // 60} minutes)")
-    print(f"Pairing link: {link}")
-    if not args.no_open:
-        _open(link)
-    print("Restart the Hermes gateway to start the voice server (`hermes gateway restart`).")
-    if not args.no_brief:
-        started = _start_brief(home)
-        print("Asked Hermes to write your voice brief in the background." if started else
-              "Voice brief: will be written once the gateway API server is up (`hermes voice config` / the app).")
+    out("")
+    if not up:
+        out(f"Pairing code {code} is ready, but the voice server isn't running yet, so pairing will fail until it is.")
+        out(f"Pairing link: {link}")
+        return 1
+    opened = False
+    if not args.no_open and not getattr(args, "send", "") and server.startswith("http://127.0.0.1"):
+        opened = _open(link)
+    if getattr(args, "send", ""):
+        _send_link(home, args.send, link, out)
+    if opened:
+        out("✓ Opened Speakeasy to pair. Finish setup there (about a minute).")
+    else:
+        if not getattr(args, "send", ""):
+            out("Open this link on the Mac you'll talk from (Speakeasy must be installed there):")
+        out(f"  {link}")
+    out(f"Or type code {code} in Speakeasy › Connect. It works once and expires in {PAIR_TTL_S // 60} minutes.")
+    if not voice_ok:
+        out("Voice isn't signed in yet; the app will show how to finish that.")
+        return 1
     return 0
 
 
-def _start_brief(home: Path) -> bool:
-    """Kick off the first brief write if the Hermes API server answers now; otherwise skip."""
-    try:
-        from .brief import BriefManager
-        from .hermes_api import HermesAPI
-        settings = Settings(home)
-        api = HermesAPI(hermes_api_base(home), lambda: hermes_secret(home, "API_SERVER_KEY"),
-                        settings.get()["hermes_profile"])
-        if not api.health():
-            return False
-        manager = BriefManager(home, lambda p, i: api.run_to_completion(p, i, "speakeasy_brief"), settings.get)
-        if manager.text():
-            return True
-        # CLI process exits soon; run it detached through the gateway's API (the run lives there).
-        api.start_run(manager.request_prompt(), "speakeasy_brief_setup_" + secrets.token_hex(6), "speakeasy_brief")
-        return True
-    except Exception:
+def _send_link(home: Path, target: str, link: str, out) -> bool:
+    from .delivery import HermesSendNotifier
+    from .settings import valid_delivery_target
+    if not valid_delivery_target(target) or target == "none":
+        out("✗ --send needs a Hermes chat like telegram or discord:<chat_id>")
         return False
+    ok = HermesSendNotifier(home).send(target, f"Pair Speakeasy on your Mac: {link}")
+    out(f"✓ Sent the pairing link to {target.split(':', 1)[0].title()}. Open it on your Mac." if ok
+        else "✗ Couldn't send the pairing link.")
+    return ok
 
 
 def cmd_pair(args, home: Path) -> int:
@@ -204,14 +239,7 @@ def cmd_pair(args, home: Path) -> int:
     print(f"Pairing code: {code}  (single use, expires in {PAIR_TTL_S // 60} minutes)")
     print(f"Pairing link: {link}")
     if args.send:
-        from .delivery import HermesSendNotifier
-        from .settings import valid_delivery_target
-        if not valid_delivery_target(args.send) or args.send == "none":
-            print("--send needs a Hermes send target like telegram or discord:<chat_id>")
-            return 2
-        ok = HermesSendNotifier(home).send(args.send, f"Pair Speakeasy on your Mac: {link}")
-        print("Sent the pairing link." if ok else "Could not send the pairing link.")
-        return 0 if ok else 1
+        return 0 if _send_link(home, args.send, link, print) else 1
     return 0
 
 

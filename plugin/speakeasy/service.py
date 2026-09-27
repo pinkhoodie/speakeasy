@@ -68,7 +68,7 @@ class VoiceService:
         self._stop = threading.Event()
         if start_threads:
             threading.Thread(target=self._idle_loop, daemon=True, name="speakeasy-idle").start()
-            self.brief.start_scheduler()
+            self.brief.start_scheduler(ready=self.hermes.health)
 
     # -- secrets (read per use, never stored or returned) ------------------------------------
     def hermes_key(self) -> str:

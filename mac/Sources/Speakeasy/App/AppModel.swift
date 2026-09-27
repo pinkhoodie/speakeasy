@@ -41,6 +41,8 @@ final class AppModel: ObservableObject {
     @Published var settings = ServerSettings()
     @Published var brief: VoiceBrief?
     @Published var destinations: [Destination] = []
+    /// The server's preselected delivery target for onboarding (a connected home channel).
+    @Published var suggestedDestination: String?
     @Published var onboarding: OnboardingStatus?
     @Published var lastError: String?
     @Published var refreshing = false
@@ -119,7 +121,11 @@ final class AppModel: ObservableObject {
         }
         if let s = try? await api.settings() { applySettings(s) }
         brief = try? await api.brief()
-        destinations = (try? await api.destinations()) ?? []
+        if let (list, suggested) = try? await api.destinationsWithSuggestion() {
+            destinations = list; suggestedDestination = suggested
+        } else {
+            destinations = []; suggestedDestination = nil
+        }
         onboarding = try? await api.onboarding()
         micAuthorization = AVCaptureDevice.authorizationStatus(for: .audio)
     }

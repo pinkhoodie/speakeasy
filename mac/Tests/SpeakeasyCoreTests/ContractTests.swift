@@ -17,6 +17,7 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(s.codexSignedIn, true)
         XCTAssertEqual(s.hermesAPIOK, true)
         XCTAssertEqual(s.threadsSupported, true)
+        XCTAssertNotNil(s.voiceReady, "the server says whether a call can start")
     }
 
     func testSettings() throws {
@@ -66,8 +67,12 @@ final class ContractTests: XCTestCase {
         try record("brief_put", "PUT", "/voice/brief", VoiceBrief.putBody(text: brief))
     }
 
-    func testDestinationsEmpty() throws {
-        XCTAssertEqual(Destination.list(try fixture("destinations")), [])
+    func testDestinationsAndSuggestion() throws {
+        let raw = try fixture("destinations")
+        let list = Destination.list(raw)
+        XCTAssertEqual(list.map(\.target), ["discord:900000000000000001", "discord:900000000000000002", "telegram:555000111"])
+        XCTAssertEqual(list.first?.label, "Discord · Home / general")
+        XCTAssertEqual(Destination.suggested(raw), "telegram:555000111")
     }
 
     func testBriefRoundTrip() throws {

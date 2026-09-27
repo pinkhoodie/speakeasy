@@ -59,8 +59,9 @@ final class OnboardingFlow: ObservableObject {
             do {
                 try await app.pair(server: url, code: code)
                 pairing = false
+                await app.refresh()
                 loadNames()
-                step = .microphone
+                next()
             } catch {
                 pairing = false
                 pairError = app.describe(error)
@@ -72,18 +73,39 @@ final class OnboardingFlow: ObservableObject {
         let s = app.settings
         if assistantName.isEmpty { assistantName = s.assistantName ?? app.status?.assistantName ?? "" }
         if userName.isEmpty { userName = s.userName ?? "" }
-        if target == nil { target = s.deliveryTarget }
+        if target == nil { target = s.deliveryTarget ?? app.suggestedDestination }
         newThreadPerTask = s.delivery?.newThreadPerTask ?? false
     }
 
+    /// Steps `hermes voice setup` or the system already finished are skipped, so a normal setup
+    /// shows: names, where results go, shortcut (plus microphone the first time).
+    func isAlreadyDone(_ s: Step) -> Bool {
+        switch s {
+        case .connect: return app.isPaired
+        case .microphone: return app.micAuthorization == .authorized
+        case .voice: return app.status?.voiceReady == true
+        case .brief: return true  // written in the background; shown and editable in Settings
+        default: return false
+        }
+    }
+
     func next() {
-        if let n = Step(rawValue: step.rawValue + 1) { step = n } else { finish() }
+        var n = Step(rawValue: step.rawValue + 1)
+        while let candidate = n, isAlreadyDone(candidate) { n = Step(rawValue: candidate.rawValue + 1) }
+        if let n { step = n } else { finish() }
         if step == .names { loadNames() }
-        if step == .brief { Task { await app.refreshBrief() } }
+    }
+
+    /// First step that still needs the user.
+    func start() {
+        step = .connect
+        if isAlreadyDone(.connect) { next() }
     }
 
     func back() {
-        if let p = Step(rawValue: step.rawValue - 1), p != .connect || !app.isPaired { step = p }
+        var p = Step(rawValue: step.rawValue - 1)
+        while let candidate = p, isAlreadyDone(candidate) { p = Step(rawValue: candidate.rawValue - 1) }
+        if let p { step = p }
     }
 
     /// Names and delivery are saved together (`POST /voice/onboarding`) when leaving the delivery step.
@@ -117,6 +139,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
 
     func show() {
         if window == nil {
+            Task { await flow.app.refresh(); flow.start() }
             let hosting = NSHostingController(rootView: OnboardingView(flow: flow).environmentObject(flow.app))
             let w = NSWindow(contentViewController: hosting)
             w.title = "Welcome to Speakeasy"
@@ -282,14 +305,14 @@ private struct VoiceSignInStep: View {
                     .accessibilityElement(children: .combine)
                 }
                 if status.codexSignedIn != true && status.resolvedProvider == .codex {
-                    Text("On the Hermes machine, run codex login in Terminal, then press Check again.")
+                    Text("On the Hermes machine, run hermes voice setup in Terminal. It signs you in to ChatGPT (a browser window opens). Then press Check again.")
                         .font(.callout).fixedSize(horizontal: false, vertical: true)
                 }
             } else {
                 Text(app.lastError ?? "Checking…").foregroundStyle(.secondary)
             }
             DisclosureGroup("Use an API key instead", isExpanded: $showAPIKeyHelp) {
-                Text("Put your OpenAI API key in the Hermes profile's .env as SPEAKEASY_OPENAI_API_KEY on the Hermes machine, then choose “OpenAI API key” in Settings › Voice. Speakeasy never asks for the key in this app and never stores it on this Mac.")
+                Text("On the Hermes machine, run hermes voice setup --api-key and paste your OpenAI API key when asked. It's stored only in that Hermes profile, never on this Mac, and calls bill that OpenAI account.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }

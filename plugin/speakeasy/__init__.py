@@ -27,7 +27,13 @@ def validate_config(config) -> bool:
 
 
 def is_connected(config) -> bool:
-    return bool((getattr(config, "extra", {}) or {}).get("enabled"))
+    """Configured once `hermes voice setup` has written the voice block (it always sets a port).
+
+    Hermes asks this on an ``enabled=True`` probe view too, so it must key on what setup wrote,
+    not on ``enabled``; an explicit ``enabled: false`` in config.yaml still turns voice off.
+    """
+    extra = getattr(config, "extra", {}) or {}
+    return bool(extra.get("port") or extra.get("enabled"))
 
 
 def register(ctx) -> None:

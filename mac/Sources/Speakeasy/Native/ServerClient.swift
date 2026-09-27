@@ -71,6 +71,10 @@ final class ServerClient: @unchecked Sendable {
         try? JSONDecoder().decode(VoiceBrief.self, from: try await data("/voice/brief/rewrite", method: "POST", body: Data("{}".utf8)))
     }
     func destinations() async throws -> [Destination] { Destination.list(try await data("/voice/destinations")) }
+    func destinationsWithSuggestion() async throws -> ([Destination], String?) {
+        let raw = try await data("/voice/destinations")
+        return (Destination.list(raw), Destination.suggested(raw))
+    }
     func onboarding() async throws -> OnboardingStatus { OnboardingStatus.parse(try await data("/voice/onboarding")) }
     func completeOnboarding(assistantName: String, userName: String, target: String?) async throws {
         _ = try await data("/voice/onboarding", method: "POST", body: try OnboardingStatus.postBody(

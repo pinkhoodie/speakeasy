@@ -28,6 +28,8 @@ MAX_BRIEF_CHARS = 12_000
 MIN_BRIEF_CHARS = 200
 REFRESH_INTERVAL_S = 24 * 3600
 CHECK_INTERVAL_S = 3600
+FIRST_WRITE_DELAY_S = 10.0
+FIRST_WRITE_GIVE_UP_S = 600.0
 REQUIRED_SECTIONS = ("User", "Assistant persona", "Capability map", "Answer preferences", "Current context")
 _SECRET_PATTERNS = [
     re.compile(p) for p in (
@@ -60,6 +62,29 @@ def strip_status_lines(output: str) -> str:
     return text.strip()
 
 
+# Heading keywords per section, so "## 1. User", "## **Capabilities**" or "## What I can do" count.
+_SECTION_KEYWORDS = {
+    "User": ("user", "about you", "about me", "who you are"),
+    "Assistant persona": ("persona", "personality", "assistant", "about me as"),
+    "Capability map": ("capabilit", "can do", "abilities", "what i can", "tools"),
+    "Answer preferences": ("answer", "preference", "style", "how you like"),
+    "Current context": ("context", "current", "projects", "working on"),
+}
+
+
+def sections_found(text: str) -> set[str]:
+    """Which of the five sections have a heading, matched loosely."""
+    found: set[str] = set()
+    for raw in re.findall(r"(?m)^#{1,4}\s+(.+?)\s*$", text):
+        heading = re.sub(r"[^a-z ]+", " ", raw.lower())
+        heading = " ".join(heading.split())
+        for section, words in _SECTION_KEYWORDS.items():
+            if section not in found and any(w in heading for w in words):
+                found.add(section)
+                break
+    return found
+
+
 def validate(text: str) -> str:
     """Return the cleaned brief or raise BriefInvalid with a short reason."""
     text = strip_status_lines(text)
@@ -67,9 +92,9 @@ def validate(text: str) -> str:
         raise BriefInvalid("brief is too short")
     if len(text) > MAX_BRIEF_CHARS:
         raise BriefInvalid("brief is too long")
-    headings = {h.strip().lower() for h in re.findall(r"(?m)^#{1,3}\s+(.+?)\s*$", text)}
-    missing = [s for s in REQUIRED_SECTIONS if s.lower() not in headings]
-    if missing:
+    found = sections_found(text)
+    if "Capability map" not in found or len(found) < 3:
+        missing = [s for s in REQUIRED_SECTIONS if s not in found]
         raise BriefInvalid(f"brief is missing sections: {', '.join(missing)}")
     for pattern in _SECRET_PATTERNS:
         if pattern.search(text):
@@ -231,7 +256,36 @@ class BriefManager:
         self.rewrite(force=False, background=True)
         return True
 
-    def start_scheduler(self) -> None:
+    def first_write_due(self) -> bool:
+        """No brief yet, never attempted (or the last attempt failed over an hour ago)."""
+        if self.text():
+            return False
+        state = self._state()
+        last = float(state.get("last_attempt") or 0)
+        return not last or (state.get("error") is not None and self.clock() - last >= CHECK_INTERVAL_S)
+
+    def start_scheduler(self, first_write_delay_s: float = FIRST_WRITE_DELAY_S,
+                        ready: Callable[[], bool] | None = None) -> None:
+        """Hourly refresh check. Also writes the first brief shortly after start, once `ready()`
+        (the Hermes API answers), so a fresh install gets one without the user asking."""
+        def first() -> None:
+            waited = 0.0
+            while not self._stop.wait(first_write_delay_s):
+                waited += first_write_delay_s
+                try:
+                    if not self.first_write_due() or self.run_fn is None:
+                        return
+                    if ready is None or ready():
+                        self.rewrite(force=False, background=False)
+                        return
+                except Exception as exc:
+                    logger.warning("speakeasy: first brief write failed: %s", type(exc).__name__)
+                    return
+                if waited >= FIRST_WRITE_GIVE_UP_S:
+                    return
+
+        threading.Thread(target=first, daemon=True, name="speakeasy-brief-first").start()
+
         def loop() -> None:
             while not self._stop.wait(CHECK_INTERVAL_S):
                 try:

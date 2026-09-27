@@ -25,7 +25,15 @@ sys.path.insert(0, str(TESTS))
 home = Path(tempfile.mkdtemp(prefix="speakeasy-home-"))
 os.environ["HERMES_HOME"] = str(home)
 shutil.copytree(PLUGIN_SRC, home / "plugins/speakeasy", ignore=shutil.ignore_patterns("__pycache__"))
-(home / "config.yaml").write_text("plugins:\n  enabled:\n    - speakeasy\n")  # what `hermes plugins enable` writes
+(home / "config.yaml").write_text(  # what `hermes plugins enable` writes, plus a Telegram home channel
+    "plugins:\n  enabled:\n    - speakeasy\n"
+    "platforms:\n  telegram:\n    enabled: true\n    home_channel:\n      platform: telegram\n"
+    "      chat_id: '555000111'\n      name: Sam\n")
+# A gateway that has Telegram and Discord connected and has seen a few chats (no real IDs).
+(home / "channel_directory.json").write_text(json.dumps({"platforms": {
+    "telegram": [{"id": "555000111", "name": "Sam", "type": "dm"}],
+    "discord": [{"id": "900000000000000001", "name": "general", "guild": "Home", "type": "channel"},
+                {"id": "900000000000000002", "name": "a thread", "guild": "Home", "type": "thread"}]}}))
 
 from fakes import FAKE_API_KEY, SDP, FakeHermesServer  # noqa: E402
 
@@ -109,7 +117,13 @@ async def main() -> None:
     status, s = await run("PATCH", "/voice/settings", {"assistant_name": "Nova", "user_name": "Sam"}, token)
     check("PATCH /voice/settings", status == 200 and s["settings"]["assistant_name"] == "Nova", s)
     check("settings.json is 0600", (home / "speakeasy/settings.json").stat().st_mode & 0o777 == 0o600)
-    check("GET /voice/destinations", (await run("GET", "/voice/destinations", token=token))[0] == 200)
+    # The running gateway rewrites gateway_state.json on connect, so state is set here.
+    (home / "gateway_state.json").write_text(json.dumps({"pid": 0, "platforms": {
+        "telegram": {"state": "connected"}, "discord": {"state": "connected"}, "api_server": {"state": "connected"}}}))
+    code_, dest = await run("GET", "/voice/destinations", token=token)
+    names = sorted(d["platform"] for d in dest.get("destinations", []))
+    check("GET /voice/destinations lists connected chats and suggests the home channel",
+          code_ == 200 and names == ["discord", "telegram"] and dest.get("suggested") == "telegram:555000111", dest)
     status, ob = await run("GET", "/voice/onboarding", token=token)
     check("GET /voice/onboarding", status == 200 and ob["steps"]["paired"] is True, ob)
     check("GET /voice/work/latest (empty)", (await run("GET", "/voice/work/latest", token=token))[0] == 200)

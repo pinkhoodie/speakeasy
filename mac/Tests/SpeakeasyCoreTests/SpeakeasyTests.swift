@@ -143,7 +143,7 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.resolvedAssistantName, "Hermes")
         XCTAssertEqual(s.threadsSupported, true)
         XCTAssertFalse(s.readyForCalls)
-        XCTAssertEqual(s.checks.first { $0.id == "voice" }?.fix, "Sign in to ChatGPT: run codex login")
+        XCTAssertEqual(s.checks.first { $0.id == "voice" }?.fix, "On the Hermes machine, run hermes voice setup (it signs you in to ChatGPT)")
         var openai = s; openai.provider = "openai"
         XCTAssertTrue(openai.readyForCalls, "API key set; the brief is optional")
         XCTAssertEqual(openai.checks.first { $0.id == "voice" }?.title, "OpenAI API key")

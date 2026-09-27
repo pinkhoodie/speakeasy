@@ -194,11 +194,13 @@ public struct ServerStatus: Codable, Equatable, Sendable {
     public var version: String?
     /// The delivery platform can open a thread per task.
     public var threadsSupported: Bool?
+    /// The server's own answer to "can a call start": the chosen provider is signed in / has a key.
+    public var voiceReady: Bool?
 
     enum CodingKeys: String, CodingKey {
         case assistantName = "assistant_name", provider, codexSignedIn = "codex_signed_in"
         case apiKeySet = "api_key_set", briefState = "brief_state", hermesAPIOK = "hermes_api_ok", version
-        case threadsSupported = "threads_supported"
+        case threadsSupported = "threads_supported", voiceReady = "voice_ready"
     }
 
     public init(assistantName: String? = nil, provider: String? = nil, codexSignedIn: Bool? = nil, apiKeySet: Bool? = nil,
@@ -217,6 +219,7 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         hermesAPIOK = try? c.decodeIfPresent(Bool.self, forKey: .hermesAPIOK)
         version = try? c.decodeIfPresent(String.self, forKey: .version)
         threadsSupported = try? c.decodeIfPresent(Bool.self, forKey: .threadsSupported)
+        voiceReady = try? c.decodeIfPresent(Bool.self, forKey: .voiceReady)
     }
 
     public var resolvedAssistantName: String {
@@ -242,10 +245,10 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         switch provider.flatMap(VoiceProvider.init(rawValue:)) ?? .codex {
         case .codex:
             out.append(Check(id: "voice", ok: codexSignedIn == true, title: "ChatGPT sign-in",
-                             fix: codexSignedIn == true ? nil : "Sign in to ChatGPT: run codex login"))
+                             fix: codexSignedIn == true ? nil : "On the Hermes machine, run hermes voice setup (it signs you in to ChatGPT)"))
         case .openai:
             out.append(Check(id: "voice", ok: apiKeySet == true, title: "OpenAI API key",
-                             fix: apiKeySet == true ? nil : "Add an OpenAI API key: run hermes voice config"))
+                             fix: apiKeySet == true ? nil : "On the Hermes machine, run hermes voice setup --api-key"))
         }
         let briefReady = briefState == "ready" || briefState == "edited"
         out.append(Check(id: "brief", ok: briefReady, title: "Voice brief",
@@ -287,6 +290,13 @@ public struct Destination: Codable, Equatable, Sendable, Identifiable, Hashable 
     /// "home_channel": {"name", "target"}, "chats": [{"name", "target"}]}], "threads_supported"}`.
     /// Flattens each platform into its home channel and chats. Also accepts plain
     /// `{"target", "label"}` entries and bare strings. Drops "none" and duplicates.
+    /// `suggested` from `GET /voice/destinations`: the connected home channel to preselect, or nil.
+    public static func suggested(_ data: Data) -> String? {
+        guard let top = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let s = top["suggested"] as? String, !s.isEmpty, s != "none" else { return nil }
+        return s
+    }
+
     public static func list(_ data: Data) -> [Destination] {
         let json = try? JSONSerialization.jsonObject(with: data)
         let top = json as? [String: Any]
@@ -303,7 +313,9 @@ public struct Destination: Codable, Equatable, Sendable, Identifiable, Hashable 
                 if let home = object["home_channel"] as? [String: Any], let t = home["target"] as? String {
                     let n = (home["name"] as? String).map { " · \($0)" } ?? ""
                     out.append(Destination(target: t, label: title + n, threadsSupported: entryThreads))
-                } else if let t = object["target"] as? String {
+                } else if object["chats"] == nil, let t = object["target"] as? String {
+                    // Older servers list a bare platform; with a chat list, a bare target would mean
+                    // "the home channel", which this platform doesn't have, so it isn't offered.
                     out.append(Destination(target: t, label: title, threadsSupported: entryThreads))
                 }
                 for chat in object["chats"] as? [[String: Any]] ?? [] {

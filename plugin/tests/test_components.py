@@ -124,32 +124,26 @@ def test_settings_file_is_private_and_rejects_unknown(tmp_path):
         store.patch({"openai_api_key": "x"})
 
 
-def test_cli_setup_enables_api_server_without_overwriting(tmp_path, monkeypatch, capsys):
-    from speakeasy import cli
-    monkeypatch.setattr(cli, "_home", lambda: tmp_path)
-    (tmp_path / ".env").write_text("API_SERVER_KEY=keep-this-existing-value\nOTHER=1\n")
-    rc = cli.handle(Namespace(voice_command="setup", no_open=True, server="", no_brief=True))
-    assert rc == 0
-    env = (tmp_path / ".env").read_text()
-    assert "API_SERVER_KEY=keep-this-existing-value" in env and env.count("API_SERVER_KEY=") == 1
-    assert "API_SERVER_HOST=127.0.0.1" in env and "OTHER=1" in env
+def test_cli_setup_without_restart_prepares_profile(tmp_path, monkeypatch):
+    """--no-restart: profile is prepared, but no link is offered as ready while the server is down."""
+    from speakeasy import cli, setup_flow as F
+    lines: list[str] = []
+    env = F.Env(run=lambda *a, **k: type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
+                out=lines.append, interactive=False, health=lambda url: False, which=lambda n: None)
+    monkeypatch.setattr(F, "find_codex", lambda configured="": None)
+    rc = cli.cmd_setup(Namespace(server="", tailscale=False, api_key=False, send="", yes=False,
+                                 no_restart=True, no_open=True), tmp_path, env=env)
+    assert rc == 1
+    values = S.read_env_file(tmp_path / ".env")
+    assert len(values["API_SERVER_KEY"]) >= 32 and values["API_SERVER_HOST"] == "127.0.0.1"
+    assert stat.S_IMODE(os.stat(tmp_path / ".env").st_mode) == 0o600
     import yaml
     config = yaml.safe_load((tmp_path / "config.yaml").read_text())
     assert config["gateway"]["platforms"]["voice"]["enabled"] is True and "speakeasy" in config["plugins"]["enabled"]
     assert (tmp_path / "speakeasy" / "settings.json").exists()
-    out = capsys.readouterr().out
-    assert "speakeasy://pair?server=" in out and "code=" in out
-    assert "keep-this-existing-value" not in out
-
-
-def test_cli_setup_generates_key_when_missing(tmp_path, monkeypatch, capsys):
-    from speakeasy import cli
-    monkeypatch.setattr(cli, "_home", lambda: tmp_path)
-    assert cli.handle(Namespace(voice_command="setup", no_open=True, server="", no_brief=True)) == 0
-    values = S.read_env_file(tmp_path / ".env")
-    assert len(values["API_SERVER_KEY"]) >= 32
-    assert stat.S_IMODE(os.stat(tmp_path / ".env").st_mode) == 0o600
-    assert values["API_SERVER_KEY"] not in capsys.readouterr().out
+    text = "\n".join(lines)
+    assert "hermes gateway restart" in text and "isn't running yet" in text
+    assert values["API_SERVER_KEY"] not in text
 
 
 def test_cli_config_get_set(tmp_path, monkeypatch, capsys):
@@ -159,3 +153,15 @@ def test_cli_config_get_set(tmp_path, monkeypatch, capsys):
     assert cli.handle(Namespace(voice_command="config", config_command="get", key="assistant_name")) == 0
     assert "Nova" in capsys.readouterr().out
     assert cli.handle(Namespace(voice_command="config", config_command="set", key="voice.provider", value="x")) != 0
+
+
+def test_brief_headings_are_matched_loosely():
+    from speakeasy import brief as B
+    body = "Some sentence about the person that is long enough to count as real content here. " * 3
+    loose = (f"## 1. User\n{body}\n## **Capabilities**\n{body}\n## How you like answers\n{body}\n"
+             f"## Current projects\n{body}\n")
+    assert B.sections_found(loose) == {"User", "Capability map", "Answer preferences", "Current context"}
+    assert B.validate(loose)
+    no_caps = f"## User\n{body}\n## Answer preferences\n{body}\n## Current context\n{body}\n"
+    with pytest.raises(B.BriefInvalid):
+        B.validate(no_caps)

@@ -19,7 +19,11 @@ from .settings import valid_delivery_target
 
 logger = logging.getLogger(__name__)
 SEND_TIMEOUT_S = 60
-INTERNAL_PLATFORMS = {"api_server", "webhook", "voice", "cli", "cron", "acp", "relay"}
+# Platforms that are not chats a person reads (or are Speakeasy itself).
+INTERNAL_PLATFORMS = {"api_server", "webhook", "msgraph_webhook", "voice", "cli", "cron", "acp", "relay",
+                      "homeassistant"}
+MAX_CHATS_PER_PLATFORM = 25
+CHAT_TYPE_ORDER = {"dm": 0, "channel": 1, "group": 2, "": 3, "thread": 4}
 
 
 def hermes_command() -> list[str]:
@@ -74,30 +78,72 @@ def _hermes_config(hermes_home: Path) -> dict[str, Any]:
         return {}
 
 
-def destinations(hermes_home: Path) -> dict[str, Any]:
-    """Connected Hermes platforms, their home channels and known chats (no secrets).
+def _config_platform_blocks(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Platform blocks from both places Hermes reads them: `platforms.*` and `gateway.platforms.*`."""
+    out: dict[str, dict[str, Any]] = {}
+    gateway = config.get("gateway") if isinstance(config.get("gateway"), dict) else {}
+    for source in (gateway.get("platforms"), config.get("platforms")):
+        if isinstance(source, dict):
+            for name, block in source.items():
+                if isinstance(name, str) and isinstance(block, dict):
+                    out.setdefault(name, {}).update(block)
+    return out
 
-    Sources: gateway_state.json (which platforms are up), config.yaml `platforms.*.home_channel`,
-    and channel_directory.json (chats the gateway has seen). Every entry carries a ready-to-use
-    `target` string for `delivery.target`.
+
+def _gateway_home_channels(hermes_home: Path) -> dict[str, dict[str, str]]:
+    """Home channels as the running gateway resolved them (config.yaml *and* env such as
+    DISCORD_HOME_CHANNEL). Only used when this process belongs to the same Hermes home."""
+    try:
+        from hermes_constants import get_hermes_home  # type: ignore
+        if Path(get_hermes_home()).resolve() != Path(hermes_home).resolve():
+            return {}
+        from gateway.config import load_gateway_config  # type: ignore
+        cfg = load_gateway_config()
+        out: dict[str, dict[str, str]] = {}
+        for platform, pconf in cfg.platforms.items():
+            home = getattr(pconf, "home_channel", None)
+            if home is not None and getattr(home, "chat_id", None):
+                out[platform.value] = {"chat_id": str(home.chat_id), "name": str(getattr(home, "name", "") or "Home"),
+                                       "thread_id": str(getattr(home, "thread_id", "") or "")}
+        return out
+    except Exception:
+        return {}
+
+
+def _chat_target(platform: str, chat: dict[str, Any]) -> str:
+    target = f"{platform}:{chat['id']}"
+    if chat.get("thread_id"):
+        target += f":{chat['thread_id']}"
+    return target
+
+
+def destinations(hermes_home: Path) -> dict[str, Any]:
+    """Connected Hermes chat platforms, their home channel and known chats (no secrets).
+
+    Sources: gateway_state.json (which platforms are up), the gateway's resolved home channels
+    (falling back to config.yaml), and channel_directory.json (chats the gateway has seen). Every
+    entry carries a ready-to-use `target` for `delivery.target`; `suggested` is the best default.
     """
     hermes_home = Path(hermes_home)
     state = _read_json(hermes_home / "gateway_state.json") or {}
     platform_states = state.get("platforms") if isinstance(state, dict) else None
     platform_states = platform_states if isinstance(platform_states, dict) else {}
-    config = _hermes_config(hermes_home)
-    configured = config.get("platforms")
-    configured = configured if isinstance(configured, dict) else {}
+    configured = _config_platform_blocks(_hermes_config(hermes_home))
+    homes = _gateway_home_channels(hermes_home)
     directory = _read_json(hermes_home / "channel_directory.json") or {}
     chats_by_platform = directory.get("platforms") if isinstance(directory, dict) else None
     chats_by_platform = chats_by_platform if isinstance(chats_by_platform, dict) else {}
 
-    names = (set(platform_states) | set(configured) | set(chats_by_platform)) - INTERNAL_PLATFORMS
+    names = {n for n in (set(platform_states) | set(configured) | set(chats_by_platform))
+             if isinstance(n, str) and ":" not in n} - INTERNAL_PLATFORMS
     out = []
-    for name in sorted(n for n in names if isinstance(n, str)):
+    for name in sorted(names):
         pstate = platform_states.get(name) if isinstance(platform_states.get(name), dict) else {}
-        pconf = configured.get(name) if isinstance(configured.get(name), dict) else {}
-        home = pconf.get("home_channel") if isinstance(pconf.get("home_channel"), dict) else None
+        pconf = configured.get(name, {})
+        chats = [c for c in (chats_by_platform.get(name) or []) if isinstance(c, dict) and c.get("id")]
+        # A platform the gateway knows nothing about beyond an empty block isn't a destination.
+        if not pstate and not chats and not pconf.get("enabled"):
+            continue
         entry: dict[str, Any] = {
             "platform": name,
             "connected": pstate.get("state") == "connected",
@@ -106,21 +152,43 @@ def destinations(hermes_home: Path) -> dict[str, Any]:
             "home_channel": None,
             "chats": [],
         }
-        if home and home.get("chat_id"):
+        home = homes.get(name)
+        if home is None:
+            raw = pconf.get("home_channel") if isinstance(pconf.get("home_channel"), dict) else None
+            if raw and raw.get("chat_id"):
+                home = {"chat_id": str(raw["chat_id"]), "name": str(raw.get("name") or "Home"),
+                        "thread_id": str(raw.get("thread_id") or "")}
+        if home:
             target = f"{name}:{home['chat_id']}" + (f":{home['thread_id']}" if home.get("thread_id") else "")
-            entry["home_channel"] = {"name": str(home.get("name") or "Home")[:80],
-                                     "target": target if valid_delivery_target(target) else name}
-        for chat in (chats_by_platform.get(name) or [])[:50]:
-            if not isinstance(chat, dict) or not chat.get("id"):
+            if valid_delivery_target(target):
+                entry["home_channel"] = {"name": home["name"][:80], "target": target}
+        chats.sort(key=lambda c: CHAT_TYPE_ORDER.get(str(c.get("type") or ""), 3))
+        seen = {entry["home_channel"]["target"]} if entry["home_channel"] else set()
+        for chat in chats:
+            if len(entry["chats"]) >= MAX_CHATS_PER_PLATFORM:
+                break
+            target = _chat_target(name, chat)
+            if target in seen or not valid_delivery_target(target):
                 continue
-            chat_id = str(chat["id"])
-            target = f"{name}:{chat_id}"
-            if not valid_delivery_target(target):
-                continue
-            entry["chats"].append({"name": str(chat.get("name") or chat_id)[:120], "type": str(chat.get("type") or ""),
-                                   "target": target})
-        out.append(entry)
-    return {"destinations": out, "none": {"target": "none", "name": "Don't post results anywhere"}}
+            seen.add(target)
+            label = str(chat.get("name") or chat["id"])
+            if chat.get("guild"):
+                label = f"{chat['guild']} / {label}"
+            entry["chats"].append({"name": label[:120], "type": str(chat.get("type") or ""), "target": target})
+        if entry["home_channel"] or entry["chats"]:
+            out.append(entry)
+    return {"destinations": out, "none": {"target": "none", "name": "Don't post results anywhere"},
+            "suggested": suggested_target(out)}
+
+
+def suggested_target(entries: list[dict[str, Any]]) -> str:
+    """The home channel of the first connected platform that has one (Telegram/Discord first),
+    else ``none``. Used as the preselected choice in onboarding."""
+    preferred = {"telegram": 0, "discord": 1, "slack": 2, "signal": 3, "whatsapp": 4}
+    for entry in sorted(entries, key=lambda e: preferred.get(e["platform"], 9)):
+        if entry.get("connected") and entry.get("home_channel"):
+            return entry["home_channel"]["target"]
+    return "none"
 
 
 def threads_supported() -> bool:
