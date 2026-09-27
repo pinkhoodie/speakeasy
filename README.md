@@ -63,3 +63,5 @@ Building from source, running the tests and releasing: see [CONTRIBUTING.md](CON
 ## License
 
 MIT
+
+Made by [Georgio Constantinou](https://georgio.co) · [@rungmc357](https://github.com/rungmc357)
