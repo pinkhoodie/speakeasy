@@ -27,6 +27,18 @@ final class ServerClient: @unchecked Sendable {
         session = URLSession(configuration: configuration)
     }
 
+    /// A long request (Suggest channels waits on a Hermes run) needs its own session: the shared
+    /// one gives up after 30 s of silence.
+    private func sessionFor(_ timeout: TimeInterval) -> URLSession {
+        guard timeout > 30 else { return session }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.httpCookieStorage = nil
+        configuration.urlCache = nil
+        return URLSession(configuration: configuration)
+    }
+
     func url(_ path: String) -> URL {
         var text = base.absoluteString
         while text.hasSuffix("/") { text.removeLast() }
@@ -45,8 +57,8 @@ final class ServerClient: @unchecked Sendable {
     }
 
     /// Raw response for the Speakeasy settings routes (typed decoding lives in the core).
-    func data(_ path: String, method: String = "GET", body: Data? = nil) async throws -> Data {
-        let (data, response) = try await session.data(for: request(path, method: method, body: body))
+    func data(_ path: String, method: String = "GET", body: Data? = nil, timeout: TimeInterval = 30) async throws -> Data {
+        let (data, response) = try await sessionFor(timeout).data(for: request(path, method: method, body: body, timeout: timeout))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
             let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -76,9 +88,13 @@ final class ServerClient: @unchecked Sendable {
         return (Destination.list(raw), Destination.suggested(raw))
     }
     func onboarding() async throws -> OnboardingStatus { OnboardingStatus.parse(try await data("/voice/onboarding")) }
-    func completeOnboarding(assistantName: String, userName: String, target: String?) async throws {
+    func completeOnboarding(assistantName: String, userName: String, target: String?, continuity: Bool?) async throws {
         _ = try await data("/voice/onboarding", method: "POST", body: try OnboardingStatus.postBody(
-            assistantName: assistantName, userName: userName, target: target))
+            assistantName: assistantName, userName: userName, target: target, continuity: continuity))
+    }
+    /// One read-only Hermes run (up to ~90 s) that proposes delivery channels; nothing is saved.
+    func suggestChannels() async throws -> [ServerSettings.Channel] {
+        ChannelSuggestions.parse(try await data("/voice/destinations/suggest", method: "POST", body: Data("{}".utf8), timeout: 120))
     }
 
     /// Approve / deny / revise an email draft. Throws `DraftActionError.changed` on 409.

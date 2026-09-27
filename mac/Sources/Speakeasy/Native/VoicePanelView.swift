@@ -86,12 +86,13 @@ struct StatusText: View {
     var text: String
     var tone: StatusTone
     var clickable: Bool
-    /// Header status stays one line; the Work view shows the whole sentence.
+    /// The Work view shows the whole sentence; elsewhere the text wraps up to `maxLines`.
     var wraps = false
+    var maxLines = 1
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var scheme
 
-    private var lines: Int? { wraps ? nil : 1 }
+    private var lines: Int? { wraps ? nil : maxLines }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 3) {
@@ -106,7 +107,7 @@ struct StatusText: View {
     @ViewBuilder private var base: some View {
         let label = Text(text).font(.system(size: 11.5, weight: tone == .attention ? .semibold : .regular))
             .lineLimit(lines).truncationMode(.tail)
-            .fixedSize(horizontal: false, vertical: wraps)
+            .fixedSize(horizontal: false, vertical: wraps || maxLines > 1)
         switch tone {
         case .glimmer where !reduceMotion:
             label.foregroundStyle(.secondary)
@@ -146,19 +147,14 @@ struct MicButton: View {
     var action: () -> Void
     @State private var hover = false
     var body: some View {
+        // Icon only: lit (filled, full strength) when live; slashed and dimmed when muted.
         Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: muted ? "mic.slash.fill" : "mic.fill").font(.system(size: 11.5, weight: .semibold))
-                Text(muted ? "Muted" : "Mic on").font(.system(size: 12, weight: .semibold))
-            }
-            .padding(.horizontal, 9)
-            .frame(height: 30)
-            .foregroundStyle(muted ? Tokens.amberInk : Color.primary)
-            .background(
-                Capsule().fill(muted ? AnyShapeStyle(Tokens.amber) : AnyShapeStyle(Color.primary.opacity(hover ? 0.16 : 0.1)))
-            )
-            .overlay(Capsule().strokeBorder(muted ? Color.clear : Color.primary.opacity(0.14), lineWidth: 0.5))
-            .contentShape(Capsule())
+            Image(systemName: muted ? "mic.slash.fill" : "mic.fill").font(.system(size: 12.5, weight: .semibold))
+                .frame(width: 30, height: 30)
+                .foregroundStyle(muted ? Color.primary.opacity(0.45) : Color.primary)
+                .background(Circle().fill(Color.primary.opacity(muted ? (hover ? 0.1 : 0.05) : (hover ? 0.18 : 0.12))))
+                .overlay(Circle().strokeBorder(Color.primary.opacity(muted ? 0.08 : 0.16), lineWidth: 0.5))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -179,18 +175,15 @@ struct PauseButton: View {
     @State private var hover = false
     var body: some View {
         let resume = label == "Resume"
+        // Icon only: pause symbol while live, play symbol while paused.
         Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: resume ? "play.fill" : "pause.fill").font(.system(size: 10.5, weight: .semibold))
-                Text(label).font(.system(size: 12, weight: .semibold))
-            }
-            .padding(.horizontal, 9)
-            .frame(height: 30)
-            .foregroundStyle(resume ? Color.white : Color.primary)
-            .background(Capsule().fill(resume ? AnyShapeStyle(Color.accentColor.opacity(hover ? 1 : 0.9))
-                                             : AnyShapeStyle(Color.primary.opacity(hover ? 0.16 : 0.1))))
-            .overlay(Capsule().strokeBorder(resume ? Color.clear : Color.primary.opacity(0.14), lineWidth: 0.5))
-            .contentShape(Capsule())
+            Image(systemName: resume ? "play.fill" : "pause.fill").font(.system(size: 11.5, weight: .semibold))
+                .frame(width: 30, height: 30)
+                .foregroundStyle(resume ? Color.white : Color.primary)
+                .background(Circle().fill(resume ? AnyShapeStyle(Color.accentColor.opacity(hover ? 1 : 0.9))
+                                                 : AnyShapeStyle(Color.primary.opacity(hover ? 0.16 : 0.1))))
+                .overlay(Circle().strokeBorder(resume ? Color.clear : Color.primary.opacity(0.14), lineWidth: 0.5))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -391,9 +384,12 @@ struct VoicePanelView: View {
                 .padding(.trailing, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(p.primary).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .help(p.primary)
                     .contentTransition(.opacity)
                 Button(action: { if p.statusClickable || model.showsSlim { model.onToggleWork() } }) {
-                    StatusText(text: model.shownStatus, tone: model.shownTone, clickable: p.statusClickable || model.showsSlim)
+                    StatusText(text: model.shownStatus, tone: model.shownTone, clickable: p.statusClickable || model.showsSlim,
+                               maxLines: 2)
                         .id(model.shownStatus)
                         .transition(.opacity)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -435,8 +431,8 @@ struct VoicePanelView: View {
                        : "Close panel (Esc)", size: 22, action: model.onClosePanel)
                 .fixedSize()
         }
-        .padding(.leading, 12).padding(.trailing, 12)
-        .frame(height: 64)
+        .padding(.leading, 12).padding(.trailing, 12).padding(.vertical, 8)
+        .frame(minHeight: 64)
     }
 }
 
@@ -694,7 +690,8 @@ struct TaskRow: View {
                 Text(task.name).font(.system(size: 11.5, weight: .medium))
                     .lineLimit(compact ? 1 : 2).truncationMode(.tail)
                     .foregroundStyle(.primary.opacity(0.9))
-                StatusText(text: status, tone: tone, clickable: false)
+                StatusText(text: status, tone: tone, clickable: false, maxLines: 3)
+                    .help(status)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             if canStop && (hover || !compact) {

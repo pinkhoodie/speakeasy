@@ -213,7 +213,11 @@ private struct BriefSettings: View {
 
 // MARK: Behavior
 
+/// One-line explanation shared by Settings and onboarding.
+let continuityHelp = "When you ask about something you were already discussing in a Hermes chat or thread, the task continues inside that conversation, with its history, and the reply posts there."
+
 private struct BehaviorSettings: View {
+    @EnvironmentObject var app: AppModel
     @State private var draft = ServerSettings()
 
     var body: some View {
@@ -222,14 +226,22 @@ private struct BehaviorSettings: View {
                 Text("Several requests can run at once. Each becomes its own task in the panel; follow-ups go to the right one.")
                     .font(.callout).foregroundStyle(.secondary)
             }
-            Toggle("Continue existing conversations", isOn: Binding(
-                get: { draft.continuity?.enabled ?? true },
-                set: { v in var c = draft.continuity ?? .init(); c.enabled = v; draft.continuity = c }))
-                .help("Pick up where you left off: the next call hears what happened while you were away")
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Continue existing conversations", isOn: Binding(
+                    get: { draft.continuity?.enabled ?? true },
+                    set: { v in var c = draft.continuity ?? .init(); c.enabled = v; draft.continuity = c }))
+                Text(continuityHelp).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             Stepper(value: Binding(get: { Int(draft.idlePauseMinutes ?? 5) }, set: { draft.idlePauseMinutes = Double($0) }),
                     in: 0...60) {
                 let minutes = Int(draft.idlePauseMinutes ?? 5)
                 Text(minutes == 0 ? "Auto-pause a quiet call: off" : "Auto-pause a quiet call after \(minutes) min")
+            }
+            Section("Task routing") {
+                LabeledContent("Routing model", value: app.status?.routingModel ?? "Unknown")
+                Text(app.status?.routingHint ?? "Change it in your Hermes config under auxiliary → speakeasy_router.")
+                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -240,26 +252,206 @@ private struct BehaviorSettings: View {
 private struct DeliverySettings: View {
     @EnvironmentObject var app: AppModel
     @State private var draft = ServerSettings()
+    @State private var adding = false
+    @State private var suggesting = false
+    @State private var suggestions: [ServerSettings.Channel]?
+    @State private var suggestError: String?
+
+    private var channels: [ServerSettings.Channel] { draft.delivery?.channels ?? [] }
+
+    private func setChannels(_ list: [ServerSettings.Channel]) {
+        var d = draft.delivery ?? .init(); d.channels = list; draft.delivery = d
+    }
 
     var body: some View {
         ServerForm(draft: $draft) {
-            Text("When a task finishes after the call ended, send the result here.")
-                .font(.callout).foregroundStyle(.secondary)
-            DeliveryPicker(target: Binding(get: { draft.deliveryTarget }, set: { t in
-                var d = draft.delivery ?? .init(); d.target = t; if t == nil { d.newThreadPerTask = false }
-                draft.delivery = d
-                draft.notifyTarget = t
-            }), destinations: app.destinations)
-            if draft.deliveryTarget != nil && app.status?.threadsSupported == true {
-                Toggle("Open a new thread for each task", isOn: Binding(
-                    get: { draft.delivery?.newThreadPerTask ?? false },
-                    set: { v in var d = draft.delivery ?? .init(); d.newThreadPerTask = v; draft.delivery = d }))
+            Section {
+                Text("Where finished work goes by default, and where tasks go that don't fit a channel below.")
+                    .font(.callout).foregroundStyle(.secondary)
+                DeliveryPicker(target: Binding(get: { draft.deliveryTarget }, set: { t in
+                    var d = draft.delivery ?? .init(); d.target = t; if t == nil { d.newThread = false }
+                    draft.delivery = d
+                    draft.notifyTarget = t
+                }), destinations: app.destinations)
+                if app.status?.canOpenThread(in: draft.deliveryTarget) == true {
+                    Toggle("Run each task in a new thread there", isOn: Binding(
+                        get: { draft.delivery?.newThread ?? false },
+                        set: { v in var d = draft.delivery ?? .init(); d.newThread = v; draft.delivery = d }))
+                        .help("You can follow up in that thread, and the call still hears the result.")
+                }
+            }
+            Section {
+                ForEach(channels) { channel in
+                    ChannelRow(channel: Binding(
+                        get: { channel },
+                        set: { new in setChannels(channels.map { $0.target == channel.target ? new : $0 }) }),
+                        destinationLabel: app.destinations.first(where: { $0.target == channel.target })?.label ?? channel.target,
+                        canThread: app.status?.canOpenThread(in: channel.target) == true,
+                        remove: { setChannels(channels.filter { $0.target != channel.target }) })
+                }
+                HStack {
+                    Button("Add channel…") { adding = true }.disabled(channels.count >= 8 || app.destinations.isEmpty)
+                    Button {
+                        suggest()
+                    } label: {
+                        if suggesting { ProgressView().controlSize(.small) } else { Text("Suggest channels") }
+                    }
+                    .disabled(suggesting || app.destinations.isEmpty)
+                    .help("Your Hermes proposes channels from what it knows about your work. Nothing is saved until you pick.")
+                }
+                if let suggestError { Text(suggestError).font(.caption).foregroundStyle(.orange) }
+            } header: {
+                Text("More channels")
+            } footer: {
+                Text("A new task goes to the channel you name (\"start this in #build\"), else the one whose topic fits, else the default. Follow-ups stay where their task runs.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             if app.destinations.isEmpty {
                 Text("No connected Hermes chats found. Connect one in Hermes (e.g. Telegram), then reopen Settings.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+        .sheet(isPresented: $adding) {
+            AddChannelSheet(destinations: app.destinations.filter { d in !channels.contains { $0.target == d.target } },
+                            canThread: { app.status?.canOpenThread(in: $0) == true }) { new in
+                setChannels(ChannelSuggestions.merge([new], into: channels))
+            }
+        }
+        .sheet(item: Binding(get: { suggestions.map { SuggestionList(items: $0) } }, set: { suggestions = $0?.items })) { list in
+            SuggestionsSheet(items: list.items, existing: channels,
+                             canThread: { app.status?.canOpenThread(in: $0) == true }) { picked in
+                setChannels(ChannelSuggestions.merge(picked, into: channels))
+            }
+        }
+    }
+
+    private func suggest() {
+        suggesting = true; suggestError = nil
+        Task {
+            let result = await app.suggestChannels()
+            suggesting = false
+            if let result, !result.isEmpty { suggestions = result }
+            else { suggestError = app.lastError ?? "Hermes didn't suggest any channels." }
+        }
+    }
+}
+
+private struct SuggestionList: Identifiable {
+    let items: [ServerSettings.Channel]
+    var id: String { items.map(\.target).joined(separator: ",") }
+}
+
+private struct ChannelRow: View {
+    @Binding var channel: ServerSettings.Channel
+    var destinationLabel: String
+    var canThread: Bool
+    var remove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                TextField("Name", text: $channel.label, prompt: Text("#build")).frame(maxWidth: 140)
+                Text(destinationLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    .help(destinationLabel)
+                Spacer()
+                Button(role: .destructive, action: remove) { Image(systemName: "minus.circle") }
+                    .buttonStyle(.borderless).help("Remove this channel").accessibilityLabel("Remove \(channel.label)")
+            }
+            TextField("Topic", text: $channel.topic, prompt: Text("e.g. building or changing software, apps, agents"))
+            if canThread {
+                Toggle("Run each task in a new thread", isOn: $channel.newThread)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct AddChannelSheet: View {
+    var destinations: [Destination]
+    var canThread: (String) -> Bool
+    var add: (ServerSettings.Channel) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var target: String?
+    @State private var label = ""
+    @State private var topic = ""
+    @State private var newThread = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add a channel").font(.headline)
+            Form {
+                Picker("Chat", selection: $target) {
+                    Text("Choose…").tag(String?.none)
+                    ForEach(destinations) { d in Text(d.label).tag(String?.some(d.target)) }
+                }
+                TextField("Name", text: $label, prompt: Text("#build"))
+                TextField("Topic", text: $topic, prompt: Text("building or changing software, apps, agents"))
+                if let target, canThread(target) { Toggle("Run each task in a new thread", isOn: $newThread) }
+            }
+            .formStyle(.grouped)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Add") {
+                    if let target {
+                        add(.init(target: target, label: label.trimmingCharacters(in: .whitespaces), topic: topic,
+                                  newThread: newThread && canThread(target)))
+                    }
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(target == nil || label.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20).frame(width: 440)
+        .onChange(of: target) { _, new in
+            if label.isEmpty, let d = destinations.first(where: { $0.target == new }) { label = suggestedChannelLabel(d.label) }
+        }
+    }
+}
+
+/// The channels Hermes suggested, with checkboxes; only the picked ones are added (then Save).
+struct SuggestionsSheet: View {
+    var items: [ServerSettings.Channel]
+    var existing: [ServerSettings.Channel]
+    var canThread: (String) -> Bool
+    var add: ([ServerSettings.Channel]) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var picked: Set<String> = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Suggested channels").font(.headline)
+            Text("From what your Hermes knows about your work. Pick the ones you want; nothing is saved until you press Save.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            ForEach(items) { item in
+                let already = existing.contains { $0.target == item.target }
+                Toggle(isOn: Binding(get: { picked.contains(item.target) },
+                                     set: { on in if on { picked.insert(item.target) } else { picked.remove(item.target) } })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.label + (item.newThread && canThread(item.target) ? " · new thread per task" : "")).fontWeight(.medium)
+                        Text(item.topic).font(.caption).foregroundStyle(.secondary)
+                        if already { Text("Already added").font(.caption2).foregroundStyle(.secondary) }
+                    }
+                }
+                .toggleStyle(.checkbox)
+                .disabled(already)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Add selected") {
+                    add(items.filter { picked.contains($0.target) }.map { c in
+                        var c = c; c.newThread = c.newThread && canThread(c.target); return c
+                    })
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(picked.isEmpty)
+            }
+        }
+        .padding(20).frame(width: 460)
+        .onAppear { picked = Set(items.filter { i in !existing.contains { $0.target == i.target } }.map(\.target)) }
     }
 }
 
@@ -272,6 +464,13 @@ private struct ConnectionSettings: View {
     var body: some View {
         Form {
             LabeledContent("Server", value: app.config.serverURL?.absoluteString ?? "—")
+            if let status = app.status {
+                Label(status.reachability, systemImage: status.tailscaleName?.isEmpty == false ? "lock.shield.fill" : "desktopcomputer")
+                    .font(.headline)
+            }
+            if let offer = app.tailnetOffer {
+                TailnetOffer(url: offer)
+            }
             LabeledContent("This Mac", value: app.isPaired ? (app.deviceName ?? "Paired") : "Not paired")
             Section("Status") {
                 if let status = app.status {
@@ -328,4 +527,25 @@ private struct AboutSettings: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
+
+/// Shown when this Mac is paired to the server's loopback address but can't reach it, while the
+/// server advertised a tailnet address: offer to switch to it.
+struct TailnetOffer: View {
+    @EnvironmentObject var app: AppModel
+    var url: URL
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Can't reach the server on this Mac, but it's available over Tailscale.", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Button("Switch to \(url.host ?? url.absoluteString)") { Task { await app.switchServer(to: url) } }
+        }
+    }
+}
+
+/// "#build" from a destination label like "Discord · Home / build".
+func suggestedChannelLabel(_ destination: String) -> String {
+    let last = destination.split(whereSeparator: { $0 == "·" || $0 == "/" }).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? destination
+    let name = last.hasPrefix("#") ? String(last.dropFirst()) : last
+    return "#" + String(name.prefix(39))
 }

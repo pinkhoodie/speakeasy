@@ -1,6 +1,7 @@
 {
   "body" : {
     "assistant_name" : "Nova",
+    "continuity_enabled" : true,
     "delivery_target" : "none",
     "user_name" : "Sam",
     "write_brief" : false

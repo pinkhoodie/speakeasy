@@ -9,7 +9,10 @@
       "enabled" : true
     },
     "delivery" : {
-      "new_thread_per_task" : false,
+      "channels" : [
+
+      ],
+      "new_thread" : false,
       "target" : "none"
     },
     "idle_pause_minutes" : 5,

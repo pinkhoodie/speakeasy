@@ -30,13 +30,48 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         }
     }
 
-    /// Where finished work goes (a Hermes send target such as `telegram`); nil target = nowhere.
+    /// One opted-in delivery channel: new tasks about `topic` (or that name `label`) go to `target`.
+    public struct Channel: Codable, Equatable, Sendable, Identifiable, Hashable {
+        public var target: String
+        public var label: String
+        public var topic: String
+        public var newThread: Bool
+        public var id: String { target }
+        enum CodingKeys: String, CodingKey { case target, label, topic, newThread = "new_thread" }
+        public init(target: String, label: String, topic: String = "", newThread: Bool = false) {
+            self.target = target; self.label = label; self.topic = topic; self.newThread = newThread
+        }
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            target = try c.decode(String.self, forKey: .target)
+            label = (try? c.decodeIfPresent(String.self, forKey: .label)) ?? target
+            topic = (try? c.decodeIfPresent(String.self, forKey: .topic)) ?? ""
+            newThread = (try? c.decodeIfPresent(Bool.self, forKey: .newThread)) ?? false
+        }
+        var patchObject: [String: Any] { ["target": target, "label": label, "topic": topic, "new_thread": newThread] }
+    }
+
+    /// Where finished work goes: the default `target` (nil = nowhere), whether each task opens a new
+    /// thread there, and extra opted-in `channels` routed by topic.
     public struct Delivery: Codable, Equatable, Sendable {
         public var target: String?
-        public var newThreadPerTask: Bool?
-        enum CodingKeys: String, CodingKey { case target, newThreadPerTask = "new_thread_per_task" }
-        public init(target: String? = nil, newThreadPerTask: Bool? = nil) {
-            self.target = target; self.newThreadPerTask = newThreadPerTask
+        public var newThread: Bool?
+        public var channels: [Channel]?
+        enum CodingKeys: String, CodingKey { case target, newThread = "new_thread", legacyNewThread = "new_thread_per_task", channels }
+        public init(target: String? = nil, newThread: Bool? = nil, channels: [Channel]? = nil) {
+            self.target = target; self.newThread = newThread; self.channels = channels
+        }
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            target = try? c.decodeIfPresent(String.self, forKey: .target)
+            newThread = (try? c.decodeIfPresent(Bool.self, forKey: .newThread)) ?? (try? c.decodeIfPresent(Bool.self, forKey: .legacyNewThread))
+            channels = try? c.decodeIfPresent([Channel].self, forKey: .channels)
+        }
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encodeIfPresent(target, forKey: .target)
+            try c.encodeIfPresent(newThread, forKey: .newThread)
+            try c.encodeIfPresent(channels, forKey: .channels)
         }
     }
     public struct Continuity: Codable, Equatable, Sendable {
@@ -110,7 +145,8 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         }
         if let idlePauseMinutes { object["idle_pause_minutes"] = idlePauseMinutes }
         var d: [String: Any] = ["target": deliveryTarget ?? "none"]
-        if let v = delivery?.newThreadPerTask { d["new_thread_per_task"] = v }
+        if let v = delivery?.newThread { d["new_thread"] = deliveryTarget == nil ? false : v }
+        if let channels = delivery?.channels { d["channels"] = channels.map(\.patchObject) }
         object["delivery"] = d
         if let enabled = continuity?.enabled { object["continuity"] = ["enabled": enabled] }
         if let instructionsExtra { object["instructions_extra"] = instructionsExtra }
@@ -196,11 +232,25 @@ public struct ServerStatus: Codable, Equatable, Sendable {
     public var threadsSupported: Bool?
     /// The server's own answer to "can a call start": the chosen provider is signed in / has a key.
     public var voiceReady: Bool?
+    /// Why new threads aren't available (empty when they are).
+    public var threadsReason: String?
+    /// Chat platforms where a task can open a new thread (e.g. discord, telegram).
+    public var threadPlatforms: [String]?
+    public var continuityEnabled: Bool?
+    /// The model task routing uses (Hermes auxiliary task speakeasy_router), and how to change it.
+    public var routingModel: String?
+    public var routingHint: String?
+    /// The address `hermes voice setup` advertised for other devices (empty = local only).
+    public var advertisedURL: String?
+    public var tailscaleName: String?
 
     enum CodingKeys: String, CodingKey {
         case assistantName = "assistant_name", provider, codexSignedIn = "codex_signed_in"
         case apiKeySet = "api_key_set", briefState = "brief_state", hermesAPIOK = "hermes_api_ok", version
         case threadsSupported = "threads_supported", voiceReady = "voice_ready"
+        case threadsReason = "threads_reason", threadPlatforms = "thread_platforms", continuityEnabled = "continuity_enabled"
+        case routingModel = "routing_model", routingHint = "routing_hint"
+        case advertisedURL = "advertised_url", tailscaleName = "tailscale_name"
     }
 
     public init(assistantName: String? = nil, provider: String? = nil, codexSignedIn: Bool? = nil, apiKeySet: Bool? = nil,
@@ -220,6 +270,28 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         version = try? c.decodeIfPresent(String.self, forKey: .version)
         threadsSupported = try? c.decodeIfPresent(Bool.self, forKey: .threadsSupported)
         voiceReady = try? c.decodeIfPresent(Bool.self, forKey: .voiceReady)
+        threadsReason = try? c.decodeIfPresent(String.self, forKey: .threadsReason)
+        threadPlatforms = try? c.decodeIfPresent([String].self, forKey: .threadPlatforms)
+        continuityEnabled = try? c.decodeIfPresent(Bool.self, forKey: .continuityEnabled)
+        routingModel = try? c.decodeIfPresent(String.self, forKey: .routingModel)
+        routingHint = try? c.decodeIfPresent(String.self, forKey: .routingHint)
+        advertisedURL = try? c.decodeIfPresent(String.self, forKey: .advertisedURL)
+        tailscaleName = try? c.decodeIfPresent(String.self, forKey: .tailscaleName)
+    }
+
+    /// A new thread can be opened for tasks sent to `target` (the server supports it and the
+    /// target's platform has threads).
+    public func canOpenThread(in target: String?) -> Bool {
+        guard threadsSupported == true, let target, !target.isEmpty, target != "none" else { return false }
+        let platform = String(target.split(separator: ":").first ?? "")
+        return (threadPlatforms ?? []).contains(platform)
+    }
+
+    /// "Connected over Tailscale: <name>" or "Local only", for onboarding and Settings.
+    public var reachability: String {
+        if let name = tailscaleName, !name.isEmpty { return "Connected over Tailscale: \(name)" }
+        if let url = advertisedURL, !url.isEmpty { return "Reachable at \(url)" }
+        return "Local only"
     }
 
     public var resolvedAssistantName: String {
@@ -353,17 +425,19 @@ public struct OnboardingStatus: Equatable, Sendable {
 
     public var isComplete: Bool { done.contains("complete") }
 
-    /// `POST /voice/onboarding` accepts only assistant_name, user_name, delivery_target, write_brief.
-    /// The per-task-thread choice isn't part of onboarding; it's saved with `PATCH /voice/settings`.
-    public static func postBody(assistantName: String, userName: String, target: String?, writeBrief: Bool = true) throws -> Data {
+    /// `POST /voice/onboarding` accepts assistant_name, user_name, delivery_target, continuity_enabled
+    /// and write_brief. Extra channels and threads are set later in Settings › Delivery.
+    public static func postBody(assistantName: String, userName: String, target: String?, writeBrief: Bool = true,
+                                continuity: Bool? = nil) throws -> Data {
         let name = assistantName.trimmingCharacters(in: .whitespacesAndNewlines)
         let user = userName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "assistant_name": name.isEmpty ? VoiceState.defaultAssistantName : name,
             "user_name": user,
             "delivery_target": target ?? "none",
             "write_brief": writeBrief,
         ]
+        if let continuity { body["continuity_enabled"] = continuity }
         return try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
     }
 }
@@ -375,5 +449,32 @@ extension ISO8601DateFormatter {
         if let d = f.date(from: text) { return d }
         f.formatOptions = [.withInternetDateTime]
         return f.date(from: text)
+    }
+}
+
+/// `POST /voice/destinations/suggest`: channels the user's own Hermes proposes (never saved by the
+/// server; the user picks which to add).
+public enum ChannelSuggestions {
+    public static func parse(_ data: Data) -> [ServerSettings.Channel] {
+        guard let top = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let items = top["suggestions"] as? [[String: Any]] else { return [] }
+        var seen = Set<String>()
+        return items.compactMap { item -> ServerSettings.Channel? in
+            guard let target = item["target"] as? String, !target.isEmpty, target != "none",
+                  let label = item["label"] as? String, !label.isEmpty, seen.insert(target).inserted else { return nil }
+            return ServerSettings.Channel(target: target, label: label, topic: item["topic"] as? String ?? "",
+                                          newThread: item["new_thread"] as? Bool ?? false)
+        }
+    }
+
+    /// Adds picked suggestions to existing channels: an already-opted-in target is kept as is.
+    public static func merge(_ picked: [ServerSettings.Channel], into existing: [ServerSettings.Channel],
+                             max: Int = 8) -> [ServerSettings.Channel] {
+        var out = existing
+        for channel in picked where !out.contains(where: { $0.target == channel.target || $0.label.lowercased() == channel.label.lowercased() }) {
+            guard out.count < max else { break }
+            out.append(channel)
+        }
+        return out
     }
 }

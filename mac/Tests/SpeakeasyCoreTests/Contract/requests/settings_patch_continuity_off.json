@@ -6,11 +6,19 @@
       "include_recent_voice" : true
     },
     "continuity" : {
-      "enabled" : true
+      "enabled" : false
     },
     "delivery" : {
+      "channels" : [
+        {
+          "label" : "#general",
+          "new_thread" : true,
+          "target" : "discord:9000000000001",
+          "topic" : "everyday questions and errands"
+        }
+      ],
       "new_thread" : false,
-      "target" : "none"
+      "target" : "telegram:555000111"
     },
     "idle_pause_minutes" : 5,
     "instructions_extra" : "",

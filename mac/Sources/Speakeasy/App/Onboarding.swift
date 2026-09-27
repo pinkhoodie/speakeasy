@@ -30,7 +30,7 @@ final class OnboardingFlow: ObservableObject {
     @Published var assistantName = ""
     @Published var userName = ""
     @Published var target: String?
-    @Published var newThreadPerTask = false
+    @Published var continuity = true
     @Published var saving = false
     @Published var saveError: String?
 
@@ -74,7 +74,7 @@ final class OnboardingFlow: ObservableObject {
         if assistantName.isEmpty { assistantName = s.assistantName ?? app.status?.assistantName ?? "" }
         if userName.isEmpty { userName = s.userName ?? "" }
         if target == nil { target = s.deliveryTarget ?? app.suggestedDestination }
-        newThreadPerTask = s.delivery?.newThreadPerTask ?? false
+        continuity = s.continuity?.enabled ?? true
     }
 
     /// Steps `hermes voice setup` or the system already finished are skipped, so a normal setup
@@ -108,15 +108,16 @@ final class OnboardingFlow: ObservableObject {
         if let p { step = p }
     }
 
-    /// Names and delivery are saved together (`POST /voice/onboarding`) when leaving the delivery step.
-    func saveProfile() {
+    /// Names, delivery and continuity are saved together (`POST /voice/onboarding`): after the
+    /// delivery step, and again from the last step when continuity is changed there.
+    func saveProfile(then advance: Bool = true) {
         saving = true; saveError = nil
         Task {
             let ok = await app.completeOnboarding(assistantName: assistantName.trimmingCharacters(in: .whitespaces),
                                                   userName: userName.trimmingCharacters(in: .whitespaces),
-                                                  target: target, newThreadPerTask: newThreadPerTask)
+                                                  target: target, continuity: continuity)
             saving = false
-            if ok { next() } else { saveError = app.lastError ?? "Couldn't save" }
+            if ok { if advance { next() } } else { saveError = app.lastError ?? "Couldn't save" }
         }
     }
 
@@ -232,6 +233,7 @@ private struct StepButtons: View {
 
 private struct ConnectStep: View {
     @ObservedObject var flow: OnboardingFlow
+    @EnvironmentObject var app: AppModel
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             StepHeader(title: "Connect to Hermes",
@@ -249,6 +251,12 @@ private struct ConnectStep: View {
                 Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if let host = URL(string: flow.server)?.host {
+                Label(host.hasSuffix(".ts.net") ? "Connecting over Tailscale: \(host)" : "Local only: this Mac",
+                      systemImage: host.hasSuffix(".ts.net") ? "lock.shield.fill" : "desktopcomputer")
+                    .font(.headline)
+            }
+            if let offer = app.tailnetOffer { TailnetOffer(url: offer) }
             Spacer()
             StepButtons(primary: "Connect", primaryDisabled: normalizedPairingCode(flow.code) == nil, busy: flow.pairing,
                         action: flow.pair)
@@ -265,6 +273,10 @@ private struct MicrophoneStep: View {
         VStack(alignment: .leading, spacing: 10) {
             StepHeader(title: "Microphone",
                        subtitle: "Speakeasy listens only during a call you start. Audio goes to your voice provider through your own Hermes server.")
+            if let status = app.status {
+                Label(status.reachability, systemImage: status.tailscaleName?.isEmpty == false ? "lock.shield.fill" : "desktopcomputer")
+                    .font(.headline)
+            }
             switch app.micAuthorization {
             case .authorized:
                 Label("Microphone access is on", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
@@ -357,15 +369,15 @@ private struct DeliveryStep: View {
                        subtitle: "When a task finishes after you hang up, \(flow.assistantName.isEmpty ? app.assistantName : flow.assistantName) can send the result to one of your connected Hermes chats.")
             Form {
                 DeliveryPicker(target: $flow.target, destinations: app.destinations)
-                if flow.target != nil && app.status?.threadsSupported == true {
-                    Toggle("Open a new thread for each task", isOn: $flow.newThreadPerTask)
-                }
             }
             .formStyle(.grouped)
-            .frame(height: 120)
+            .frame(height: 80)
+            Text("You can add more channels later in Settings › Delivery, each with a topic, so a task goes where it belongs. Suggest channels asks your Hermes to propose some.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            SuggestChannelsButton()
             if let error = flow.saveError { Text(error).foregroundStyle(.orange) }
             Spacer()
-            StepButtons(back: flow.back, primary: "Continue", busy: flow.saving, action: flow.saveProfile)
+            StepButtons(back: flow.back, primary: "Continue", busy: flow.saving, action: { flow.saveProfile() })
         }
         .task { if app.destinations.isEmpty { await app.refresh() } }
     }
@@ -444,6 +456,13 @@ private struct HotkeyStep: View {
                 ShortcutRecorder(shortcut: app.callShortcut) { app.setCallShortcut($0) }
             }
             if let problem = app.callShortcutProblem { Text(problem).foregroundStyle(.orange) }
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Continue existing conversations", isOn: Binding(get: { flow.continuity },
+                                                                         set: { flow.continuity = $0; flow.saveProfile(then: false) }))
+                Text(continuityHelp).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 4)
+            if let error = flow.saveError { Text(error).foregroundStyle(.orange) }
             Button {
                 app.startCall()
                 flow.finish()
@@ -456,4 +475,51 @@ private struct HotkeyStep: View {
             StepButtons(back: flow.back, primary: "Done", action: flow.finish)
         }
     }
+}
+
+/// Onboarding's Suggest channels: asks Hermes, lets the user pick, and saves picked channels.
+private struct SuggestChannelsButton: View {
+    @EnvironmentObject var app: AppModel
+    @State private var busy = false
+    @State private var items: [ServerSettings.Channel]?
+    @State private var error: String?
+    @State private var added = 0
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button { run() } label: { busy ? AnyView(ProgressView().controlSize(.small)) : AnyView(Text("Suggest channels")) }
+                .disabled(busy || app.destinations.isEmpty)
+            if let error { Text(error).font(.caption).foregroundStyle(.orange).lineLimit(2) }
+            else if added > 0 { Text("Added \(added) channel\(added == 1 ? "" : "s").").font(.caption).foregroundStyle(.secondary) }
+        }
+        .sheet(item: Binding(get: { items.map { SuggestionPick(items: $0) } }, set: { items = $0?.items })) { pick in
+            SuggestionsSheet(items: pick.items, existing: app.settings.delivery?.channels ?? [],
+                             canThread: { app.status?.canOpenThread(in: $0) == true }) { picked in
+                Task { await save(picked) }
+            }
+        }
+    }
+
+    private func run() {
+        busy = true; error = nil
+        Task {
+            let result = await app.suggestChannels()
+            busy = false
+            if let result, !result.isEmpty { items = result } else { error = app.lastError ?? "Hermes didn't suggest any channels." }
+        }
+    }
+
+    private func save(_ picked: [ServerSettings.Channel]) async {
+        var s = app.settings
+        var d = s.delivery ?? .init()
+        let before = d.channels?.count ?? 0
+        d.channels = ChannelSuggestions.merge(picked, into: d.channels ?? [])
+        s.delivery = d
+        if await app.save(s) { added = (d.channels?.count ?? 0) - before } else { error = app.lastError }
+    }
+}
+
+private struct SuggestionPick: Identifiable {
+    let items: [ServerSettings.Channel]
+    var id: String { items.map(\.target).joined(separator: ",") }
 }

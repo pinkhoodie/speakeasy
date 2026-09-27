@@ -89,7 +89,7 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(s.voice?.voice, "marin")
         XCTAssertEqual(s.idleTimeout, 600)
         XCTAssertEqual(s.deliveryTarget, "telegram")
-        XCTAssertEqual(s.delivery?.newThreadPerTask, true)
+        XCTAssertEqual(s.delivery?.newThread, true, "the pre-channels flag is still read")
         XCTAssertEqual(s.continuity?.enabled, false)
         XCTAssertEqual(s.brief?.autoRefresh, false)
         XCTAssertEqual(s.brief?.includeRecentVoice, true)
@@ -110,7 +110,7 @@ final class ServerSettingsTests: XCTestCase {
 
     func testPatchBodyRoundTrips() throws {
         let s = ServerSettings(assistantName: "Juniper", userName: "Sam", voice: .init(provider: "codex", voice: "cedar"),
-                               idlePauseMinutes: 3, delivery: .init(target: " ", newThreadPerTask: true),
+                               idlePauseMinutes: 3, delivery: .init(target: " ", newThread: true),
                                continuity: .init(enabled: true), instructionsExtra: "x",
                                brief: .init(autoRefresh: true, includeRecentVoice: false))
         let object = try JSONSerialization.jsonObject(with: s.patchBody()) as? [String: Any]
@@ -280,5 +280,61 @@ final class SlimSummaryTests: XCTestCase {
         var sent = draft; sent.status = .sent
         XCTAssertEqual(slimTaskSummary([task("a", "completed", drafts: [sent])]), "1 task done")
         XCTAssertEqual(slimTaskSummary([], approvalPending: true), "1 task needs you")
+    }
+}
+
+final class DeliveryChannelsTests: XCTestCase {
+    func testChannelsDecodeAndPatch() throws {
+        let json = #"""
+        {"settings":{"delivery":{"target":"telegram:1","new_thread":true,
+          "channels":[{"target":"discord:2","label":"#build","topic":"software","new_thread":true},{"target":"discord:3"}]}}}
+        """#
+        let s = try ServerSettings.decode(Data(json.utf8))
+        XCTAssertEqual(s.delivery?.newThread, true)
+        XCTAssertEqual(s.delivery?.channels?.count, 2)
+        XCTAssertEqual(s.delivery?.channels?.first?.label, "#build")
+        XCTAssertEqual(s.delivery?.channels?.last?.label, "discord:3", "a missing label falls back to the target")
+        let body = try JSONSerialization.jsonObject(with: s.patchBody()) as? [String: Any]
+        let d = body?["delivery"] as? [String: Any]
+        XCTAssertEqual(d?["new_thread"] as? Bool, true)
+        XCTAssertNil(d?["new_thread_per_task"], "the old key is never sent")
+        XCTAssertEqual((d?["channels"] as? [[String: Any]])?.first?["topic"] as? String, "software")
+    }
+
+    func testNewThreadIsOffWithoutADefaultTarget() throws {
+        let s = ServerSettings(delivery: .init(target: "none", newThread: true))
+        let d = (try JSONSerialization.jsonObject(with: s.patchBody()) as? [String: Any])?["delivery"] as? [String: Any]
+        XCTAssertEqual(d?["new_thread"] as? Bool, false)
+    }
+
+    func testThreadToggleOnlyWhereSupported() throws {
+        let json = #"{"threads_supported":true,"thread_platforms":["discord","telegram"],"tailscale_name":"box.tail1.ts.net","routing_model":"auto"}"#
+        let status = try JSONDecoder().decode(ServerStatus.self, from: Data(json.utf8))
+        XCTAssertTrue(status.canOpenThread(in: "discord:123"))
+        XCTAssertFalse(status.canOpenThread(in: "signal:123"))
+        XCTAssertFalse(status.canOpenThread(in: nil))
+        XCTAssertEqual(status.reachability, "Connected over Tailscale: box.tail1.ts.net")
+        XCTAssertEqual(status.routingModel, "auto")
+        let off = try JSONDecoder().decode(ServerStatus.self, from: Data(#"{"threads_supported":false,"thread_platforms":["discord"]}"#.utf8))
+        XCTAssertFalse(off.canOpenThread(in: "discord:123"))
+        XCTAssertEqual(off.reachability, "Local only")
+    }
+
+    func testSuggestionsParseAndMerge() {
+        let raw = ##"{"suggestions":[{"target":"discord:2","label":"#build","topic":"code","new_thread":true},{"target":"discord:2","label":"#dup"},{"label":"no target"}]}"##
+        let items = ChannelSuggestions.parse(Data(raw.utf8))
+        XCTAssertEqual(items.map(\.label), ["#build"])
+        let existing = [ServerSettings.Channel(target: "discord:9", label: "#Build")]
+        XCTAssertEqual(ChannelSuggestions.merge(items, into: existing).count, 1, "same label is not added twice")
+        XCTAssertEqual(ChannelSuggestions.merge(items, into: []).count, 1)
+    }
+
+    func testOnboardingBodyCarriesContinuity() throws {
+        let body = try JSONSerialization.jsonObject(with: OnboardingStatus.postBody(
+            assistantName: "Nova", userName: "", target: nil, continuity: false)) as? [String: Any]
+        XCTAssertEqual(body?["continuity_enabled"] as? Bool, false)
+        let without = try JSONSerialization.jsonObject(with: OnboardingStatus.postBody(
+            assistantName: "Nova", userName: "", target: nil)) as? [String: Any]
+        XCTAssertNil(without?["continuity_enabled"])
     }
 }

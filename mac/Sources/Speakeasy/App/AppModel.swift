@@ -18,6 +18,8 @@ enum Prefs {
     static let followSystemAudio = "followSystemAudio"
     static let onboardingDone = "onboardingDone"
     static let startSlim = "startSlim"
+    /// The address the server last advertised for other devices (e.g. its tailnet URL).
+    static let advertisedURL = "advertisedServerURL"
 
     static func register() {
         UserDefaults.standard.register(defaults: [showPanelOnStart: true, followSystemAudio: true, startMuted: false, startSlim: false])
@@ -113,11 +115,17 @@ final class AppModel: ObservableObject {
         refreshing = true
         defer { refreshing = false }
         do {
-            status = try await api.status()
+            let fresh = try await api.status()
+            status = fresh
             lastError = nil
+            tailnetOffer = nil
+            if let url = fresh.advertisedURL, !url.isEmpty { UserDefaults.standard.set(url, forKey: Prefs.advertisedURL) }
         } catch {
             status = nil
             lastError = describe(error)
+            if (error as NSError).domain == NSURLErrorDomain {
+                checkTailnetOffer(advertised: UserDefaults.standard.string(forKey: Prefs.advertisedURL))
+            }
         }
         if let s = try? await api.settings() { applySettings(s) }
         brief = try? await api.brief()
@@ -169,28 +177,61 @@ final class AppModel: ObservableObject {
     }
 
     /// `POST /voice/onboarding`; falls back to `PATCH /voice/settings` on servers without it.
-    func completeOnboarding(assistantName: String, userName: String, target: String?, newThreadPerTask: Bool) async -> Bool {
+    func completeOnboarding(assistantName: String, userName: String, target: String?, continuity: Bool) async -> Bool {
         guard let api else { return false }
         do {
-            try await api.completeOnboarding(assistantName: assistantName, userName: userName, target: target)
+            try await api.completeOnboarding(assistantName: assistantName, userName: userName, target: target,
+                                             continuity: continuity)
             if let s = try? await api.settings() { applySettings(s) }
-            if target != nil, newThreadPerTask {
-                var s = settings
-                s.delivery = .init(target: target, newThreadPerTask: true)
-                _ = await save(s)
-            }
             if let s = try? await api.status() { status = s }
             return true
-        } catch let error as ServerClient.HTTPError where error.status == 404 || error.status == 405 {
+        } catch let error as ServerClient.HTTPError where error.status == 404 || error.status == 405 || error.status == 400 {
+            // Older servers: no onboarding route, or no continuity_enabled field. Save as settings.
             var s = settings
             s.assistantName = assistantName.isEmpty ? nil : assistantName
             s.userName = userName.isEmpty ? nil : userName
-            s.delivery = .init(target: target, newThreadPerTask: target == nil ? false : newThreadPerTask)
+            var d = s.delivery ?? .init(); d.target = target; s.delivery = d
+            s.continuity = .init(enabled: continuity)
             return await save(s)
         } catch {
             lastError = describe(error)
             return false
         }
+    }
+
+    /// Ask the user's Hermes to propose delivery channels. Returns suggestions, or sets `lastError`.
+    func suggestChannels() async -> [ServerSettings.Channel]? {
+        guard let api else { lastError = "Not connected"; return nil }
+        do {
+            let list = try await api.suggestChannels()
+            lastError = nil
+            return list
+        } catch {
+            lastError = describe(error)
+            return nil
+        }
+    }
+
+    /// The paired server is this Mac's loopback but doesn't answer, while setup advertised a tailnet
+    /// address: the Mac is probably another computer. The app offers to switch.
+    @Published var tailnetOffer: URL?
+
+    func checkTailnetOffer(advertised: String?) {
+        guard let current = config.serverURL, isLoopback(current),
+              let text = advertised, let url = trustedServerBaseURL(text), !isLoopback(url) else { tailnetOffer = nil; return }
+        tailnetOffer = url
+    }
+
+    /// Point the app at the advertised address (same device token: it's the same server).
+    func switchServer(to url: URL) async {
+        UserDefaults.standard.set(url.absoluteString, forKey: Prefs.serverURL)
+        setConfig(AppConfig.resolve(savedServer: url.absoluteString, savedToken: Keychain.readToken()))
+        tailnetOffer = nil
+        await refresh()
+    }
+
+    private func isLoopback(_ url: URL) -> Bool {
+        ["127.0.0.1", "localhost", "::1"].contains((url.host ?? "").lowercased())
     }
 
     // MARK: Client preferences

@@ -88,10 +88,10 @@ enum PanelSmoke {
         }
         let one = height(StatusText(text: "Checking", tone: .plain, clickable: false))
         let now = height(WorkDetailView.nowStatus(longStatus, tone: .glimmer))
-        let header = height(StatusText(text: longStatus, tone: .glimmer, clickable: false))
+        let header = height(StatusText(text: longStatus, tone: .glimmer, clickable: false, maxLines: 2))
         record("status: oneLine=\(Int(one))pt workNow=\(Int(now))pt header=\(Int(header))pt (\(longStatus.count) chars, \(Int(width))pt wide)")
         check(now >= one * 2 - 1, "status: Work 'Now' status wraps to show the full text")
-        check(abs(header - one) < 1, "status: compact header status stays one line")
+        check(header > one + 1 && header <= one * 2 + 1, "status: header status wraps to at most two lines")
         // Rendered through the live panel: the Work document grows by the extra lines.
         let docHeight = { scrollViews(c).first?.documentView?.frame.height ?? 0 }
         let withLong = docHeight()
@@ -309,6 +309,7 @@ enum PanelSmoke {
         await settle()
         do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/work-long-status.png")); record("snapshot \(dir)/work-long-status.png") }
         catch { fail("snapshot failed: \(error)") }
+        await longStrings(c, dir: dir)
         await slim(c, dir: dir)
         if let (draft, _) = PreviewFixtures.state("email-draft") {
             c.showPreview(draft, workExpanded: false)
@@ -317,6 +318,30 @@ enum PanelSmoke {
             do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/email-draft.png")); record("snapshot \(dir)/email-draft.png") }
             catch { fail("snapshot failed: \(error)") }
         }
+    }
+
+    // MARK: Long header and task strings stay readable
+
+    static let longTaskStatus = "Comparing three hotel rates near the venue and checking which ones include breakfast"
+
+    /// Renders the connecting header and a task list with long text, for a visual check.
+    static func longStrings(_ c: NativeVoiceClient, dir: String) async {
+        guard var (s, _) = PreviewFixtures.state("tasklist") else { fail("long strings: no tasklist fixture"); return }
+        if !s.tasks.isEmpty { s.tasks[0].info.shortStatus = longTaskStatus + " before booking" }
+        c.showPreview(s, workExpanded: false)
+        c.model.shownStatus = "Opening microphone and warming up audio"
+        await settle()
+        let panelHeight = c.panel.window.frame.height
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/long-strings.png")); record("snapshot \(dir)/long-strings.png (panel \(Int(panelHeight))pt)") }
+        catch { fail("snapshot failed: \(error)") }
+        guard var (connecting, _) = PreviewFixtures.state("listening") else { return }
+        connecting.connection = .connecting
+        connecting.interactionID = nil
+        c.showPreview(connecting, workExpanded: false)
+        c.model.shownStatus = "Opening microphone and warming up audio"
+        await settle()
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/long-connecting.png")); record("snapshot \(dir)/long-connecting.png") }
+        catch { fail("snapshot failed: \(error)") }
     }
 
     // MARK: Slim mode shrinks a busy panel to the controls, and comes back

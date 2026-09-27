@@ -48,10 +48,16 @@ final class ContractTests: XCTestCase {
         }
         var full = try ServerSettings.decode(fixture("settings"))
         try record("settings_patch", "PATCH", "/voice/settings", full.patchBody())
-        full.delivery = .init(target: nil, newThreadPerTask: false)
+        full.delivery = .init(target: nil, newThread: false)
         try record("settings_patch_no_delivery", "PATCH", "/voice/settings", full.patchBody())
+        full.delivery = .init(target: "telegram:555000111", newThread: false, channels: [
+            .init(target: "discord:9000000000001", label: "#general", topic: "everyday questions and errands", newThread: true)])
+        try record("settings_patch_channels", "PATCH", "/voice/settings", full.patchBody())
+        full.continuity = .init(enabled: false)
+        try record("settings_patch_continuity_off", "PATCH", "/voice/settings", full.patchBody())
         try record("onboarding_post", "POST", "/voice/onboarding",
-                   OnboardingStatus.postBody(assistantName: "Nova", userName: "Sam", target: nil, writeBrief: false))
+                   OnboardingStatus.postBody(assistantName: "Nova", userName: "Sam", target: nil, writeBrief: false,
+                                             continuity: true))
         let brief = """
         ## User
         Sam, a product designer in Lisbon. Call him Sam.
