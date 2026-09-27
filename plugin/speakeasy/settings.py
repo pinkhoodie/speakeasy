@@ -288,12 +288,60 @@ def hermes_api_base(hermes_home: Path) -> str:
     return f"http://{shown}:{port}"
 
 
-def find_codex(configured: str = "") -> Path | None:
+# Oldest Codex whose realtime voice API matches what Speakeasy sends (older ones reject it).
+MIN_CODEX_VERSION = (0, 150, 0)
+
+
+def codex_version(binary: Path, runner: Any = None) -> tuple[int, int, int] | None:
+    import subprocess
+    run = runner or subprocess.run
+    try:
+        out = run([str(binary), "--version"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return None
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", out or "")
+    return tuple(int(x) for x in match.groups()) if match else None  # type: ignore[return-value]
+
+
+def codex_candidates(home: Path | None = None) -> list[Path]:
+    home = home or Path.home()
+    seen: list[Path] = []
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if directory:
+            seen.append(Path(directory) / "codex")
+    # The ChatGPT app ships Codex inside it (newer builds under codex-cli/bin, older at Resources/).
+    for apps in (Path("/Applications"), home / "Applications"):
+        seen += [apps / "ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+                 apps / "ChatGPT.app/Contents/Resources/codex"]
+    seen += [
+             home / ".hermes/speakeasy/codex/node_modules/.bin/codex",
+             Path("/opt/homebrew/bin/codex"), Path("/usr/local/bin/codex")]
+    out: list[Path] = []
+    for path in seen:
+        if path.is_file() and os.access(path, os.X_OK) and path.resolve() not in {p.resolve() for p in out}:
+            out.append(path)
+    return out
+
+
+def find_codex(configured: str = "", version_fn: Any = None, candidates: list[Path] | None = None) -> Path | None:
+    """The configured Codex, else the newest one found (PATH, the ChatGPT app, a Speakeasy copy)."""
     if configured:
         path = Path(configured).expanduser()
         return path if path.is_file() and os.access(path, os.X_OK) else None
-    found = shutil.which("codex")
-    return Path(found) if found else None
+    version_fn = version_fn or codex_version
+    best: tuple[tuple[int, int, int], Path] | None = None
+    for path in candidates if candidates is not None else codex_candidates():
+        version = version_fn(path) or (0, 0, 0)
+        if best is None or version > best[0]:
+            best = (version, path)
+    return best[1] if best else None
+
+
+def codex_too_old(binary: Path | None, version_fn: Any = None) -> bool:
+    if binary is None:
+        return False
+    version = (version_fn or codex_version)(binary)
+    return version is not None and version < MIN_CODEX_VERSION
 
 
 def default_voice(settings: dict[str, Any]) -> str:

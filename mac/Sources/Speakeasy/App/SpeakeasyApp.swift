@@ -57,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let args = ProcessInfo.processInfo.arguments
         if args.contains("--native-offer-smoke") { NativeSmoke.offer(); return }
         if args.contains("--native-mic-smoke") { NativeSmoke.mic(); return }
+        if args.contains("--live-call-smoke") { LiveCallSmoke.run(); return }
         if args.contains("--panel-smoke") {
             let dir = args.firstIndex(of: "--snapshot-dir").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
             PanelSmoke.run(config: app.config, snapshotDir: dir); return

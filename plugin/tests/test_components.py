@@ -201,3 +201,23 @@ def test_hermes_api_base_follows_the_api_server_host(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("")
     (tmp_path / "config.yaml").write_text("gateway:\n  platforms:\n    api_server:\n      extra:\n        port: 8777\n")
     assert S2.hermes_api_base(tmp_path) == "http://127.0.0.1:8777"
+
+
+def test_find_codex_picks_the_newest_and_flags_old_ones(tmp_path):
+    from speakeasy.settings import codex_too_old, find_codex
+    old, new = tmp_path / "old", tmp_path / "new"
+    versions = {old: (0, 144, 4), new: (0, 155, 0)}
+    for path in versions:
+        path.write_text("#!/bin/sh\n"); path.chmod(0o755)
+    pick = find_codex("", version_fn=versions.get, candidates=[old, new])
+    assert pick == new
+    assert codex_too_old(old, version_fn=versions.get) and not codex_too_old(new, version_fn=versions.get)
+    assert find_codex(str(old)) == old  # an explicit choice is respected
+
+
+def test_codex_errors_become_plain_reasons_without_echoing_provider_text():
+    from speakeasy.codex_transport import explain_codex_error
+    assert "too old" in explain_codex_error("Invalid request: unknown variant `v3`, expected `v1` or `v2`")
+    assert "voice" in explain_codex_error("realtime voice `marin` is not supported for v3")
+    secret = "weird internal detail 12345"
+    assert secret not in explain_codex_error(secret)

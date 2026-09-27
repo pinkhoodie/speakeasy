@@ -25,6 +25,26 @@ _ENV_KEEP = ("HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "CODEX
 _LOGIN_CACHE: dict[str, tuple[float, tuple[bool, str]]] = {}
 
 
+class CodexStartError(RuntimeError):
+    """A voice start failure with a message that is safe and useful to show the user."""
+
+
+def explain_codex_error(message: str) -> str:
+    """Map Codex's error text to a plain reason. Only known shapes pass through; nothing else
+    from the provider is reflected."""
+    text = message.lower()
+    if "unknown variant" in text and ("v3" in text or "version" in text):
+        return ("This Codex is too old for voice. Update it (npm install -g @openai/codex@latest), "
+                "or run hermes voice setup to use a current copy.")
+    if "voice" in text and "not supported" in text:
+        return "That voice isn't available. Pick another voice in Speakeasy Settings."
+    if "login" in text or "auth" in text or "unauthorized" in text or "401" in text:
+        return "Codex isn't signed in to ChatGPT. Run codex login on the Hermes machine."
+    if "rate" in text and "limit" in text:
+        return "ChatGPT's voice limit was reached. Try again later or switch to an OpenAI API key."
+    return "Codex couldn't start the voice call."
+
+
 def child_env() -> dict[str, str]:
     """Only what Codex needs to find its own account-local auth. Never Hermes or API-key vars."""
     return {k: os.environ[k] for k in _ENV_KEEP if k in os.environ}
@@ -114,7 +134,8 @@ class CodexTransport:
             self._write({"id": number, "method": method, "params": params or {}})
             event = waiter.get(timeout=timeout)
             if "error" in event:
-                raise RuntimeError("Codex request rejected")  # never reflect provider details
+                message = str((event.get("error") or {}).get("message") or "")
+                raise CodexStartError(explain_codex_error(message))
             return event.get("result") or {}
         except queue.Empty as exc:
             raise TimeoutError("Codex request timed out") from exc
@@ -163,7 +184,7 @@ class CodexTransport:
                 elif method == "thread/realtime/started" and p.get("threadId") == self.thread_id:
                     started = True
                 elif method in {"thread/realtime/error", "thread/realtime/closed", "transport/eof"}:
-                    raise RuntimeError("Codex realtime did not start")
+                    raise CodexStartError(explain_codex_error(str(p.get("message") or "")))
                 else:
                     deferred.append(event)
                 if answer and started:

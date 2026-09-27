@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .settings import OPENAI_KEY_NAME, Settings, find_codex, read_env_file
+from .settings import OPENAI_KEY_NAME, Settings, codex_too_old, find_codex, read_env_file
 
 HEALTH_TIMEOUT_S = 60
 
@@ -71,10 +71,14 @@ def codex_signed_in(env: Env, binary: Path) -> bool:
 
 def install_codex(env: Env) -> bool:
     """Install the Codex CLI with Homebrew or npm, whichever is present."""
-    if env.which("brew"):
-        cmd = ["brew", "install", "codex"]
-    elif env.which("npm"):
-        cmd = ["npm", "install", "-g", "@openai/codex"]
+    # npm first, into Speakeasy's own folder: always current, no sudo, doesn't touch a global
+    # Codex. Homebrew's formula can lag behind the voice API.
+    if env.which("npm"):
+        target = Path.home() / ".hermes/speakeasy/codex"
+        target.mkdir(parents=True, exist_ok=True)
+        cmd = ["npm", "install", "--prefix", str(target), "@openai/codex@latest"]
+    elif env.which("brew"):
+        cmd = ["brew", "upgrade", "codex"] if env.which("codex") else ["brew", "install", "codex"]
     else:
         env.out("  Neither Homebrew nor npm is installed, so Codex can't be installed automatically.")
         env.out("  Install it from https://developers.openai.com/codex/cli, then run `hermes voice setup` again.")
@@ -134,6 +138,14 @@ def voice_sign_in(env: Env, home: Path, settings: Settings, *, api_key: bool, as
                 return voice_sign_in(env, home, settings, api_key=True, assume=assume)
             env.out("✗ Voice isn't set up yet. Install Codex and run `codex login`, or run "
                     "`hermes voice setup --api-key`.")
+            return False
+
+    if codex_too_old(binary):
+        env.out("• Your Codex is too old for voice calls.")
+        if env.confirm("  Update Codex now?", True, assume) and install_codex(env):
+            binary = find_codex(settings.get()["voice"]["codex_path"])
+        if codex_too_old(binary):
+            env.out("✗ Update Codex (npm install -g @openai/codex@latest), then run `hermes voice setup` again.")
             return False
 
     if codex_signed_in(env, binary):

@@ -192,6 +192,11 @@ class VoiceService:
             if transport is not None:
                 transport.stop()
             self.store.fail_session(request_id)
+            from .codex_transport import CodexStartError
+            if isinstance(exc, CodexStartError):
+                logger.warning("speakeasy: voice start failed: %s", exc)
+                raise ServiceError(502, str(exc)) from None
+            logger.warning("speakeasy: voice start failed (%s)", type(exc).__name__)
             raise ServiceError(502, f"Voice session creation failed: {type(exc).__name__}") from None
         if not isinstance(live_id, str) or not live_id or not isinstance(answer, str) or not answer:
             if transport is not None:
