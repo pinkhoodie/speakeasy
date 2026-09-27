@@ -32,8 +32,8 @@ shutil.copytree(PLUGIN_SRC, home / "plugins/speakeasy", ignore=shutil.ignore_pat
 # A gateway that has Telegram and Discord connected and has seen a few chats (no real IDs).
 (home / "channel_directory.json").write_text(json.dumps({"platforms": {
     "telegram": [{"id": "555000111", "name": "Sam", "type": "dm"}],
-    "discord": [{"id": "900000000000000001", "name": "general", "guild": "Home", "type": "channel"},
-                {"id": "900000000000000002", "name": "a thread", "guild": "Home", "type": "thread"}]}}))
+    "discord": [{"id": "9000000000001", "name": "general", "guild": "Home", "type": "channel"},
+                {"id": "9000000000002", "name": "a thread", "guild": "Home", "type": "thread"}]}}))
 
 from fakes import FAKE_API_KEY, SDP, FakeHermesServer  # noqa: E402
 

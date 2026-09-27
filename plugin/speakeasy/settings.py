@@ -236,21 +236,56 @@ def _hermes_config(hermes_home: Path) -> dict[str, Any]:
         return {}
 
 
+def _api_server_block(cfg: dict[str, Any]) -> dict[str, Any]:
+    """The api_server block wherever Hermes allows it (gateway.platforms, top-level platforms)."""
+    merged: dict[str, Any] = {}
+    gateway = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
+    for platforms in (gateway.get("platforms"), cfg.get("platforms")):
+        block = platforms.get("api_server") if isinstance(platforms, dict) else None
+        if isinstance(block, dict):
+            extra = block.get("extra") if isinstance(block.get("extra"), dict) else {}
+            merged = {**merged, **{k: v for k, v in block.items() if k != "extra"}, **extra}
+    return merged
+
+
+def is_this_machine(host: str) -> bool:
+    """True when ``host`` is an address of this machine (loopback, or one of its own interfaces such
+    as a Tailscale IP). Checked by binding to it, so traffic to it never leaves the machine."""
+    import ipaddress
+    import socket
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if ip.is_loopback:
+        return True
+    family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.bind((host, 0))
+        return True
+    except OSError:
+        return False
+
+
 def hermes_api_base(hermes_home: Path) -> str:
-    """Loopback URL of the Hermes API server (config.yaml platforms.api_server.port, else env)."""
-    cfg = _hermes_config(hermes_home)
-    port: Any = None
-    platforms = cfg.get("platforms") if isinstance(cfg.get("platforms"), dict) else {}
-    api = platforms.get("api_server") if isinstance(platforms, dict) else None
-    if isinstance(api, dict):
-        port = (api.get("extra") or {}).get("port") if isinstance(api.get("extra"), dict) else None
-        port = port or api.get("port")
-    port = port or hermes_secret(hermes_home, "API_SERVER_PORT") or DEFAULT_HERMES_API_PORT
+    """URL of this machine's Hermes API server.
+
+    Port and host come from config.yaml (either platforms block) or the profile's env. A wildcard or
+    missing host means loopback. A specific host is used only when it is one of this machine's own
+    addresses (e.g. an API server bound to the Tailscale IP), so the key never crosses the network.
+    """
+    block = _api_server_block(_hermes_config(hermes_home))
+    port: Any = block.get("port") or hermes_secret(hermes_home, "API_SERVER_PORT") or DEFAULT_HERMES_API_PORT
     try:
         port = int(port)
     except (TypeError, ValueError):
         port = DEFAULT_HERMES_API_PORT
-    return f"http://127.0.0.1:{port}"
+    host = str(block.get("host") or hermes_secret(hermes_home, "API_SERVER_HOST") or "").strip().strip("[]")
+    if host in {"", "0.0.0.0", "::", "*", "localhost"} or not is_this_machine(host):
+        host = "127.0.0.1"
+    shown = f"[{host}]" if ":" in host else host
+    return f"http://{shown}:{port}"
 
 
 def find_codex(configured: str = "") -> Path | None:

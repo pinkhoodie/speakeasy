@@ -16,6 +16,7 @@ patterns=(
   '[0-9]{17,20}'                     # Discord/Telegram-style IDs
 )
 extra_file="${SPEAKEASY_PRIVATE_TERMS:-}"   # optional local file of personal terms, one per line
+allow_file="${SPEAKEASY_ALLOW_TERMS:-}"     # optional local file of exact public strings that may contain a term
 status=0
 for p in "${patterns[@]}"; do
   if git grep -nIE -e "$p" -- . ':!scripts/scan-secrets.sh' >/tmp/speakeasy-scan.$$ 2>/dev/null; then
@@ -26,7 +27,22 @@ if [[ -n "$extra_file" && -f "$extra_file" ]]; then
   while IFS= read -r term; do
     [[ -z "$term" ]] && continue
     if git grep -nIiF -e "$term" -- . >/tmp/speakeasy-scan.$$ 2>/dev/null; then
-      echo "FOUND private term"; cut -d: -f1,2 /tmp/speakeasy-scan.$$; status=1
+      if [[ -n "$allow_file" && -f "$allow_file" ]]; then
+        # Drop hits whose only occurrences of the term sit inside an allowed public string.
+        : >/tmp/speakeasy-scan-keep.$$
+        while IFS= read -r hit; do
+          rest="$hit"
+          while IFS= read -r allowed; do
+            [[ -z "$allowed" ]] && continue
+            rest="${rest//"$allowed"/}"
+          done < "$allow_file"
+          if printf '%s' "$rest" | grep -qiF -e "$term"; then printf '%s\n' "$hit" >>/tmp/speakeasy-scan-keep.$$; fi
+        done </tmp/speakeasy-scan.$$
+        mv /tmp/speakeasy-scan-keep.$$ /tmp/speakeasy-scan.$$
+      fi
+      if [[ -s /tmp/speakeasy-scan.$$ ]]; then
+        echo "FOUND private term"; cut -d: -f1,2 /tmp/speakeasy-scan.$$; status=1
+      fi
     fi
   done < "$extra_file"
 fi

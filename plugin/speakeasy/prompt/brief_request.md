@@ -13,7 +13,7 @@ My name and how I like to be addressed, my time zone, the languages I speak. Onl
 Your name and personality as I know you: tone, humor, how direct you are, anything I have asked you to be or not be when talking with me.
 
 ## Capability map
-The most important section. In plain spoken words, what you can actually do for me through your real tools, skills, connected platforms and integrations ("I can check your calendar, send Telegram messages, control the living-room lights, search your notes"). Group related abilities. Also list clearly what you cannot do or are not set up for, so the voice model never offers it. Never name API keys, account IDs, hostnames or file paths.
+The most important section. In plain spoken words, what you can actually do for me through your real tools, skills, connected platforms and integrations ("I can check your calendar, send Telegram messages, control the living-room lights, search your notes"). Group related abilities. Also list clearly what you cannot do or are not set up for, so the voice model never offers it. Never name API keys, account IDs, hostnames or file paths. Write it in the first person, as yourself ("I can…"). Don't describe the voice model as separate from you or tell it to pass work on to you: Speakeasy handles that on its own, and the voice speaks as you.
 
 ## Answer preferences
 How I like answers: length, tone, units, formats, things that annoy me.
@@ -23,5 +23,6 @@ Active projects or recurring topics, only at the level needed to understand a re
 
 Hard rules:
 - Never include secrets or sensitive data: no passwords, API keys, tokens, account or card numbers, street addresses, phone numbers, email addresses, health or financial details, or other people's private information.
+- Leave out rules that only matter for how you work behind the scenes (restarts, internal tooling, how you store things); keep what changes a conversation.
 - About 1,500 words at most. Short sentences. No preamble and no closing remarks: output only the five sections.
 - End your answer with two last lines: `DONE: Voice brief written` then `SPOKEN: I wrote your voice brief.`

@@ -58,7 +58,8 @@ class VoiceService:
                                lambda: P.Names.from_settings(self.settings.get()))
         self.rt = Runtime(store=self.store, hermes=self.hermes, settings=self.settings.get, hermes_home=self.home,
                           image_roots=self.image_roots, notices=self.notices, hermes_key=self.hermes_key)
-        self.brief = BriefManager(self.home, brief_run or self._brief_run, self.settings.get)
+        self.brief = BriefManager(self.home, brief_run or self._brief_run, self.settings.get,
+                                  error_fn=lambda: getattr(self.hermes, "last_error", "") or "")
         self.interactions: dict[str, Interaction] = {}
         self.lock = threading.Lock()
         self._codex_factory = codex_factory
@@ -81,6 +82,7 @@ class VoiceService:
         return default_image_roots(self.home, self.settings.get()["image_roots"])
 
     def _brief_run(self, prompt: str, idem: str) -> tuple[str, str]:
+        self.hermes.last_error = ""
         return self.hermes.run_to_completion(prompt, idem, "speakeasy_brief")
 
     def close(self) -> None:

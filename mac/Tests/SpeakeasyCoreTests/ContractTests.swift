@@ -70,7 +70,7 @@ final class ContractTests: XCTestCase {
     func testDestinationsAndSuggestion() throws {
         let raw = try fixture("destinations")
         let list = Destination.list(raw)
-        XCTAssertEqual(list.map(\.target), ["discord:900000000000000001", "discord:900000000000000002", "telegram:555000111"])
+        XCTAssertEqual(list.map(\.target), ["discord:9000000000001", "discord:9000000000002", "telegram:555000111"])
         XCTAssertEqual(list.first?.label, "Discord · Home / general")
         XCTAssertEqual(Destination.suggested(raw), "telegram:555000111")
     }

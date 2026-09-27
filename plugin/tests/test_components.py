@@ -165,3 +165,39 @@ def test_brief_headings_are_matched_loosely():
     no_caps = f"## User\n{body}\n## Answer preferences\n{body}\n## Current context\n{body}\n"
     with pytest.raises(B.BriefInvalid):
         B.validate(no_caps)
+
+
+def test_brief_failure_says_why_and_retries_hourly(tmp_path):
+    from speakeasy import brief as B
+    now = [1_000_000.0]
+    settings = {"brief": {"auto_refresh": True, "include_recent_voice": True}}
+    err = ["Provider authentication failed: No Codex credentials stored."]
+    m = B.BriefManager(tmp_path, lambda prompt, idem: ("failed", ""), lambda: settings,
+                       clock=lambda: now[0], error_fn=lambda: err[0])
+    m.rewrite(force=True, background=False)
+    st = m.status()
+    assert st["state"] == "failed" and "hermes model" in st["error"]
+    assert not m.refresh_due()
+    now[0] += B.RETRY_INTERVAL_S
+    assert m.refresh_due()
+    err[0] = "something odd happened with " + "sk-" + "x" * 24
+    m.rewrite(force=True, background=False)
+    assert "[hidden]" in m.status()["error"] and "sk-x" not in m.status()["error"]
+
+
+def test_hermes_api_base_follows_the_api_server_host(tmp_path, monkeypatch):
+    from speakeasy import settings as S2
+    assert S2.is_this_machine("127.0.0.1") and not S2.is_this_machine("203.0.113.9")
+    (tmp_path / ".env").write_text("API_SERVER_PORT=8650\nAPI_SERVER_HOST=0.0.0.0\n")
+    assert S2.hermes_api_base(tmp_path) == "http://127.0.0.1:8650"
+    # A host that is not this machine never gets the key: fall back to loopback.
+    (tmp_path / ".env").write_text("API_SERVER_PORT=8650\nAPI_SERVER_HOST=203.0.113.9\n")
+    assert S2.hermes_api_base(tmp_path) == "http://127.0.0.1:8650"
+    # One of this machine's own addresses (bound to a specific interface) is used as is.
+    monkeypatch.setattr(S2, "is_this_machine", lambda host: host == "100.100.1.2")
+    (tmp_path / ".env").write_text("API_SERVER_PORT=8650\nAPI_SERVER_HOST=100.100.1.2\n")
+    assert S2.hermes_api_base(tmp_path) == "http://100.100.1.2:8650"
+    # The nested gateway.platforms block counts too.
+    (tmp_path / ".env").write_text("")
+    (tmp_path / "config.yaml").write_text("gateway:\n  platforms:\n    api_server:\n      extra:\n        port: 8777\n")
+    assert S2.hermes_api_base(tmp_path) == "http://127.0.0.1:8777"

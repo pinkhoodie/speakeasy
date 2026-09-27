@@ -21,9 +21,13 @@ class HermesError(Exception):
 
 
 def _loopback(base: str) -> str:
+    """Only this machine's own addresses: loopback, or an interface address such as a Tailscale IP
+    that the API server is bound to (traffic to it stays on this machine)."""
+    from .settings import is_this_machine
     parsed = urllib.parse.urlsplit(base)
-    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1", "localhost"}:
-        raise ValueError("Hermes API must be a loopback http origin")
+    host = parsed.hostname or ""
+    if parsed.scheme != "http" or not (host in {"127.0.0.1", "::1", "localhost"} or is_this_machine(host)):
+        raise ValueError("Hermes API must be an http origin on this machine")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("Hermes API origin must not contain credentials/query/fragment")
     return base.rstrip("/")
@@ -38,6 +42,7 @@ class HermesAPI:
         root = _loopback(base)
         self.base = f"{root}/p/{profile}" if profile else root
         self.key_fn, self.opener = key_fn, opener
+        self.last_error = ""  # Hermes' own message for the last failed background run
 
     def _request(self, path: str, body: dict[str, Any] | None = None, method: str | None = None,
                  headers: dict[str, str] | None = None) -> urllib.request.Request:
@@ -156,9 +161,11 @@ class HermesAPI:
                 if isinstance(event.get("output"), str):
                     final["output"] = event["output"]
 
-        if not self.events(run_id, on_event) or "output" not in final:
+        if not self.events(run_id, on_event) or "output" not in final or final.get("status") != "completed":
             result = self.get_run(run_id)
             final.setdefault("status", result.get("status") or "unknown")
             if isinstance(result.get("output"), str):
                 final.setdefault("output", result["output"])
+            if final.get("status") != "completed" and isinstance(result.get("error"), str):
+                self.last_error = result["error"]
         return final.get("status", "unknown"), final.get("output", "")

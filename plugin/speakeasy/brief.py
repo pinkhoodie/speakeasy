@@ -28,6 +28,7 @@ MAX_BRIEF_CHARS = 12_000
 MIN_BRIEF_CHARS = 200
 REFRESH_INTERVAL_S = 24 * 3600
 CHECK_INTERVAL_S = 3600
+RETRY_INTERVAL_S = 3600
 FIRST_WRITE_DELAY_S = 10.0
 FIRST_WRITE_GIVE_UP_S = 600.0
 REQUIRED_SECTIONS = ("User", "Assistant persona", "Capability map", "Answer preferences", "Current context")
@@ -128,14 +129,30 @@ def input_hash(hermes_home: Path) -> str:
     return h.hexdigest()
 
 
+def explain_run_failure(status: str, error: str) -> str:
+    """A short reason the user can act on. Hermes' run errors are written for people and hold no
+    secrets; they are trimmed, and anything that looks like a credential is cut."""
+    lowered = error.lower()
+    if "credential" in lowered or "authentication" in lowered or "not logged in" in lowered or "auth" in lowered:
+        return ("Your Hermes isn't signed in to its model provider, so it couldn't write the brief. "
+                "Fix that with `hermes model`, then press Rewrite.")
+    if error:
+        text = re.sub(r"\s+", " ", error).strip()
+        text = re.sub(r"(sk-|ghp_|xox[bp]-)[A-Za-z0-9_-]+", "[hidden]", text)
+        return f"Hermes couldn't write the brief: {text[:160]}"
+    return f"Hermes couldn't write the brief (run {status})."
+
+
 class BriefManager:
     def __init__(self, hermes_home: Path, run_fn: Callable[[str, str], tuple[str, str]] | None,
-                 settings_fn: Callable[[], dict[str, Any]], clock: Callable[[], float] = time.time):
+                 settings_fn: Callable[[], dict[str, Any]], clock: Callable[[], float] = time.time,
+                 error_fn: Callable[[], str] | None = None):
         self.home = Path(hermes_home)
         self.dir = self.home / "speakeasy"
         self.path = self.dir / "voice-brief.md"
         self.state_path = self.dir / "brief-state.json"
         self.run_fn, self.settings_fn, self.clock = run_fn, settings_fn, clock
+        self.error_fn = error_fn
         self._lock = threading.Lock()
         self._writing = False
         self._stop = threading.Event()
@@ -225,7 +242,7 @@ class BriefManager:
             status, output = self.run_fn(self.request_prompt(), "speakeasy_brief_" + hashlib.sha256(
                 f"{digest}:{now}".encode()).hexdigest()[:24])
             if status != "completed":
-                raise BriefInvalid(f"Hermes run ended with status {status}")
+                raise BriefInvalid(explain_run_failure(status, self.last_run_error()))
             clean = validate(output)
             with self._lock:
                 _write_private(self.path, clean)
@@ -239,12 +256,22 @@ class BriefManager:
             with self._lock:
                 self._writing = False
 
+    def last_run_error(self) -> str:
+        try:
+            return (self.error_fn() if self.error_fn else "") or ""
+        except Exception:
+            return ""
+
     def refresh_due(self) -> bool:
         if not self.settings_fn()["brief"]["auto_refresh"]:
             return False
         state = self._state()
-        if state.get("edited") or not self.text():
+        if state.get("edited"):
             return False
+        if not self.text():
+            # No brief yet: the first write failed (Hermes not signed in, gateway was restarting...).
+            # Try again on the hourly check, never more often.
+            return bool(state.get("error")) and self.clock() - float(state.get("last_attempt") or 0) >= RETRY_INTERVAL_S
         last = float(state.get("last_attempt") or state.get("updated_at") or 0)
         if self.clock() - last < REFRESH_INTERVAL_S:
             return False

@@ -8,19 +8,20 @@ anything that needs real work goes to your own Hermes, with its tools, memory, s
 
 Status: early, private. Mac only.
 
-## Install (planned)
+## Install
 
-    hermes plugins install <repo-url>
-    hermes plugins enable speakeasy
+On the machine that runs Hermes:
+
+    hermes plugins install rungmc357/speakeasy#plugin/speakeasy --enable
     hermes voice setup
-    hermes gateway restart
 
-Then open the Speakeasy app; setup pairs it automatically.
+`hermes voice setup` turns on Hermes' local API, signs you in to ChatGPT through Codex (or asks
+for an OpenAI API key with `--api-key`), restarts Hermes so the voice server starts, waits until it
+answers, and then opens a one-time link that pairs the Speakeasy Mac app. Add `--tailscale` when
+the Mac and the Hermes machine are different computers on the same tailnet.
 
-Other commands: `hermes voice pair [--send <target>]`, `hermes voice devices`,
-`hermes voice revoke <id>`, `hermes voice config get|set <key> [value]`, `hermes voice status`.
-
-See `docs/ARCHITECTURE.md`, `docs/VOICE_PROMPT.md`, `docs/API.md` and `docs/OPEN_QUESTIONS.md`.
+The app then asks for the microphone, what to call each other, and where finished work should
+go. It suggests the home channel of a connected chat such as Telegram or Discord.
 
 ## Tests
 
