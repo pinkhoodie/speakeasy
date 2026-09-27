@@ -79,6 +79,13 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         public init(enabled: Bool? = nil) { self.enabled = enabled }
     }
 
+    /// Lines the server speaks itself (instant acknowledgement, progress on long tasks).
+    public struct Speech: Codable, Equatable, Sendable {
+        public var acknowledge: Bool?
+        public var progress: Bool?
+        public init(acknowledge: Bool? = nil, progress: Bool? = nil) { self.acknowledge = acknowledge; self.progress = progress }
+    }
+
     public var assistantName: String?
     public var userName: String?
     public var voice: Voice?
@@ -87,12 +94,14 @@ public struct ServerSettings: Codable, Equatable, Sendable {
     public var notifyTarget: String?
     public var delivery: Delivery?
     public var continuity: Continuity?
+    public var speech: Speech?
+    public var maxCallMinutes: Int?
     public var instructionsExtra: String?
     public var brief: Brief?
 
     enum CodingKeys: String, CodingKey {
         case assistantName = "assistant_name", userName = "user_name", voice, idlePauseMinutes = "idle_pause_minutes"
-        case notifyTarget = "notify_target", delivery, continuity, instructionsExtra = "instructions_extra", brief
+        case notifyTarget = "notify_target", delivery, continuity, speech, instructionsExtra = "instructions_extra", brief
     }
 
     public init(assistantName: String? = nil, userName: String? = nil, voice: Voice? = nil, idlePauseMinutes: Double? = nil,
@@ -112,6 +121,8 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         notifyTarget = try? c.decodeIfPresent(String.self, forKey: .notifyTarget)
         delivery = try? c.decodeIfPresent(Delivery.self, forKey: .delivery)
         continuity = try? c.decodeIfPresent(Continuity.self, forKey: .continuity)
+        speech = try? c.decodeIfPresent(Speech.self, forKey: .speech)
+        if let v = try? c.decodeIfPresent(VoiceLimits.self, forKey: .voice) { maxCallMinutes = v.maxCallMinutes }
         instructionsExtra = try? c.decodeIfPresent(String.self, forKey: .instructionsExtra)
         brief = try? c.decodeIfPresent(Brief.self, forKey: .brief)
     }
@@ -141,7 +152,10 @@ public struct ServerSettings: Codable, Equatable, Sendable {
             var v: [String: Any] = [:]
             if let p = voice.provider { v["provider"] = p }
             if let name = voice.voice { v["voice"] = name }
+            if let maxCallMinutes { v["max_call_minutes"] = maxCallMinutes }
             object["voice"] = v
+        } else if let maxCallMinutes {
+            object["voice"] = ["max_call_minutes": maxCallMinutes]
         }
         if let idlePauseMinutes { object["idle_pause_minutes"] = idlePauseMinutes }
         var d: [String: Any] = ["target": deliveryTarget ?? "none"]
@@ -149,6 +163,12 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         if let channels = delivery?.channels { d["channels"] = channels.map(\.patchObject) }
         object["delivery"] = d
         if let enabled = continuity?.enabled { object["continuity"] = ["enabled": enabled] }
+        if let speech {
+            var x: [String: Any] = [:]
+            if let v = speech.acknowledge { x["acknowledge"] = v }
+            if let v = speech.progress { x["progress"] = v }
+            object["speech"] = x
+        }
         if let instructionsExtra { object["instructions_extra"] = instructionsExtra }
         if let brief {
             var b: [String: Any] = [:]
@@ -157,6 +177,12 @@ public struct ServerSettings: Codable, Equatable, Sendable {
             object["brief"] = b
         }
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    /// `voice.max_call_minutes` is read separately so `Voice` keeps its provider/voice shape.
+    private struct VoiceLimits: Decodable {
+        var maxCallMinutes: Int?
+        enum CodingKeys: String, CodingKey { case maxCallMinutes = "max_call_minutes" }
     }
 
     // MARK: Resolved values with product defaults

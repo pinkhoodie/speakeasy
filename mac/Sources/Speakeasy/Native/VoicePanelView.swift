@@ -312,7 +312,7 @@ struct VoicePanelView: View {
                 if !model.state.workOnly { Divider().opacity(0.5).padding(.horizontal, 14) }
                 WorkDetailView(model: model)
             } else {
-                if !model.state.exchange.isEmpty {
+                if model.showCaptions, !model.state.exchange.isEmpty {
                     VStack(spacing: 0) {
                         CaptionView(exchange: model.state.exchange.cleaned, transcript: model.state.transcript,
                                     assistantName: model.state.assistantName, expanded: $model.captionExpanded,

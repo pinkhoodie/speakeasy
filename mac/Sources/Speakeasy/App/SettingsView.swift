@@ -10,6 +10,7 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }
+            ShortcutSettings().tabItem { Label("Shortcuts", systemImage: "keyboard") }
             VoiceSettings().tabItem { Label("Voice", systemImage: "waveform") }
             BriefSettings().tabItem { Label("Voice brief", systemImage: "text.quote") }
             BehaviorSettings().tabItem { Label("Behavior", systemImage: "slider.horizontal.3") }
@@ -65,19 +66,32 @@ private struct GeneralSettings: View {
     @AppStorage(Prefs.showPanelOnStart) private var showPanelOnStart = true
     @AppStorage(Prefs.followSystemAudio) private var followSystemAudio = true
     @AppStorage(Prefs.startSlim) private var startSlim = false
+    @AppStorage(Prefs.showCaptions) private var showCaptions = true
+    @AppStorage(Prefs.notifyWhenDone) private var notifyWhenDone = true
+    @AppStorage(Prefs.panelOnAllSpaces) private var panelOnAllSpaces = true
 
     var body: some View {
         Form {
-            LabeledContent("Call shortcut") {
-                ShortcutRecorder(shortcut: app.callShortcut) { app.setCallShortcut($0) }
+            Section("Calls") {
+                Toggle("Start calls muted", isOn: $startMuted)
+                Toggle("Follow the system's audio devices (AirPods etc.)", isOn: $followSystemAudio)
             }
-            if let problem = app.callShortcutProblem { Text(problem).foregroundStyle(.orange) }
-            Toggle("Start calls muted", isOn: $startMuted)
-            Toggle("Show the panel when a call starts", isOn: $showPanelOnStart)
-            Toggle("Start calls in slim mode", isOn: $startSlim)
-                .help("Just the controls and a one-line task summary; expand any time")
-            Toggle("Follow the system's audio devices (AirPods etc.)", isOn: $followSystemAudio)
-            Toggle("Launch at login", isOn: Binding(get: { app.launchAtLogin }, set: { app.launchAtLogin = $0 }))
+            Section("Panel") {
+                Toggle("Show the panel when a call starts", isOn: $showPanelOnStart)
+                Toggle("Start calls in slim mode", isOn: $startSlim)
+                    .help("Just the controls and a one-line task summary; expand any time")
+                Toggle("Show live captions", isOn: $showCaptions)
+                    .help("What you and the assistant say, as text in the panel")
+                Toggle("Keep the panel on every desktop", isOn: $panelOnAllSpaces)
+                    .help("Off: the panel stays on the desktop (Space) where the call started")
+            }
+            Section("After a call") {
+                Toggle("Notify me when work from a call finishes", isOn: $notifyWhenDone)
+                    .help("A macOS notification when a task you started keeps running after you hang up and then finishes")
+            }
+            Section {
+                Toggle("Launch at login", isOn: Binding(get: { app.launchAtLogin }, set: { app.launchAtLogin = $0 }))
+            }
             Section {
                 LabeledContent("Microphone") {
                     switch app.micAuthorization {
@@ -86,6 +100,56 @@ private struct GeneralSettings: View {
                     default: Button("Open Privacy Settings") { AppModel.openMicrophonePrivacySettings() }
                     }
                 }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+// MARK: Shortcuts
+
+private struct ShortcutSettings: View {
+    @EnvironmentObject var app: AppModel
+
+    private var mute: KeyShortcut? { AppModel.storedShortcut(Prefs.muteShortcut, default: .defaultMute) }
+    private var pause: KeyShortcut? { AppModel.storedShortcut(Prefs.pauseShortcut, default: .defaultPause) }
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Start or end a call") {
+                    ShortcutRecorder(shortcut: app.callShortcut, taken: [mute, pause].compactMap { $0 }) { app.setCallShortcut($0) }
+                }
+                if let problem = app.callShortcutProblem { Text(problem).foregroundStyle(.orange) }
+            } footer: {
+                Text("Works from any app. Press it again to show the panel, or to end the call when the panel is showing.")
+            }
+            Section {
+                LabeledContent("Mute or unmute") {
+                    ShortcutRecorder(shortcut: mute, name: "Mute", defaultShortcut: .defaultMute,
+                                     taken: [app.callShortcut] + [pause].compactMap { $0 },
+                                     onTurnOff: { app.setExtraShortcut(Prefs.muteShortcut, nil) }) {
+                        app.setExtraShortcut(Prefs.muteShortcut, $0)
+                    }
+                }
+                if let problem = app.muteShortcutProblem, mute != nil { Text(problem).foregroundStyle(.orange) }
+            } footer: {
+                Text("Tap to mute or unmute. Hold while muted to talk, hold while live to cough. Only active during a call.")
+            }
+            Section {
+                LabeledContent("Pause or resume") {
+                    ShortcutRecorder(shortcut: pause, name: "Pause", defaultShortcut: .defaultPause,
+                                     taken: [app.callShortcut] + [mute].compactMap { $0 },
+                                     onTurnOff: { app.setExtraShortcut(Prefs.pauseShortcut, nil) }) {
+                        app.setExtraShortcut(Prefs.pauseShortcut, $0)
+                    }
+                }
+                if let problem = app.pauseShortcutProblem, pause != nil { Text(problem).foregroundStyle(.orange) }
+            } footer: {
+                Text("A paused call stops listening and billing; tasks keep running.")
+            }
+            Section {
+                Button("Restore default shortcuts") { app.resetShortcuts() }
             }
         }
         .formStyle(.grouped)
@@ -232,11 +296,25 @@ private struct BehaviorSettings: View {
                     set: { v in var c = draft.continuity ?? .init(); c.enabled = v; draft.continuity = c }))
                 Text(continuityHelp).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
+            Section("Spoken updates") {
+                Toggle("Say a quick “on it” when a task starts", isOn: Binding(
+                    get: { draft.speech?.acknowledge ?? true },
+                    set: { v in var x = draft.speech ?? .init(); x.acknowledge = v; draft.speech = x }))
+                Toggle("Give a short update on long tasks", isOn: Binding(
+                    get: { draft.speech?.progress ?? true },
+                    set: { v in var x = draft.speech ?? .init(); x.progress = v; draft.speech = x }))
+                Text("Where a task went (like a new thread) is always said.").font(.caption).foregroundStyle(.secondary)
+            }
             Stepper(value: Binding(get: { Int(draft.idlePauseMinutes ?? 5) }, set: { draft.idlePauseMinutes = Double($0) }),
                     in: 0...60) {
                 let minutes = Int(draft.idlePauseMinutes ?? 5)
                 Text(minutes == 0 ? "Auto-pause a quiet call: off" : "Auto-pause a quiet call after \(minutes) min")
             }
+            Stepper(value: Binding(get: { draft.maxCallMinutes ?? 30 }, set: { draft.maxCallMinutes = $0 }),
+                    in: 5...240, step: 5) {
+                Text("End a call after \(draft.maxCallMinutes ?? 30) min")
+            }
+            .help("A hard cap per call so a forgotten call can't run up your plan or bill")
             Section("Task routing") {
                 LabeledContent("Routing model", value: app.status?.routingModel ?? "Unknown")
                 Text(app.status?.routingHint ?? "Change it in your Hermes config under auxiliary → speakeasy_router.")

@@ -12,6 +12,8 @@ final class VoicePanelModel: ObservableObject {
     @Published var shownStatus = ""
     @Published var shownTone: StatusTone = .plain
     @Published var busy = false
+    /// Live captions of the conversation (Settings › General).
+    @Published var showCaptions = true
     /// e.g. "⌃⌥M: tap to mute/unmute, hold to talk". Empty when no shortcut.
     @Published var muteShortcutHint = ""
     /// the user's panel size: width, plus extra height given to the transcript and

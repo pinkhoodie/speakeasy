@@ -61,6 +61,24 @@ def test_no_double_speak_when_the_model_already_acknowledged(server, service, he
     assert spoken(worker) == []
 
 
+def test_spoken_lines_can_be_turned_off(server, service, hermes, monkeypatch):
+    import asyncio
+    from speakeasy.calls import BackendRun
+    service.settings.patch({"speech": {"acknowledge": False, "progress": False}})
+    hermes.hold = True
+    _, worker = start_call(server, service)
+    worker.delegate("call_q", "Find me a dentist near the office")
+    wait_for(lambda: [t for t in tasks(server) if t.get("run_id")])
+    time.sleep(0.2)
+    assert spoken(worker) == []
+    backend = BackendRun("t9", 1, "idem_9", status="running")
+    backend.started -= 25
+    asyncio.run(worker.maybe_speak_progress(backend, "Pulling this week's events"))
+    assert spoken(worker) == []
+    status, _ = http(server.base_url, "PATCH", "/voice/settings", {"speech": {"progress": "yes"}}, server.token)
+    assert status == 400
+
+
 def test_follow_up_acknowledgement_names_the_task(server, service, hermes):
     _, worker = start_call(server, service)
     worker.delegate("call_first", "Draft a packing list for the Rome trip")

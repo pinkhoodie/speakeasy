@@ -18,11 +18,15 @@ enum Prefs {
     static let followSystemAudio = "followSystemAudio"
     static let onboardingDone = "onboardingDone"
     static let startSlim = "startSlim"
+    static let showCaptions = "showCaptions"
+    static let notifyWhenDone = "notifyWhenDone"
+    static let panelOnAllSpaces = "panelOnAllSpaces"
     /// The address the server last advertised for other devices (e.g. its tailnet URL).
     static let advertisedURL = "advertisedServerURL"
 
     static func register() {
-        UserDefaults.standard.register(defaults: [showPanelOnStart: true, followSystemAudio: true, startMuted: false, startSlim: false])
+        UserDefaults.standard.register(defaults: [showPanelOnStart: true, followSystemAudio: true, startMuted: false, startSlim: false,
+                                                 showCaptions: true, notifyWhenDone: true, panelOnAllSpaces: true])
     }
 
     /// The call shortcut (default ⌃⌥Space). Stored as e.g. `ctrl+opt+space`.
@@ -56,6 +60,11 @@ final class AppModel: ObservableObject {
     let configChanged = PassthroughSubject<AppConfig, Never>()
     let settingsChanged = PassthroughSubject<ServerSettings, Never>()
     let shortcutChanged = PassthroughSubject<KeyShortcut, Never>()
+    /// Mute / pause shortcuts changed in Settings (stored in UserDefaults; empty string = off).
+    let extraShortcutsChanged = PassthroughSubject<Void, Never>()
+    /// Why the mute / pause shortcut isn't active (set by the delegate), shown in Settings.
+    @Published var muteShortcutProblem: String?
+    @Published var pauseShortcutProblem: String?
     /// Onboarding "Try it" and Settings ask the delegate to start a call.
     var startCall: () -> Void = {}
 
@@ -240,6 +249,27 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(shortcut.storage, forKey: Prefs.callShortcutKey)
         callShortcut = shortcut
         shortcutChanged.send(shortcut)
+        extraShortcutsChanged.send()  // mute / pause must not collide with the new call shortcut
+    }
+
+    /// nil = the default; `.some(nil)` = turned off.
+    static func storedShortcut(_ key: String, default fallback: KeyShortcut) -> KeyShortcut? {
+        guard let raw = UserDefaults.standard.string(forKey: key) else { return fallback }
+        if raw.trimmingCharacters(in: .whitespaces).isEmpty { return nil }
+        if case .success(let s) = KeyShortcut.parse(raw, reserved: nil) { return s }
+        return fallback
+    }
+
+    func setExtraShortcut(_ key: String, _ shortcut: KeyShortcut?) {
+        UserDefaults.standard.set(shortcut?.storage ?? "", forKey: key)
+        objectWillChange.send()
+        extraShortcutsChanged.send()
+    }
+
+    func resetShortcuts() {
+        for key in [Prefs.muteShortcut, Prefs.pauseShortcut] { UserDefaults.standard.removeObject(forKey: key) }
+        setCallShortcut(.call)
+        objectWillChange.send()
     }
 
     var launchAtLogin: Bool {

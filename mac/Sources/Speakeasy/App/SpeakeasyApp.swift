@@ -105,6 +105,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         app.shortcutChanged.sink { [weak self] shortcut in
             self?.registerCallHotKey(shortcut)
         }.store(in: &bag)
+        app.extraShortcutsChanged.sink { [weak self] in
+            guard let self else { return }
+            self.resolveMuteShortcut()
+            self.resolvePauseShortcut()
+            if self.active {  // swap live hotkeys without ending the call
+                self.unregisterMuteHotKey(); self.pauseHotKey = nil
+                if !self.native.isPaused { self.registerMuteHotKey() }
+                self.registerPauseHotKey()
+            }
+            self.updateMenu()
+        }.store(in: &bag)
         app.startCall = { [weak self] in
             guard let self, !self.active else { return }
             self.startConversation()
@@ -121,6 +132,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         native?.showPanelOnStart = defaults.bool(forKey: Prefs.showPanelOnStart)
         native?.followSystemAudio = defaults.bool(forKey: Prefs.followSystemAudio)
         native?.startSlim = defaults.bool(forKey: Prefs.startSlim)
+        native?.model.showCaptions = defaults.bool(forKey: Prefs.showCaptions)
+        native?.panelOnAllSpaces = defaults.bool(forKey: Prefs.panelOnAllSpaces)
+        idle?.notifyWhenDone = defaults.bool(forKey: Prefs.notifyWhenDone)
     }
 
     private func configureIdle() {
@@ -131,6 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.native.togglePause()
         }
         continuity.onBadge = { [weak self] on in self?.setBadge(on) }
+        continuity.notifyWhenDone = UserDefaults.standard.bool(forKey: Prefs.notifyWhenDone)
         idle = continuity
     }
 
@@ -350,6 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
+        app.muteShortcutProblem = muteShortcutProblem
         native.model.muteShortcutHint = muteShortcut.map { "\($0.display): tap to mute/unmute, hold to talk" } ?? ""
     }
 
@@ -372,6 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
+        app.pauseShortcutProblem = pauseShortcutProblem
         native.model.pauseShortcutHint = pauseShortcut.map { "\($0.display): pause or resume the call" } ?? ""
     }
 

@@ -320,6 +320,20 @@ final class DeliveryChannelsTests: XCTestCase {
         XCTAssertEqual(off.reachability, "Local only")
     }
 
+    func testSpeechAndCallCapRoundTrip() throws {
+        let raw = #"{"voice":{"provider":"codex","voice":"cove","max_call_minutes":45},"speech":{"acknowledge":false,"progress":true}}"#
+        var s = try ServerSettings.decode(Data(raw.utf8))
+        XCTAssertEqual(s.maxCallMinutes, 45)
+        XCTAssertEqual(s.speech?.acknowledge, false)
+        XCTAssertEqual(s.voice?.provider, "codex")
+        s.maxCallMinutes = 60
+        let body = try JSONSerialization.jsonObject(with: s.patchBody()) as! [String: Any]
+        let voice = body["voice"] as! [String: Any]
+        XCTAssertEqual(voice["max_call_minutes"] as? Int, 60)
+        XCTAssertEqual(voice["provider"] as? String, "codex")
+        XCTAssertEqual((body["speech"] as! [String: Any])["acknowledge"] as? Bool, false)
+    }
+
     func testSuggestionsParseAndMerge() {
         let raw = ##"{"suggestions":[{"target":"discord:2","label":"#build","topic":"code","new_thread":true},{"target":"discord:2","label":"#dup"},{"label":"no target"}]}"##
         let items = ChannelSuggestions.parse(Data(raw.utf8))

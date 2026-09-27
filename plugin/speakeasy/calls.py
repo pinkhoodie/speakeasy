@@ -525,6 +525,8 @@ class SidebandWorker:
         Skipped when the voice model already said something since this handoff (its own
         \"on it\"), unless ``force``: a line that carries news (where the task went) is always said."""
         started = self.handoff_at.pop(delegation_id, None)
+        if not force and not self.rt.settings()["speech"]["acknowledge"]:
+            return
         if not force:
             recent = time.monotonic() - ACK_RECENT_S
             since = min(started, recent) if started is not None else recent
@@ -540,6 +542,8 @@ class SidebandWorker:
     async def maybe_speak_progress(self, backend: BackendRun, milestone: str) -> None:
         """A long task with a new milestone gets one brief spoken update, at most once per 30 s, and
         only while the user is quiet (never talk over them or chain updates)."""
+        if not self.rt.settings()["speech"]["progress"]:
+            return
         now = time.monotonic()
         with self.interaction.lock:
             last = backend.spoken_at or backend.started

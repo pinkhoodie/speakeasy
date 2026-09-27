@@ -362,6 +362,14 @@ final class VoicePanelController {
     }
 
 
+    /// Follow you across desktops (Spaces), or stay on the one where the call started.
+    var onAllSpaces = true {
+        didSet {
+            panel.collectionBehavior = onAllSpaces ? [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+                                                   : [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
+        }
+    }
+
     func show() {
         resize(animated: false)
         if !panel.isVisible { panel.orderFrontRegardless() }

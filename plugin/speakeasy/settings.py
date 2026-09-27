@@ -32,6 +32,9 @@ DEFAULTS: dict[str, Any] = {
     # channels: extra opted-in destinations a new task is routed to by topic or by name.
     "delivery": {"target": "none", "new_thread": False, "channels": []},
     "continuity": {"enabled": True},
+    # Lines the server speaks itself: a short "on it" when a task starts (lines that say where a
+    # task went are always spoken), and a brief update on long tasks.
+    "speech": {"acknowledge": True, "progress": True},
     "brief": {"auto_refresh": True, "include_recent_voice": True},
     "image_roots": [],
     # Written by `hermes voice setup`: the URL other devices use to reach this server (a tailnet
@@ -98,7 +101,7 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
         raise SettingsError("hermes_profile must be a profile name")
     s["delivery"] = validate_delivery(s["delivery"])
     s["server"] = validate_server(s["server"])
-    for group, keys in (("continuity", ("enabled",)), ("brief", ("auto_refresh", "include_recent_voice")),
+    for group, keys in (("continuity", ("enabled",)), ("speech", ("acknowledge", "progress")), ("brief", ("auto_refresh", "include_recent_voice")),
                         ("onboarding", ("names_set", "delivery_set"))):
         for key in keys:
             if not isinstance(s[group].get(key), bool):

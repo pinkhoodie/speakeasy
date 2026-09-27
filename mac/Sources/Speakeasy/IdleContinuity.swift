@@ -72,7 +72,12 @@ final class IdleContinuity: NSObject, UNUserNotificationCenterDelegate {
         deliver(notice, category: Self.pausedCategory)
     }
 
+    /// Settings › General: a notification when work from an ended call finishes. Paused-call
+    /// notices (which carry Resume) are always delivered.
+    var notifyWhenDone = true
+
     private func deliver(_ notice: WorkNotice, category: String? = nil) {
+        guard notifyWhenDone || category != nil else { onBadge?(true); return }
         guard Self.notificationsSupported else { onBadge?(true); return }
         let center = UNUserNotificationCenter.current()
         Task { [weak self] in

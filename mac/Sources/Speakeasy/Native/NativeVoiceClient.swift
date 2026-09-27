@@ -43,6 +43,7 @@ final class NativeVoiceClient: VoiceCallClient {
     /// Settings › General "Start calls in slim mode".
     var startSlim = false
     var followSystemAudio = true
+    var panelOnAllSpaces = true { didSet { panel.onAllSpaces = panelOnAllSpaces } }
     var supportsPause: Bool { true }
     var isPaused: Bool { model.state.connection == .paused }
 

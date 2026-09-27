@@ -22,8 +22,13 @@
     },
     "idle_pause_minutes" : 5,
     "instructions_extra" : "",
+    "speech" : {
+      "acknowledge" : true,
+      "progress" : true
+    },
     "user_name" : "Sam",
     "voice" : {
+      "max_call_minutes" : 30,
       "provider" : "codex",
       "voice" : ""
     }
