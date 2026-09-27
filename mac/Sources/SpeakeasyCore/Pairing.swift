@@ -51,7 +51,7 @@ private func webPairLink(_ url: URL) -> Result<PairingLink, PairingLink.ParseErr
 
 /// The message a user sends their Hermes agent to set Speakeasy up (same text as the website).
 public enum SetupPrompt {
-    public static let text = "Set up Speakeasy for me, so I can talk to you by voice from my Mac. Follow the instructions at https://speakeasyvoice.ai/setup.md"
+    public static let text = "Set up Speakeasy for me: https://speakeasyvoice.ai/setup.md"
 }
 
 /// Six digits; spaces and dashes a user types ("123 456", "123-456") are ignored.
