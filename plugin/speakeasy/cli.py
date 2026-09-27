@@ -47,6 +47,8 @@ def setup_parser(parser) -> None:
     setup.add_argument("--yes", "-y", action="store_true", help="Answer yes to every question (installing Codex)")
     setup.add_argument("--no-restart", action="store_true", help=argparse.SUPPRESS)  # setup never restarts Hermes now
     setup.add_argument("--no-open", action="store_true", help="Print the pairing link instead of opening it")
+    setup.add_argument("--here", action="store_true",
+                       help="The Mac you'll talk from is this machine: open Speakeasy (or its download page) here")
     pair = sub.add_parser("pair", help="Show a one-time code to pair a Mac")
     pair.add_argument("--server", default="",
                       help="URL the Mac will use (default: the URL setup advertised, else http://127.0.0.1:<port>)")
@@ -266,17 +268,21 @@ def _print_routing_model(out) -> None:
 
 
 def _deliver_link(args, env, home: Path, settings: Settings, server: str) -> str:
-    """"opened" | "sent" | "": open the app here only when the voice server is local to this Mac;
-    otherwise send a link to a Hermes chat (``--send``, or pick one when run in a terminal).
-    Hermes may run on a different machine than the user's Mac, so nothing is opened remotely."""
+    """"opened" | "sent" | "": ``--send`` sends a link to that chat; ``--here`` opens it on this
+    machine (the app, or the download page when it isn't installed). Without either, open here
+    when the app is installed on this machine and the server is local; else offer a chat."""
     from .handoff import LINK_TTL_S, app_link, chat_message, web_link
     if getattr(args, "send", ""):
         code = _store(home).new_pairing_code(ttl=LINK_TTL_S)
         return "sent" if _send_link(home, args.send, web_link(server, code), env.out) else ""
-    if is_local_url(server) and not args.no_open and _app_installed():
+    here = getattr(args, "here", False)
+    if here or (is_local_url(server) and not args.no_open and _app_installed()):
+        local = f"http://127.0.0.1:{voice_port(home)}"
         code = _store(home).new_pairing_code(ttl=LINK_TTL_S)
-        if _open(app_link(server, code)):
-            env.out("✓ Opened Speakeasy to pair. Finish setup there (about a minute).")
+        installed = _app_installed()
+        if _open(app_link(local, code) if installed else web_link(local, code)):
+            env.out("✓ Opened Speakeasy to pair. Finish setup there (about a minute)." if installed else
+                    "✓ Opened the Speakeasy download page on this Mac. Install the app, then click Open Speakeasy there.")
             return "opened"
     target = _pick_chat(env, home, settings)
     if target:

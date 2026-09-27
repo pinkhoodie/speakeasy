@@ -91,7 +91,7 @@ def _codex(tmp_path, holder):
 
 def args(**kw):
     base = dict(voice_command="setup", server="", tailscale=False, no_tailscale=False, api_key=False, send="", yes=False,
-                no_restart=False, no_open=True)
+                no_restart=False, no_open=True, here=False)
     base.update(kw)
     return Namespace(**base)
 
@@ -308,3 +308,20 @@ def test_setup_turns_voice_on_for_the_real_gateway_loader(home):
     probe = SimpleNamespace(enabled=True, extra=dict(block["extra"]))
     assert speakeasy.is_connected(probe)
     assert not speakeasy.is_connected(SimpleNamespace(enabled=True, extra={}))
+
+
+def test_here_opens_on_this_machine_even_with_a_tailnet(home, monkeypatch):
+    """--here: the agent checked the user talks from this Mac; open the app here over loopback."""
+    fake = Fake(tailscale="running")
+    fake.restarted = True
+    rc, opened = run_setup(fake, yes=True, here=True)
+    assert rc == 0 and len(opened) == 1
+    assert opened[0].startswith("speakeasy://pair?server=http%3A%2F%2F127.0.0.1")
+
+
+def test_here_without_the_app_opens_the_download_page(home, monkeypatch):
+    fake = Fake()
+    fake.restarted = True
+    rc, opened = run_setup(fake, app_installed=False, yes=True, here=True)
+    assert rc == 0 and opened and opened[0].startswith("https://speakeasyvoice.ai/pair#server=http%3A%2F%2F127.0.0.1")
+    assert any("download page" in line for line in fake.lines)

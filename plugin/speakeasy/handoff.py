@@ -1,9 +1,9 @@
-"""Getting the pairing link to the user's Mac without assuming Hermes can reach that Mac.
+"""Getting the pairing link to the Mac the user will talk from.
 
-Hermes often runs on another machine (a Mac mini, a server), so setup never opens anything on
-the user's laptop. It sends one link to a chat the user already has with their agent. That link
-goes to a page on speakeasyvoice.ai which opens Speakeasy if it's installed, or offers the
-download first. The server address and code sit in the URL fragment (after ``#``), which browsers
+Hermes may run on the Mac the user talks from (setup opens the link there) or on another
+computer. For another computer, setup sends one link to a chat the user already has with their
+agent. That link goes to a page on speakeasyvoice.ai which opens Speakeasy if it's installed, or
+offers the download first. The server address and code sit in the URL fragment (after ``#``), which browsers
 never send to the web server.
 
 Setup also never restarts Hermes. When the voice server isn't running yet, setup records who

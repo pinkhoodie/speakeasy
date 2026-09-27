@@ -37,8 +37,9 @@ Two things are yours to do:
 2. **Open the link on the Mac you'll talk from.** It opens Speakeasy and connects it. If the app
    isn't installed yet, the page offers the download first, and the same link connects it after.
 
-Nothing assumes Hermes can reach your Mac: Hermes can run on another computer, and the link is the
-only handoff. [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md) is the exact guide the agent follows.
+Hermes can run on the Mac you talk from or on another computer; the agent checks which, then
+opens the link for you or sends it to your chat. [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md) is the
+exact guide the agent follows.
 
 **By hand**, on the machine that runs Hermes:
 
