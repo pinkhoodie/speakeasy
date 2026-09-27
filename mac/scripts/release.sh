@@ -7,7 +7,9 @@
 # Needs, once per machine:
 #   - a "Developer ID Application" certificate in the login keychain
 #   - notarization credentials saved as a keychain profile:
-#       xcrun notarytool store-credentials speakeasy --apple-id <apple id> --team-id <team id>
+#       xcrun notarytool store-credentials speakeasy --apple-id <apple id> --team-id <team id> \
+#         --keychain ~/Library/Keychains/login.keychain-db
+#     then export SPEAKEASY_NOTARY_KEYCHAIN=~/Library/Keychains/login.keychain-db
 # Overrides: SPEAKEASY_DEVELOPER_ID (identity name), SPEAKEASY_NOTARY_PROFILE (default "speakeasy").
 set -euo pipefail
 VERSION="${1:?usage: scripts/release.sh <version> [--publish]}"
@@ -18,7 +20,11 @@ cd "$ROOT"
 PROFILE="${SPEAKEASY_NOTARY_PROFILE:-speakeasy}"
 IDENTITY="${SPEAKEASY_DEVELOPER_ID:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}"
 [[ -n "$IDENTITY" ]] || { echo "error: no Developer ID Application certificate in the keychain" >&2; exit 1; }
-xcrun notarytool history --keychain-profile "$PROFILE" >/dev/null \
+# A file keychain (e.g. the login keychain) keeps working while the screen is locked; the default
+# data-protection keychain does not, which breaks unattended releases.
+NOTARY_ARGS=(--keychain-profile "$PROFILE")
+[[ -n "${SPEAKEASY_NOTARY_KEYCHAIN:-}" ]] && NOTARY_ARGS+=(--keychain "$SPEAKEASY_NOTARY_KEYCHAIN")
+xcrun notarytool history "${NOTARY_ARGS[@]}" >/dev/null \
     || { echo "error: notary profile '$PROFILE' missing; run xcrun notarytool store-credentials" >&2; exit 1; }
 
 # The version lives in Info.plist; the build number is the commit count so it only goes up.
@@ -46,7 +52,7 @@ hdiutil create -quiet -volname "Speakeasy" -srcfolder "$STAGE" -ov -format UDZO 
 codesign --force --timestamp --sign "$IDENTITY" "$DMG"
 
 echo "Notarizing (usually a few minutes)…"
-xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait --timeout 30m | tee "$STAGE/notary.log"
+xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait --timeout 30m | tee "$STAGE/notary.log"
 grep -q "status: Accepted" "$STAGE/notary.log" || { echo "error: notarization was not accepted" >&2; exit 1; }
 xcrun stapler staple "$DMG"
 spctl -a -t open --context context:primary-signature -v "$DMG"
