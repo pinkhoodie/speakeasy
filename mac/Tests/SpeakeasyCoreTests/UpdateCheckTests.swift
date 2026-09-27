@@ -13,6 +13,16 @@ final class UpdateCheckTests: XCTestCase {
         XCTAssertFalse(UpdateCheck.isNewer("garbage", than: "0.1.0"))
     }
 
+    func testPluginUpdateIndependentOfMacAppVersion() throws {
+        let release = UpdateCheck.Release(version: "0.2.4",
+                                          pageURL: URL(string: "https://example.com/release")!, downloadURL: nil)
+        XCTAssertEqual(UpdateCheck.outcome(current: "0.2.4", latest: release), .upToDate(current: "0.2.4"))
+        XCTAssertEqual(UpdateCheck.pluginUpdate(latest: release, runningVersion: "0.2.3"), release)
+        XCTAssertNil(UpdateCheck.pluginUpdate(latest: release, runningVersion: "0.2.4"))
+        XCTAssertNil(UpdateCheck.pluginUpdate(latest: release, runningVersion: nil))
+        XCTAssertNil(UpdateCheck.pluginUpdate(latest: nil, runningVersion: "0.2.3"))
+    }
+
     func testParsesLatestReleaseAndPicksTheDmg() throws {
         let json = #"""
         {"tag_name":"v0.2.0","html_url":"https://github.com/rungmc357/speakeasy/releases/tag/v0.2.0",

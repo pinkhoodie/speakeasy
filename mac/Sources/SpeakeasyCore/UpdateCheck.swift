@@ -38,6 +38,11 @@ public enum UpdateCheck {
         return isNewer(latest.version, than: current) ? .available(latest) : .upToDate(current: current)
     }
 
+    public static func pluginUpdate(latest: Release?, runningVersion: String?) -> Release? {
+        guard let latest, let runningVersion, isNewer(latest.version, than: runningVersion) else { return nil }
+        return latest
+    }
+
     /// Numeric dotted comparison: "0.10.0" > "0.9.2"; missing parts count as 0; a non-numeric
     /// current version ("dev") is never considered newer than a release.
     public static func isNewer(_ candidate: String, than current: String) -> Bool {

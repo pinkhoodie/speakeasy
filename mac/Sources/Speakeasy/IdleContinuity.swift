@@ -14,9 +14,11 @@ final class IdleContinuity: NSObject, UNUserNotificationCenterDelegate {
     private var authorization: Bool?
     /// Opens the work-only panel (notification click or badge click).
     var onOpenWork: (() -> Void)?
+    var onOpenSettings: (() -> Void)?
     /// Resumes the paused call (Resume button, or a click on a paused-call notice).
     var onResume: (() -> Void)?
     nonisolated static let pausedCategory = "speakeasy-paused"
+    nonisolated static let pluginUpdateCategory = "speakeasy-plugin-update"
     nonisolated static let resumeAction = "speakeasy-resume"
     /// Fallback when notifications are unavailable: show a badge in the menu bar.
     var onBadge: ((Bool) -> Void)?
@@ -76,6 +78,31 @@ final class IdleContinuity: NSObject, UNUserNotificationCenterDelegate {
     /// notices (which carry Resume) are always delivered.
     var notifyWhenDone = true
 
+    /// One notice per release, when the running Hermes plugin trails the latest release.
+    /// The app never changes Hermes or restarts its gateway.
+    func notifyPluginUpdate(version: String) {
+        let key = "notifiedPluginUpdateVersion"
+        guard UserDefaults.standard.string(forKey: key) != version else { return }
+        guard Self.notificationsSupported else { onBadge?(true); return }
+        let center = UNUserNotificationCenter.current()
+        Task { [weak self] in
+            guard let self else { return }
+            if self.authorization == nil {
+                self.authorization = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
+            }
+            guard self.authorization == true else { self.onBadge?(true); return }
+            let content = UNMutableNotificationContent()
+            content.title = "Speakeasy plugin update available"
+            content.body = "Version \(version) is available for Hermes. Ask your agent to update it; restart Hermes yourself when prompted."
+            content.categoryIdentifier = Self.pluginUpdateCategory
+            content.sound = .default
+            do {
+                try await center.add(UNNotificationRequest(identifier: "speakeasy-plugin-\(version)", content: content, trigger: nil))
+                UserDefaults.standard.set(version, forKey: key)
+            } catch { self.onBadge?(true) }
+        }
+    }
+
     private func deliver(_ notice: WorkNotice, category: String? = nil) {
         guard notifyWhenDone || category != nil else { onBadge?(true); return }
         guard Self.notificationsSupported else { onBadge?(true); return }
@@ -100,11 +127,14 @@ final class IdleContinuity: NSObject, UNUserNotificationCenterDelegate {
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
-        let paused = response.notification.request.content.categoryIdentifier == Self.pausedCategory
+        let category = response.notification.request.content.categoryIdentifier
+        let paused = category == Self.pausedCategory
         let action = response.actionIdentifier
         Task { @MainActor in
             self.onBadge?(false)
-            if paused && (action == Self.resumeAction || action == UNNotificationDefaultActionIdentifier) {
+            if category == Self.pluginUpdateCategory {
+                self.onOpenSettings?()
+            } else if paused && (action == Self.resumeAction || action == UNNotificationDefaultActionIdentifier) {
                 self.onResume?()
             } else {
                 self.onOpenWork?()

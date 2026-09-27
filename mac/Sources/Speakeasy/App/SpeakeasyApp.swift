@@ -82,6 +82,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         else if !app.isPaired || !UserDefaults.standard.bool(forKey: Prefs.onboardingDone) { showOnboarding() }
         Task { await app.refresh() }
         app.checkForUpdatesIfDue()
+        Timer.publish(every: 24 * 3600, on: .main, in: .common).autoconnect()
+            .sink { [weak self] _ in self?.app.checkForUpdatesIfDue() }
+            .store(in: &bag)
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(400)) { [weak self] in
             guard let self, !self.active else { return }
             self.native.hideIfIdle()
@@ -113,6 +116,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Model wiring
 
     private func observeModel() {
+        app.$status.combineLatest(app.$latestRelease)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _, _ in
+                guard let self else { return }
+                self.updateMenu()
+                if let release = self.app.pluginUpdateAvailable {
+                    self.idle?.notifyPluginUpdate(version: release.version)
+                }
+            }.store(in: &bag)
         app.configChanged.sink { [weak self] config in
             guard let self else { return }
             if self.active { self.native.end() }
@@ -161,6 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func configureIdle() {
         let continuity = IdleContinuity(config: app.config)
         continuity.onOpenWork = { [weak self] in self?.showRecentWork() }
+        continuity.onOpenSettings = { [weak self] in self?.openSettings() }
         continuity.onResume = { [weak self] in
             guard let self, self.native.isPaused else { self?.showRecentWork(); return }
             self.native.togglePause()
@@ -268,7 +281,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             await app.checkForUpdates()
             let alert = NSAlert()
             alert.icon = NSApp.applicationIconImage
-            if let release = app.updateAvailable {
+            if let release = app.pluginUpdateAvailable {
+                alert.messageText = "Hermes plugin update available"
+                alert.informativeText = "Speakeasy on Hermes is \(app.status?.version ?? "unknown"); \(release.version) is available. Ask your agent to update the plugin, then restart Hermes yourself when prompted. The Mac app updates separately."
+                alert.addButton(withTitle: "Copy update request")
+                alert.addButton(withTitle: "Later")
+                NSApp.activate(ignoringOtherApps: true)
+                if alert.runModal() == .alertFirstButtonReturn { app.copyPluginUpdateRequest() }
+            } else if let release = app.updateAvailable {
                 alert.messageText = "Speakeasy \(release.version) is available"
                 alert.informativeText = "You have \(app.appVersion). Download the new version, then drag it into Applications to replace this one."
                 alert.addButton(withTitle: "Download")
@@ -292,7 +312,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateMenu() {
-        if let release = app.updateAvailable { updateItem?.title = "Update available: \(release.version)…" }
+        if let release = app.pluginUpdateAvailable { updateItem?.title = "Hermes plugin update: \(release.version)…" }
+        else if let release = app.updateAvailable { updateItem?.title = "Update available: \(release.version)…" }
         else { updateItem?.title = "Check for Updates…" }
         let name = app.assistantName
         if !app.isPaired {

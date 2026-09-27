@@ -89,6 +89,7 @@ final class AppModel: ObservableObject {
 
     // MARK: Updates
     @Published var updateOutcome: UpdateCheck.Outcome?
+    @Published private(set) var latestRelease: UpdateCheck.Release?
     @Published var checkingForUpdates = false
     @Published var updateError: String?
 
@@ -101,12 +102,15 @@ final class AppModel: ObservableObject {
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Speakeasy/\(appVersion)", forHTTPHeaderField: "User-Agent")
         do {
+            if isPaired { await refresh() }
             let (data, response) = try await URLSession.shared.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             UserDefaults.standard.set(Date(), forKey: Prefs.lastUpdateCheck)
-            if status == 404 { updateOutcome = .noReleases; return }
+            if status == 404 { latestRelease = nil; updateOutcome = .noReleases; return }
             guard status == 200 else { throw URLError(.badServerResponse) }
-            updateOutcome = UpdateCheck.outcome(current: appVersion, latest: UpdateCheck.parse(data))
+            guard let release = UpdateCheck.parse(data) else { throw URLError(.cannotParseResponse) }
+            latestRelease = release
+            updateOutcome = UpdateCheck.outcome(current: appVersion, latest: release)
         } catch {
             if !quiet { updateError = "Couldn't check for updates. Try again later." }
         }
@@ -126,8 +130,19 @@ final class AppModel: ObservableObject {
         return nil
     }
 
+    /// Compare the running Hermes plugin independently of the Mac app version.
+    var pluginUpdateAvailable: UpdateCheck.Release? {
+        guard isPaired else { return nil }
+        return UpdateCheck.pluginUpdate(latest: latestRelease, runningVersion: status?.version)
+    }
+
     func openUpdate(_ release: UpdateCheck.Release) {
         NSWorkspace.shared.open(release.downloadURL ?? release.pageURL)
+    }
+
+    func copyPluginUpdateRequest() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("Update the Speakeasy plugin on my Hermes installation. Check that it is enabled afterward, and tell me when I need to restart Hermes. Do not restart it yourself.", forType: .string)
     }
 
     // MARK: Pairing
