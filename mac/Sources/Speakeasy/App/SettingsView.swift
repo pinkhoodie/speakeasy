@@ -297,9 +297,6 @@ private struct BehaviorSettings: View {
                 Text(continuityHelp).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Section("Spoken updates") {
-                Toggle("Briefly acknowledge when a task starts", isOn: Binding(
-                    get: { draft.speech?.acknowledge ?? true },
-                    set: { v in var x = draft.speech ?? .init(); x.acknowledge = v; draft.speech = x }))
                 Toggle("Give a short update on long tasks", isOn: Binding(
                     get: { draft.speech?.progress ?? true },
                     set: { v in var x = draft.speech ?? .init(); x.progress = v; draft.speech = x }))

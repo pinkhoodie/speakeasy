@@ -79,11 +79,10 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         public init(enabled: Bool? = nil) { self.enabled = enabled }
     }
 
-    /// Lines the server speaks itself (instant acknowledgement, progress on long tasks).
+    /// A brief spoken update on long tasks.
     public struct Speech: Codable, Equatable, Sendable {
-        public var acknowledge: Bool?
         public var progress: Bool?
-        public init(acknowledge: Bool? = nil, progress: Bool? = nil) { self.acknowledge = acknowledge; self.progress = progress }
+        public init(progress: Bool? = nil) { self.progress = progress }
     }
 
     public var assistantName: String?
@@ -165,7 +164,6 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         if let enabled = continuity?.enabled { object["continuity"] = ["enabled": enabled] }
         if let speech {
             var x: [String: Any] = [:]
-            if let v = speech.acknowledge { x["acknowledge"] = v }
             if let v = speech.progress { x["progress"] = v }
             object["speech"] = x
         }

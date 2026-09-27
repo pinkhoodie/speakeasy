@@ -39,66 +39,35 @@ RESEARCH = {"target": "discord:222", "label": "#research", "topic": "reading up 
 
 # -- (A) spoken acknowledgement -------------------------------------------------------------------
 
-def test_new_task_gets_one_short_spoken_acknowledgement(server, service, hermes):
+def test_server_adds_no_scripted_acknowledgement(server, service, hermes):
+    """The voice model acknowledges on its own; a plain task gets no server-spoken line."""
     hermes.hold = True
     _, worker = start_call(server, service)
     worker.delegate("call_a", "Find me a dentist near the office")
-    wait_for(lambda: spoken(worker))
-    time.sleep(0.2)
-    lines = spoken(worker)
-    assert len(lines) == 1 and len(lines[0].split()) <= 6
-    assert not any(word in lines[0].lower() for word in ("hermes", "backend", "codex"))
-
-
-def test_no_double_speak_when_the_model_already_acknowledged(server, service, hermes):
-    hermes.hold = True
-    _, worker = start_call(server, service)
-    worker.feed({"type": "session.input_transcript.delta", "delta": "Check the weather in Rome", "start_ms": 1, "end_ms": 2})
-    worker.feed({"type": "session.output_transcript.delta", "delta": "Let me check."})
-    worker.feed({"type": "session.delegation.created", "offset_ms": 5, "delegation": {"id": "call_w", "target": "client"}})
     wait_for(lambda: [t for t in tasks(server) if t.get("run_id")])
     time.sleep(0.2)
     assert spoken(worker) == []
 
 
-def test_general_acknowledgements_vary_and_never_repeat_back_to_back():
-    from speakeasy.prompt import builder as P
-    recent: list[str] = []
-    said = []
-    for i in range(12):
-        line = P.ack_new(f"idem_{i}", tuple(recent[-4:]))
-        assert line not in recent[-4:]
-        assert "on it" not in line.lower() and len(line.split()) <= 6
-        recent.append(line); said.append(line)
-    assert len(set(said)) >= 5
+def test_legacy_acknowledge_setting_is_dropped(service):
+    service.settings.patch({"speech": {"progress": False}})
+    raw = json.loads(service.settings.path.read_text())
+    raw["speech"]["acknowledge"] = True
+    service.settings.path.write_text(json.dumps(raw))
+    assert service.settings.get()["speech"] == {"progress": False}
 
 
 def test_spoken_lines_can_be_turned_off(server, service, hermes, monkeypatch):
     import asyncio
     from speakeasy.calls import BackendRun
-    service.settings.patch({"speech": {"acknowledge": False, "progress": False}})
-    hermes.hold = True
+    service.settings.patch({"speech": {"progress": False}})
     _, worker = start_call(server, service)
-    worker.delegate("call_q", "Find me a dentist near the office")
-    wait_for(lambda: [t for t in tasks(server) if t.get("run_id")])
-    time.sleep(0.2)
-    assert spoken(worker) == []
     backend = BackendRun("t9", 1, "idem_9", status="running")
     backend.started -= 25
     asyncio.run(worker.maybe_speak_progress(backend, "Pulling this week's events"))
     assert spoken(worker) == []
     status, _ = http(server.base_url, "PATCH", "/voice/settings", {"speech": {"progress": "yes"}}, server.token)
     assert status == 400
-
-
-def test_follow_up_acknowledgement_names_the_task(server, service, hermes):
-    _, worker = start_call(server, service)
-    worker.delegate("call_first", "Draft a packing list for the Rome trip")
-    first = wait_for(lambda: [t for t in tasks(server) if t["status"] == "completed"])[0]
-    worker.sent.clear()
-    worker.delegate("call_second", "Add sunscreen to it", task_id=first["task_id"])
-    line = wait_for(lambda: [c for c in spoken(worker) if c.startswith("Adding that to the")])[0]
-    assert line.endswith("task.") and len(line.split()) <= 8
 
 
 def test_both_transports_route_commentary_to_speech():

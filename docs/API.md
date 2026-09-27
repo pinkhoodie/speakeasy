@@ -536,7 +536,6 @@ partial object (nested objects merge); unknown keys or invalid values are 400.
 | `voice.voice` | `""` | voice name; empty = provider default |
 | `voice.codex_path` | `""` | path to `codex`; empty = find on PATH |
 | `voice.max_call_minutes` | `30` | hard cap per call |
-| `speech.acknowledge` | `true` | the server briefly acknowledges when a task starts (varied, never the same line twice in a row) (lines saying where a task went are always spoken) |
 | `speech.progress` | `true` | one short spoken update on tasks running over 20 s, at most every 30 s |
 | `idle_pause_minutes` | `5` | pause a silent call after this long |
 | `instructions_extra` | `""` | extra voice instructions (up to 1,000 characters) |

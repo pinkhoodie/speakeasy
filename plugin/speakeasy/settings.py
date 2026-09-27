@@ -32,9 +32,8 @@ DEFAULTS: dict[str, Any] = {
     # channels: extra opted-in destinations a new task is routed to by topic or by name.
     "delivery": {"target": "none", "new_thread": False, "channels": []},
     "continuity": {"enabled": True},
-    # Lines the server speaks itself: a brief, varied acknowledgement when a task starts (lines that say where a
-    # task went are always spoken), and a brief update on long tasks.
-    "speech": {"acknowledge": True, "progress": True},
+    # A brief spoken update on long tasks. (Where a task went, e.g. a new thread, is always said.)
+    "speech": {"progress": True},
     "brief": {"auto_refresh": True, "include_recent_voice": True},
     "image_roots": [],
     # Written by `hermes voice setup`: the URL other devices use to reach this server (a tailnet
@@ -75,6 +74,8 @@ def valid_delivery_target(value: Any) -> bool:
 def validate(settings: dict[str, Any]) -> dict[str, Any]:
     """Return a clean copy or raise SettingsError naming the first bad field."""
     s = _merge(DEFAULTS, {k: v for k, v in settings.items() if k in DEFAULTS})
+    if isinstance(s.get("speech"), dict):
+        s["speech"].pop("acknowledge", None)  # retired: the voice model acknowledges on its own
     for key in ("assistant_name", "user_name"):
         if not isinstance(s[key], str) or not NAME_RE.fullmatch(s[key].strip()):
             raise SettingsError(f"{key} must be a short name (up to 40 characters)")
@@ -101,7 +102,7 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
         raise SettingsError("hermes_profile must be a profile name")
     s["delivery"] = validate_delivery(s["delivery"])
     s["server"] = validate_server(s["server"])
-    for group, keys in (("continuity", ("enabled",)), ("speech", ("acknowledge", "progress")), ("brief", ("auto_refresh", "include_recent_voice")),
+    for group, keys in (("continuity", ("enabled",)), ("speech", ("progress",)), ("brief", ("auto_refresh", "include_recent_voice")),
                         ("onboarding", ("names_set", "delivery_set"))):
         for key in keys:
             if not isinstance(s[group].get(key), bool):

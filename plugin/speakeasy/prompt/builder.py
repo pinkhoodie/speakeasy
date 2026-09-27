@@ -330,11 +330,8 @@ def work_started_note(parallel: list[str]) -> str:
     return note
 
 
-# Spoken by the server itself the moment work starts (appendSpeech), so the call is never silent
-# while a task runs. A plain, general acknowledgement: short, first person, never names a backend,
-# and never the same line twice in a row within a call (ack_new rotates away from recent ones).
-_ACK_NEW = ("Sure.", "Okay, looking.", "Got it.", "Let me see.", "Alright.", "One sec.", "Sure, checking.",
-            "Okay.", "Let me look.", "Got it, one moment.")
+# The voice model acknowledges work itself. The server only speaks what it alone knows: where a
+# task went (a new thread or another channel), and a brief update on a long task.
 _PROGRESS_LEADS = ("Still on it:", "Quick update:", "Progress:")
 
 
@@ -348,31 +345,12 @@ def short_task_name(name: str | None, words: int = 2) -> str:
     return " ".join(picked) or "that"
 
 
-def ack_new(seed: str, recent: tuple[str, ...] | list[str] = ()) -> str:
-    """A general acknowledgement that differs from the last few said on this call."""
-    fresh = tuple(o for o in _ACK_NEW if o not in recent) or _ACK_NEW
-    return _pick(fresh, seed)
-
-
-def ack_parts(count: int) -> str:
-    words = {2: "two", 3: "three", 4: "four"}
-    return f"Okay, {words.get(count, str(count))} things at once."
-
-
-def ack_follow_up(task_name: str | None) -> str:
-    return f"Adding that to the {short_task_name(task_name)} task."
-
-
-def ack_continuing(label: str | None) -> str:
-    return f"Picking that up in {short_task_name(label, 3)}."
-
-
 def ack_channel_thread(label: str) -> str:
     return f"Started that in a new {short_task_name(label, 1)} thread."
 
 
 def ack_channel_post(label: str) -> str:
-    return f"Okay, that'll go to {short_task_name(label, 1)}."
+    return f"That'll go to {short_task_name(label, 1)}."
 
 
 def progress_line(seed: str, milestone: str) -> str:

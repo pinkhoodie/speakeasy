@@ -321,17 +321,17 @@ final class DeliveryChannelsTests: XCTestCase {
     }
 
     func testSpeechAndCallCapRoundTrip() throws {
-        let raw = #"{"voice":{"provider":"codex","voice":"cove","max_call_minutes":45},"speech":{"acknowledge":false,"progress":true}}"#
+        let raw = #"{"voice":{"provider":"codex","voice":"cove","max_call_minutes":45},"speech":{"progress":false}}"#
         var s = try ServerSettings.decode(Data(raw.utf8))
         XCTAssertEqual(s.maxCallMinutes, 45)
-        XCTAssertEqual(s.speech?.acknowledge, false)
+        XCTAssertEqual(s.speech?.progress, false)
         XCTAssertEqual(s.voice?.provider, "codex")
         s.maxCallMinutes = 60
         let body = try JSONSerialization.jsonObject(with: s.patchBody()) as! [String: Any]
         let voice = body["voice"] as! [String: Any]
         XCTAssertEqual(voice["max_call_minutes"] as? Int, 60)
         XCTAssertEqual(voice["provider"] as? String, "codex")
-        XCTAssertEqual((body["speech"] as! [String: Any])["acknowledge"] as? Bool, false)
+        XCTAssertEqual((body["speech"] as! [String: Any])["progress"] as? Bool, false)
     }
 
     func testSuggestionsParseAndMerge() {

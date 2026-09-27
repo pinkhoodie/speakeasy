@@ -18,7 +18,6 @@
     "idle_pause_minutes" : 5,
     "instructions_extra" : "",
     "speech" : {
-      "acknowledge" : true,
       "progress" : true
     },
     "user_name" : "Sam",

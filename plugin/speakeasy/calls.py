@@ -7,7 +7,6 @@ only implement ``run()`` (read provider events) and ``_send()`` (write context t
 from __future__ import annotations
 
 import asyncio
-import collections
 import dataclasses
 import hashlib
 import json
@@ -33,8 +32,6 @@ ACTIVE_RUN_STATES = {"admitting", "running", "working", "waiting_for_approval", 
                      "cancel_requested"}
 CONTINUITY_WAIT_S = 600
 CONTINUITY_POLL_S = 5
-# Spoken acknowledgement: skip it when the voice model already spoke this long after the handoff.
-ACK_RECENT_S = 3.0
 # Spoken progress: only for tasks running this long, at most once per task per PROGRESS_EVERY_S,
 # and only when the user hasn't spoken since the last update.
 PROGRESS_AFTER_S = 20.0
@@ -327,7 +324,6 @@ class SidebandWorker:
         self.notices = rt.notices
         self.fragments: deque[dict[str, Any]] = deque(maxlen=512)
         self.handoff_at: dict[str, float] = {}   # delegation id -> when the handoff arrived (monotonic)
-        self.recent_acks: collections.deque[str] = collections.deque(maxlen=4)  # varied, never repetitive
         self.route_timings: dict[str, int] = {}  # task id -> routing latency (ms), stored with the task
         self.delegations: set[str] = set()
         self.dispatch_tasks: set[asyncio.Task[Any]] = set()
@@ -522,20 +518,12 @@ class SidebandWorker:
         return any(f["speaker"] == "user" and f.get("at", 0) >= since and clean_transcript(f["text"]).strip()
                    for f in list(self.fragments))
 
-    async def acknowledge(self, delegation_id: str, line: str, *, force: bool = False) -> None:
-        """Say ONE short line the moment work starts, so the call never goes silent while a task runs.
-        Skipped when the voice model already said something since this handoff (its own
-        acknowledgement), unless ``force``: a line that carries news (where the task went) is always said."""
-        started = self.handoff_at.pop(delegation_id, None)
-        if not force and not self.rt.settings()["speech"]["acknowledge"]:
-            return
-        if not force:
-            recent = time.monotonic() - ACK_RECENT_S
-            since = min(started, recent) if started is not None else recent
-            if self.assistant_spoke_since(since):
-                return
-        self.recent_acks.append(line)
-        await self.append("session.commentary.append", delegation_id, line)
+    async def say_where(self, delegation_id: str, line: str | None) -> None:
+        """Speak where a task went (a new thread, another channel). The voice model acknowledges
+        work on its own; this is the one thing only the server knows, so it is said as-is."""
+        self.handoff_at.pop(delegation_id, None)
+        if line:
+            await self.append("session.commentary.append", delegation_id, line)
 
     def record_timing(self, task_id: str, idem: str) -> None:
         ms = self.route_timings.pop(task_id, None)
@@ -618,7 +606,7 @@ class SidebandWorker:
         channel = choice.channel
         deliver_to = channel.target if channel is not None and not channel.default else None
         await self.append("session.thinking.append", delegation_id, P.split_note(self.names, parts))
-        await self.acknowledge(delegation_id, P.ack_parts(len(parts)))
+        self.handoff_at.pop(delegation_id, None)
         self.route_timings.update({f"{delegation_id}-p{i}": self.route_timings.get(delegation_id, 0)
                                    for i in range(len(parts))})
         await asyncio.gather(*(self.start_task(f"{delegation_id}-p{i}", revision, context, part, focus=part,
@@ -683,15 +671,14 @@ class SidebandWorker:
                     self.interaction.latest_delegation_id = target.delegation_id
                 self.publish()
                 await self.append("session.thinking.append", delegation_id, P.added_to_task_note(earlier))
-                await self.acknowledge(delegation_id, P.ack_follow_up(self.store.title(key) or earlier))
+                self.handoff_at.pop(delegation_id, None)
                 return
         work = self.store.work(idem_key=key) or {}
         result = notice_text((work.get("result") or {}).get("spoken"), 300)
         focus = P.follow_up_focus(part.request, earlier, result, status)
         await self.start_task(delegation_id, revision, context, f"{part.request} (following up: {earlier})",
                               focus=focus, session_id=self.store.session_for(key), replaces=target.delegation_id,
-                              deliver_to=target.deliver_to,
-                              ack=P.ack_follow_up(self.store.title(key) or earlier))
+                              deliver_to=target.deliver_to)
 
     def _register(self, task_id: str, backend: BackendRun, replaces: str | None = None) -> str | None:
         replaced_key = None
@@ -740,8 +727,7 @@ class SidebandWorker:
         parallel = [r for r in (notice_text(self.store.request_text(k), 80) for k in others[-4:]) if r]
         if voice_id is None:
             await self.append("session.thinking.append", delegation_id, P.work_started_note(parallel))
-            await self.acknowledge(delegation_id, ack or P.ack_new(idem, tuple(self.recent_acks)),
-                                   force=bool(deliver_to and not replaces))
+            await self.say_where(delegation_id, ack if deliver_to and not replaces else None)
         try:
             run_id = await asyncio.to_thread(self.hermes.start_run, prompt, idem, session_id)
             self.store.update_run(idem, run_id, "running")
@@ -794,7 +780,7 @@ class SidebandWorker:
         self.store.progress(idem, "milestone", f"Continuing in {where}")
         self.publish()
         await self.append("session.thinking.append", delegation_id, P.continuing_in_note(where))
-        await self.acknowledge(delegation_id, P.ack_continuing(conv.label))
+        self.handoff_at.pop(delegation_id, None)
         waited = 0
         while await asyncio.to_thread(continuity.session_busy, self.rt.state_db, conv.session_id):
             if waited == 0:
@@ -879,7 +865,7 @@ class SidebandWorker:
         with self.interaction.lock:
             backend.status = "running"
         self.publish()
-        await self.acknowledge(delegation_id, P.ack_channel_thread(channel.label), force=True)
+        await self.say_where(delegation_id, P.ack_channel_thread(channel.label))
 
         def on_session(session_id: str) -> None:
             # Follow-ups to this task continue inside the thread (thread continuity).
