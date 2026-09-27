@@ -30,7 +30,7 @@ ALIAS_PREFIX = "speakeasy:"
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_:@.+=-]{1,128}$")
 
 _CONTINUE_CUES = re.compile(
-    r"\b(thread|channel|chat|conversation|build|project|session|over in|in the|pick up|continue|same place|there)\b", re.I)
+    r"\b(thread|channel|chat|conversation|project|session|over in|in the|pick up|continue|same place|there)\b", re.I)
 _STOP = set("""a an the and or to of in on for with at by from is are was be this that it its
 my our your me we you i he she they them do does did can could would should will just please
 tell ask go let lets get have has had about into over up out so then than now new thing things
@@ -46,7 +46,7 @@ class Conversation:
     thread_id: str
     user_id: str
     parent_chat_id: str
-    name: str            # platform chat name, e.g. "Server / #research / Topic"
+    name: str            # platform chat name, e.g. "My Server / #research / Topic"
     title: str           # Hermes session title
     last_active: float
 

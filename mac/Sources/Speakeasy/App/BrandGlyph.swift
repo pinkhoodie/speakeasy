@@ -1,7 +1,7 @@
 import AppKit
 
 /// The Speakeasy mark (a keyhole with a soundwave cut into its round top), drawn in code so the
-/// menu bar gets a crisp template image at any scale. Geometry matches brand/build.py.
+/// menu bar gets a crisp template image at any scale. Shapes match brand/build.py.
 enum BrandGlyph {
     /// Menu-bar template image; `badge` adds a dot for "something finished while you were away".
     static func menuBarImage(badge: Bool = false, height: CGFloat = 16) -> NSImage {

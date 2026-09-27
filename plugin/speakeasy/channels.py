@@ -1,7 +1,7 @@
 """Which chat a new voice task goes to: the user's opted-in delivery channels, routed by topic.
 
 Order, per new task:
-1. The spoken request names a channel ("start this in build", "put it in #research"): that one.
+1. The spoken request names a channel ("put this in work", "send it to #research"): that one.
    Two channels named, or a ``#name`` that is not opted in: nothing starts, the voice asks.
 2. Otherwise the routing model (``router.decide``: one auxiliary call per handoff) picks the channel
    whose topic fits; any failure or doubt means the default.
@@ -61,7 +61,7 @@ def named(request: str, channels: list[Channel]) -> tuple[list[Channel], list[st
     """Channels the request names explicitly, and names that sound like a channel but are not one.
 
     A ``#name`` or "in the X channel" is always a channel reference (unknown when not opted in);
-    "start this in build" counts only when ``build`` is an opted-in label, so ordinary phrases like
+    "put this in work" counts only when ``work`` is an opted-in label, so ordinary phrases like
     "put it in writing" never trigger a clarifying question.
     """
     by_key = {c.key: c for c in channels}

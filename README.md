@@ -34,7 +34,7 @@ and code.
 The app then asks for the microphone, what to call each other, where finished work should go
 (it suggests the home channel of a connected chat such as Telegram or Discord), and whether to
 continue existing conversations. In Settings › Delivery you can add more channels, each with a
-short topic, so a new task goes where it belongs ("start this in #build" works too), optionally
+short topic, so a new task goes where it belongs ("put this in #work" works too), optionally
 in a new thread per task. **Suggest channels** asks your own Hermes to propose them.
 
 Routing (follow-up or new task, splitting "do X and Y", picking a channel) uses one quick call to

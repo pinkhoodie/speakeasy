@@ -31,7 +31,7 @@ def spoken(worker):
     return [c for k, _, c in worker.sent if k == "session.commentary.append"]
 
 
-BUILD = {"target": "discord:111", "label": "#build", "topic": "building or changing software, apps, agents",
+WORK = {"target": "discord:111", "label": "#work", "topic": "my job: meetings, email, projects",
          "new_thread": False}
 RESEARCH = {"target": "discord:222", "label": "#research", "topic": "reading up on a subject, comparing options",
             "new_thread": False}
@@ -103,7 +103,7 @@ def test_progress_is_spoken_once_for_a_long_quiet_task(service, monkeypatch):
 # -- routing model ---------------------------------------------------------------------------------
 
 OPEN = [router.OpenTask("t1", "Plan the Rome trip itinerary", "running")]
-TOPICS = [router.Topic("#build", BUILD["topic"]), router.Topic("#research", RESEARCH["topic"])]
+TOPICS = [router.Topic("#work", WORK["topic"]), router.Topic("#research", RESEARCH["topic"])]
 
 
 def test_routing_model_splits_a_compound_request():
@@ -122,8 +122,8 @@ def test_routing_model_attaches_a_follow_up():
 
 def test_routing_model_picks_a_channel_and_rejects_unknown_ones():
     pick = lambda label: (lambda messages: json.dumps({"follow_up_task_id": None, "parts": ["x"], "channel": label}))
-    assert router.decide("Fix the login bug in my app", [], None, TOPICS, pick("build")).channel == "#build"
-    assert router.decide("Fix the login bug in my app", [], None, TOPICS, pick("#nope")).channel is None
+    assert router.decide("Move my 3pm meeting to Thursday", [], None, TOPICS, pick("work")).channel == "#work"
+    assert router.decide("Move my 3pm meeting to Thursday", [], None, TOPICS, pick("#nope")).channel is None
 
 
 def test_routing_model_timeout_and_garbage_fall_back_to_rules():
@@ -168,15 +168,15 @@ def test_routing_latency_is_stored_with_the_task(home, hermes):
 # -- (B) channels ---------------------------------------------------------------------------------
 
 def _settings(**delivery):
-    return S.validate({"delivery": {"target": "telegram:555", "channels": [BUILD, RESEARCH], **delivery}})
+    return S.validate({"delivery": {"target": "telegram:555", "channels": [WORK, RESEARCH], **delivery}})
 
 
 def test_explicit_channel_naming_wins_and_ambiguity_asks():
     s = _settings()
-    assert channels.explicit("start this in build: a menu bar timer", s).channel.label == "#build"
+    assert channels.explicit("put this in work: a menu bar timer", s).channel.label == "#work"
     assert channels.explicit("put it in #research please", s).channel.label == "#research"
-    both = channels.explicit("post it in #build and #research", s, P.clarify_channel)
-    assert both.clarify and "#build" in both.clarify and "#research" in both.clarify
+    both = channels.explicit("post it in #work and #research", s, P.clarify_channel)
+    assert both.clarify and "#work" in both.clarify and "#research" in both.clarify
     unknown = channels.explicit("put it in #cooking", s, P.clarify_channel)
     assert unknown.clarify and unknown.channel is None
     assert channels.explicit("put it in writing for me", s) is None  # ordinary phrase, not a channel
@@ -184,7 +184,7 @@ def test_explicit_channel_naming_wins_and_ambiguity_asks():
 
 def test_topical_pick_or_default():
     s = _settings()
-    assert channels.resolve(s, "Telegram", "#build").channel.target == "discord:111"
+    assert channels.resolve(s, "Telegram", "#work").channel.target == "discord:111"
     fallback = channels.resolve(s, "Telegram", None)
     assert fallback.channel.default and fallback.channel.target == "telegram:555"
 
@@ -200,27 +200,27 @@ def test_channel_settings_are_validated(server):
     for channel in bad:
         status, _ = http(server.base_url, "PATCH", "/voice/settings", {"delivery": {"channels": [channel]}}, server.token)
         assert status == 400
-    dup = [BUILD, dict(BUILD, label="#other")]
+    dup = [WORK, dict(WORK, label="#other")]
     assert http(server.base_url, "PATCH", "/voice/settings", {"delivery": {"channels": dup}}, server.token)[0] == 400
-    status, body = http(server.base_url, "PATCH", "/voice/settings", {"delivery": {"channels": [BUILD]}}, server.token)
-    assert status == 200 and body["settings"]["delivery"]["channels"][0]["label"] == "#build"
+    status, body = http(server.base_url, "PATCH", "/voice/settings", {"delivery": {"channels": [WORK]}}, server.token)
+    assert status == 200 and body["settings"]["delivery"]["channels"][0]["label"] == "#work"
 
 
 def test_named_channel_runs_here_and_posts_the_result_there(server, service, hermes):
-    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [BUILD]}})
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [WORK]}})
     posted = []
     service.notices.post = lambda key, text, limit=600, target=None: posted.append((key, target)) or True
     _, worker = start_call(server, service)
-    worker.delegate("call_b", "Start this in build: add a dark mode toggle to the timer app")
+    worker.delegate("call_b", "Put this in work: move my 3pm meeting to Thursday")
     wait_for(lambda: [t for t in tasks(server) if t["status"] == "completed"])
     wait_for(lambda: posted)
     assert posted[0][1] == "discord:111"
-    assert any("#build" in line for line in spoken(worker))
-    assert "#build" in hermes.calls[0]["input"]
+    assert any("#work" in line for line in spoken(worker))
+    assert "#work" in hermes.calls[0]["input"]
 
 
 def test_unknown_channel_does_not_start_and_asks(server, service, hermes):
-    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [BUILD]}})
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [WORK]}})
     _, worker = start_call(server, service)
     worker.delegate("call_c", "put it in #cooking: find a pasta recipe")
     wait_for(lambda: spoken(worker))
@@ -249,12 +249,12 @@ class FakeThreads:
 def test_new_thread_channel_runs_the_task_in_a_thread(server, service, hermes):
     runner = FakeThreads()
     service.rt.threads = runner
-    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [dict(BUILD, new_thread=True)]}})
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [dict(WORK, new_thread=True)]}})
     _, worker = start_call(server, service)
-    worker.delegate("call_t", "Start this in build: add dark mode to the timer app")
+    worker.delegate("call_t", "Put this in work: move my 3pm meeting to Thursday")
     done = wait_for(lambda: [t for t in tasks(server) if t["status"] == "completed"])[0]
     assert runner.opened and runner.opened[0][0] == "discord:111" and hermes.calls == []
-    assert "Started that in a new #build thread." in spoken(worker)
+    assert "Started that in a new #work thread." in spoken(worker)
     assert "dark mode" in done["result"]["full"] and not done["result"]["full"].startswith("Voice:")
     key = next(iter(worker.interaction.runs.values())).idem_key
     assert service.store.continued_for(key)["session_id"] == "thread_session_1"  # follow-ups go there
@@ -262,16 +262,16 @@ def test_new_thread_channel_runs_the_task_in_a_thread(server, service, hermes):
 
 def test_thread_failure_falls_back_to_posting(server, service, hermes):
     service.rt.threads = FakeThreads(fail=True)
-    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [dict(BUILD, new_thread=True)]}})
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [dict(WORK, new_thread=True)]}})
     _, worker = start_call(server, service)
-    worker.delegate("call_f", "Start this in build: add dark mode to the timer app")
+    worker.delegate("call_f", "Put this in work: move my 3pm meeting to Thursday")
     wait_for(lambda: [t for t in tasks(server) if t["status"] == "completed"])
     assert len(hermes.calls) == 1
 
 
 def test_rules_list_the_opted_in_channels():
-    text = P.rules_text(P.Names.from_settings(S.validate({})), "Telegram", [BUILD, dict(RESEARCH, new_thread=True)])
-    assert "#build (building or changing software" in text and "own new thread" in text
+    text = P.rules_text(P.Names.from_settings(S.validate({})), "Telegram", [WORK, dict(RESEARCH, new_thread=True)])
+    assert "#work (my job: meetings" in text and "own new thread" in text
     assert "{" not in text.split("# Backchannel")[0]
 
 
@@ -295,7 +295,7 @@ def test_routes_are_generated_per_channel_with_a_private_secret(tmp_path):
     _state_db(tmp_path / "state.db", [("s1", "discord", "group", None,
                                        {"platform": "discord", "chat_id": "111", "chat_type": "group",
                                         "user_id": "42", "user_name": "sam"})]).close()
-    made = threads.sync_routes(tmp_path, [dict(BUILD, new_thread=True), RESEARCH], supported=True)
+    made = threads.sync_routes(tmp_path, [dict(WORK, new_thread=True), RESEARCH], supported=True)
     subs = json.loads((tmp_path / "webhook_subscriptions.json").read_text())
     route = subs[made["discord:111"]]
     assert set(made) == {"discord:111"} and subs["mine"] == {"secret": "keep"}
@@ -330,7 +330,7 @@ def test_thread_capability_needs_the_webhook_platform(tmp_path):
 def test_thread_sessions_opened_for_voice_are_continuation_candidates(tmp_path):
     db = _state_db(tmp_path / "state.db", [("s_thr", "discord", "thread", "999",
                                             {"platform": "discord", "chat_id": "999", "chat_type": "thread",
-                                             "chat_name": "Home / #build / Timer dark mode", "user_id": "42",
+                                             "chat_name": "My Server / #work / Timer dark mode", "user_id": "42",
                                              "thread_id": "999", "parent_chat_id": "111"})])
     db.execute("INSERT INTO messages (session_id, role, content, tool_calls, timestamp) VALUES ('s_thr','assistant','ok',NULL,?)",
                (time.time(),))
@@ -368,14 +368,14 @@ def test_onboarding_can_turn_continuity_off(server):
 def _destinations(home):
     (home / "gateway_state.json").write_text(json.dumps({"platforms": {"discord": {"state": "connected"}}}))
     (home / "channel_directory.json").write_text(json.dumps({"platforms": {"discord": [
-        {"id": "111", "name": "build", "guild": "Home", "type": "channel"},
-        {"id": "222", "name": "research", "guild": "Home", "type": "channel"}]}}))
+        {"id": "111", "name": "work", "guild": "My Server", "type": "channel"},
+        {"id": "222", "name": "research", "guild": "My Server", "type": "channel"}]}}))
 
 
 def test_suggest_channels_validates_and_never_saves(server, service, home):
     _destinations(home)
     reply = json.dumps([
-        {"target": "discord:111", "label": "#build", "topic": "coding and apps", "new_thread": True},
+        {"target": "discord:111", "label": "#work", "topic": "coding and apps", "new_thread": True},
         {"target": "discord:999", "label": "#ghost", "topic": "not offered"},
         {"target": "discord:222", "label": "{bad}", "topic": "x"},
         {"target": "discord:222", "label": "#research", "topic": "reading up on things"}])
@@ -393,7 +393,7 @@ def test_suggest_prompt_lists_only_labels_and_targets(home):
     with pytest.raises(suggest.SuggestError):
         suggest.suggest(lambda prompt, idem: seen.update(prompt=prompt) or ("completed", "[]"),
                         D.flat_chats(D.destinations(home)), False)
-    assert "discord:111" in seen["prompt"] and "Home / build" in seen["prompt"]
+    assert "discord:111" in seen["prompt"] and "My Server / work" in seen["prompt"]
 
 
 def test_suggest_failure_is_plain_text(server, service, home):
@@ -401,7 +401,7 @@ def test_suggest_failure_is_plain_text(server, service, home):
     service._suggest_run = lambda prompt, idem: ("failed", "")
     status, body = http(server.base_url, "POST", "/voice/destinations/suggest", {}, server.token)
     assert status == 502 and "suggest" in body["error"].lower()
-    service._suggest_run = lambda prompt, idem: ("completed", "I think #build is nice")
+    service._suggest_run = lambda prompt, idem: ("completed", "I think #work is nice")
     assert http(server.base_url, "POST", "/voice/destinations/suggest", {}, server.token)[0] == 502
 
 

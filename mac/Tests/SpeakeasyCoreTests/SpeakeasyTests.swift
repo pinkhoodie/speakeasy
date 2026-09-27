@@ -287,12 +287,12 @@ final class DeliveryChannelsTests: XCTestCase {
     func testChannelsDecodeAndPatch() throws {
         let json = #"""
         {"settings":{"delivery":{"target":"telegram:1","new_thread":true,
-          "channels":[{"target":"discord:2","label":"#build","topic":"software","new_thread":true},{"target":"discord:3"}]}}}
+          "channels":[{"target":"discord:2","label":"#work","topic":"software","new_thread":true},{"target":"discord:3"}]}}}
         """#
         let s = try ServerSettings.decode(Data(json.utf8))
         XCTAssertEqual(s.delivery?.newThread, true)
         XCTAssertEqual(s.delivery?.channels?.count, 2)
-        XCTAssertEqual(s.delivery?.channels?.first?.label, "#build")
+        XCTAssertEqual(s.delivery?.channels?.first?.label, "#work")
         XCTAssertEqual(s.delivery?.channels?.last?.label, "discord:3", "a missing label falls back to the target")
         let body = try JSONSerialization.jsonObject(with: s.patchBody()) as? [String: Any]
         let d = body?["delivery"] as? [String: Any]
@@ -335,10 +335,10 @@ final class DeliveryChannelsTests: XCTestCase {
     }
 
     func testSuggestionsParseAndMerge() {
-        let raw = ##"{"suggestions":[{"target":"discord:2","label":"#build","topic":"code","new_thread":true},{"target":"discord:2","label":"#dup"},{"label":"no target"}]}"##
+        let raw = ##"{"suggestions":[{"target":"discord:2","label":"#work","topic":"code","new_thread":true},{"target":"discord:2","label":"#dup"},{"label":"no target"}]}"##
         let items = ChannelSuggestions.parse(Data(raw.utf8))
-        XCTAssertEqual(items.map(\.label), ["#build"])
-        let existing = [ServerSettings.Channel(target: "discord:9", label: "#Build")]
+        XCTAssertEqual(items.map(\.label), ["#work"])
+        let existing = [ServerSettings.Channel(target: "discord:9", label: "#Work")]
         XCTAssertEqual(ChannelSuggestions.merge(items, into: existing).count, 1, "same label is not added twice")
         XCTAssertEqual(ChannelSuggestions.merge(items, into: []).count, 1)
     }

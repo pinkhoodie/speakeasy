@@ -378,7 +378,7 @@ private struct DeliverySettings: View {
             } header: {
                 Text("More channels")
             } footer: {
-                Text("A new task goes to the channel you name (\"start this in #build\"), else the one whose topic fits, else the default. Follow-ups stay where their task runs.")
+                Text("A new task goes to the channel you name (\"put this in #work\"), else the one whose topic fits, else the default. Follow-ups stay where their task runs.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if app.destinations.isEmpty {
@@ -425,14 +425,14 @@ private struct ChannelRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                TextField("Name", text: $channel.label, prompt: Text("#build")).frame(maxWidth: 140)
+                TextField("Name", text: $channel.label, prompt: Text("#work")).frame(maxWidth: 140)
                 Text(destinationLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     .help(destinationLabel)
                 Spacer()
                 Button(role: .destructive, action: remove) { Image(systemName: "minus.circle") }
                     .buttonStyle(.borderless).help("Remove this channel").accessibilityLabel("Remove \(channel.label)")
             }
-            TextField("Topic", text: $channel.topic, prompt: Text("e.g. building or changing software, apps, agents"))
+            TextField("Topic", text: $channel.topic, prompt: Text("e.g. my job: meetings, email, projects"))
             if canThread {
                 Toggle("Run each task in a new thread", isOn: $channel.newThread)
             }
@@ -459,8 +459,8 @@ private struct AddChannelSheet: View {
                     Text("Choose…").tag(String?.none)
                     ForEach(destinations) { d in Text(d.label).tag(String?.some(d.target)) }
                 }
-                TextField("Name", text: $label, prompt: Text("#build"))
-                TextField("Topic", text: $topic, prompt: Text("building or changing software, apps, agents"))
+                TextField("Name", text: $label, prompt: Text("#work"))
+                TextField("Topic", text: $topic, prompt: Text("my job: meetings, email, projects"))
                 if let target, canThread(target) { Toggle("Run each task in a new thread", isOn: $newThread) }
             }
             .formStyle(.grouped)
@@ -618,7 +618,7 @@ struct TailnetOffer: View {
     }
 }
 
-/// "#build" from a destination label like "Discord · Home / build".
+/// "#work" from a destination label like "Discord · My Server / work".
 func suggestedChannelLabel(_ destination: String) -> String {
     let last = destination.split(whereSeparator: { $0 == "·" || $0 == "/" }).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? destination
     let name = last.hasPrefix("#") ? String(last.dropFirst()) : last

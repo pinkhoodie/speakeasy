@@ -20,12 +20,10 @@ contract. Each lists the option picked (the simplest) so work could continue.
 5. **Draft limits.** At most 3 drafts per answer, 50 recipients per field, subject 300 chars,
    body 20,000 chars, plain text only. Attachments are not supported in v1.
 
-6. **`delivery.new_thread_per_task`.** Honored only when the installed Hermes webhook platform
-   supports `source_new_thread` (reported as `threads_supported`). The current implementation
-   posts through `hermes send`, which has no per-message "new thread" option, so with
-   `threads_supported: true` the setting is stored and reported but each result still posts to
-   the target chat. Needs a Hermes-side `send --new-thread` (or a webhook route owned by
-   Speakeasy) to finish.
+6. **New threads per channel.** `delivery.channels[].new_thread` runs the task in a new thread
+   through Speakeasy-owned routes on Hermes' webhook platform (needs `threads_supported`). This is
+   covered by tests against a fake gateway; it has not yet been exercised against every platform
+   Hermes can open threads on.
 
 7. **Thread continuity source.** Candidates are live, non-internal Hermes sessions from `state.db`
    active in the last 21 days, matched by a deterministic word-overlap on session title and chat

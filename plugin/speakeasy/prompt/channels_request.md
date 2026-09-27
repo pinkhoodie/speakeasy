@@ -7,7 +7,7 @@ Use what you already know about me and how I work: your memory, my user profile,
 
 Propose up to 5 channels. Choose ONLY targets from the list above, copied exactly. For each give:
 - target: the exact target from the list
-- label: a short name as I'd say it out loud (like "#build" or "family")
+- label: a short name as I'd say it out loud (like "#work" or "family")
 - topic: a short plain description of what kinds of requests belong there (under 15 words)
 - new_thread: whether each task should open its own thread there — {threads}
 

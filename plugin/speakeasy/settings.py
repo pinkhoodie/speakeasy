@@ -122,7 +122,7 @@ def validate_channel(raw: Any) -> dict[str, Any]:
     if not valid_delivery_target(target) or target == "none":
         raise SettingsError("delivery.channels[].target must be a Hermes send target like discord:<chat_id>")
     if not isinstance(label, str) or not CHANNEL_LABEL_RE.fullmatch(label.strip()):
-        raise SettingsError("delivery.channels[].label must be a short name like #build (up to 40 characters)")
+        raise SettingsError("delivery.channels[].label must be a short name like #work (up to 40 characters)")
     if not isinstance(topic, str) or len(topic.strip()) > 160 or any(c in topic for c in "{}<>`"):
         raise SettingsError("delivery.channels[].topic must be a plain description (up to 160 characters)")
     if not isinstance(raw.get("new_thread", False), bool):
