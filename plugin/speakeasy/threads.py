@@ -253,7 +253,8 @@ def session_answer(state_db: Path, session_id: str) -> str | None:
     except sqlite3.Error:
         return None
     try:
-        row = db.execute("SELECT role, content, tool_calls FROM messages WHERE session_id=? ORDER BY id DESC LIMIT 1",
+        row = db.execute("SELECT role, content, tool_calls FROM messages WHERE session_id=? "
+                         "AND role IN ('user', 'assistant', 'tool') ORDER BY id DESC LIMIT 1",
                          (session_id,)).fetchone()
     except sqlite3.Error:
         row = None
@@ -264,18 +265,40 @@ def session_answer(state_db: Path, session_id: str) -> str | None:
     return row[1]
 
 
+def session_title(state_db: Path, session_id: str) -> str | None:
+    """The title Hermes gave the session (it names new threads after the first turn)."""
+    try:
+        db = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return None
+    try:
+        row = db.execute("SELECT title FROM sessions WHERE id=?", (session_id,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    finally:
+        db.close()
+    title = " ".join(str(row[0] or "").split()) if row else ""
+    return title[:80] or None
+
+
 def wait_for_answer(state_db: Path, opened: Opened, timeout_s: float, poll_s: float = 3.0,
                     sleep: Callable[[float], None] = time.sleep,
-                    on_session: Callable[[str], None] | None = None) -> str | None:
+                    on_session: Callable[[str], None] | None = None,
+                    on_title: Callable[[str], None] | None = None) -> str | None:
     """Poll until the thread's first turn finishes; None on timeout (the answer still lands in the
     thread, only the call doesn't hear it)."""
-    waited, session_id = 0.0, None
+    waited, session_id, title = 0.0, None, None
     while waited <= timeout_s:
         if session_id is None:
             session_id = thread_session(state_db, opened.platform, opened.thread_id)
             if session_id and on_session:
                 on_session(session_id)
         if session_id:
+            if on_title:
+                named = session_title(state_db, session_id)
+                if named and named != title:
+                    title = named
+                    on_title(named)
             answer = session_answer(state_db, session_id)
             if answer is not None:
                 return answer
@@ -300,5 +323,7 @@ class ThreadRunner:
             raise ThreadError("Hermes' webhook platform is off")
         return open_thread(base, secret(self.home), target, message=message, title=title, delivery_id=delivery_id)
 
-    def wait(self, opened: Opened, on_session: Callable[[str], None]) -> str | None:
-        return wait_for_answer(self.home / "state.db", opened, self.answer_timeout_s, on_session=on_session)
+    def wait(self, opened: Opened, on_session: Callable[[str], None],
+             on_title: Callable[[str], None] | None = None) -> str | None:
+        return wait_for_answer(self.home / "state.db", opened, self.answer_timeout_s,
+                               on_session=on_session, on_title=on_title)

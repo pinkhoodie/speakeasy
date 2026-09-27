@@ -241,8 +241,10 @@ class FakeThreads:
         self.opened.append((target, message, title))
         return threads.Opened("speakeasy-x", "999", "discord")
 
-    def wait(self, opened, on_session):
+    def wait(self, opened, on_session, on_title=None):
         on_session("thread_session_1")
+        if on_title:
+            on_title("Hermes named this")
         return self.answer
 
 
@@ -315,6 +317,19 @@ def test_thread_answer_is_read_from_the_state_db(tmp_path):
     db.commit()
     assert threads.wait_for_answer(tmp_path / "state.db", opened, 0, sleep=lambda s: None) == "Done here"
     assert seen == ["s_thread"]
+
+
+def test_thread_answer_skips_hermes_bookkeeping_rows_and_follows_the_title(tmp_path):
+    # A finished Hermes turn can end with a session_meta row after the answer.
+    db = _state_db(tmp_path / "state.db", [("s_thread", "discord", "thread", "999", {"platform": "discord"})])
+    db.execute("INSERT INTO messages (session_id, role, content, tool_calls, timestamp) VALUES ('s_thread','assistant','All set',NULL,1)")
+    db.execute("INSERT INTO messages (session_id, role, content, tool_calls, timestamp) VALUES ('s_thread','session_meta','',NULL,2)")
+    db.execute("UPDATE sessions SET title='Check league team' WHERE id='s_thread'")
+    db.commit()
+    titles = []
+    answer = threads.wait_for_answer(tmp_path / "state.db", threads.Opened("r", "999", "discord"), 0,
+                                     sleep=lambda s: None, on_title=titles.append)
+    assert answer == "All set" and titles == ["Check league team"]
 
 
 def test_thread_capability_needs_the_webhook_platform(tmp_path):
@@ -409,3 +424,33 @@ def test_status_shows_routing_model_and_tailscale(server):
     status, body = http(server.base_url, "GET", "/voice/status", token=server.token)
     assert status == 200 and body["routing_model"] and "speakeasy_router" in body["routing_hint"]
     assert body["advertised_url"] == "" and "tailscale_name" in body
+
+
+def test_delivery_is_named_by_its_chat_not_just_the_platform(tmp_path):
+    from speakeasy import delivery as D
+    (tmp_path / "channel_directory.json").write_text(json.dumps({"platforms": {"discord": [
+        {"id": "555", "name": "Home server / #voice", "type": "group"},
+        {"id": "555", "name": "voice", "guild": "Home server", "type": "channel"}]}}))
+    assert D.target_label("discord:555", tmp_path) == "#voice on Discord"
+    assert D.target_label("discord:777", tmp_path) == "your Discord"  # unknown chat: the platform
+    assert D.target_label("telegram") == "your Telegram"
+    tour = P.tour_block(P.Names("Sam", "Hermes"), {}, D.target_label("discord:555", tmp_path))
+    assert "#voice on Discord" in tour and "settings" in tour
+
+
+def test_routing_call_runs_in_the_plugin_profile_scope(monkeypatch):
+    from speakeasy import router
+    import contextlib, sys, types
+    entered = []
+
+    @contextlib.contextmanager
+    def fake_scope(home):
+        entered.append(str(home))
+        yield
+    secret_scope = types.SimpleNamespace(is_multiplex_active=lambda: True, current_secret_scope=lambda: None)
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", secret_scope)
+    monkeypatch.setitem(sys.modules, "gateway.run", types.SimpleNamespace(_profile_runtime_scope=fake_scope))
+    monkeypatch.setattr(router, "_HOME", "/tmp/hermes-home")
+    with router._profile_scope():
+        pass
+    assert entered == ["/tmp/hermes-home"]

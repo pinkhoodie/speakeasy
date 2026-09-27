@@ -22,6 +22,7 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -168,8 +169,34 @@ def aux_call(messages: list[dict[str, str]], timeout: float = ROUTE_TIMEOUT_S) -
         from agent.auxiliary_client import call_llm, extract_content_or_reasoning  # type: ignore
     except Exception:
         return None
-    response = call_llm(task=AUX_TASK, messages=messages, temperature=0, max_tokens=300, timeout=timeout)
+    with _profile_scope():
+        response = call_llm(task=AUX_TASK, messages=messages, temperature=0, max_tokens=300, timeout=timeout)
     return extract_content_or_reasoning(response)
+
+
+_HOME: str | None = None
+
+
+def bind_home(hermes_home: Any) -> None:
+    """The Hermes home this plugin serves (set once by the adapter at start)."""
+    global _HOME
+    _HOME = str(hermes_home)
+
+
+def _profile_scope():
+    """Credentials for the aux call. Under a multi-profile gateway, secrets resolve only inside a
+    profile scope; the routing thread has none, so bind this plugin's home. Plain installs: no-op."""
+    import contextlib
+    if not _HOME:
+        return contextlib.nullcontext()
+    try:
+        from agent.secret_scope import current_secret_scope, is_multiplex_active  # type: ignore
+        if not is_multiplex_active() or current_secret_scope() is not None:
+            return contextlib.nullcontext()
+        from gateway.run import _profile_runtime_scope  # type: ignore
+    except Exception:
+        return contextlib.nullcontext()
+    return _profile_runtime_scope(Path(_HOME))
 
 
 def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topics: list[Topic] | None = None,

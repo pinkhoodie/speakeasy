@@ -153,7 +153,7 @@ class VoiceService:
         s = self.settings.get()
         names = P.Names.from_settings(s)
         recent = ""
-        label = D.target_label(s["delivery"]["target"])
+        label = D.target_label(s["delivery"]["target"], self.home)
         if s["brief"]["include_recent_voice"] and not resume and tour is None:
             try:
                 turns = json.loads(self.store.get_meta("recent_voice") or "[]")

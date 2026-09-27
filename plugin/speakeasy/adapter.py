@@ -29,6 +29,8 @@ class VoiceAdapter(BasePlatformAdapter):
         self.port = int(extra.get("port", DEFAULT_PORT))
         # Resolved at construction (inside the owning profile's scope): HTTP threads don't carry it.
         self.hermes_home = get_hermes_home()
+        from . import router
+        router.bind_home(self.hermes_home)
         self._server: Any = None
 
     @property

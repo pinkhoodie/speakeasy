@@ -204,11 +204,33 @@ def threads_supported() -> bool:
         return False
 
 
-def target_label(target: str) -> str:
-    """How the voice prompt names the delivery target ("your Telegram")."""
+def target_label(target: str, hermes_home: Path | None = None) -> str:
+    """How the voice names where results go: the chat's own name when Hermes knows it
+    ("#voice on Discord", "your Home chat on Telegram"), else the platform ("your Telegram")."""
     if not target or target == "none":
         return ""
-    return "your " + target.split(":", 1)[0].title()
+    platform, _, rest = target.partition(":")
+    chat_id = rest.split(":", 1)[0]
+    name = _chat_name(Path(hermes_home), platform, chat_id) if hermes_home and chat_id else ""
+    if name:
+        return f"{name} on {platform.title()}"
+    return "your " + platform.title()
+
+
+def _chat_name(hermes_home: Path, platform: str, chat_id: str) -> str:
+    directory = _read_json(hermes_home / "channel_directory.json") or {}
+    chats = (directory.get("platforms") or {}).get(platform) if isinstance(directory, dict) else None
+    for chat in chats or []:
+        if isinstance(chat, dict) and str(chat.get("id")) == chat_id and chat.get("type") != "group":
+            name = " ".join(str(chat.get("name") or "").split())
+            if name:
+                return name if name.startswith("#") or platform != "discord" else "#" + name
+    for chat in chats or []:
+        if isinstance(chat, dict) and str(chat.get("id")) == chat_id:
+            name = " ".join(str(chat.get("name") or "").split())
+            if name:
+                return name.rsplit(" / ", 1)[-1]
+    return ""
 
 
 def flat_chats(dest: dict[str, Any]) -> list[dict[str, str]]:

@@ -171,7 +171,8 @@ def tour_block(names: Names, shortcuts: dict[str, str], delivery_label: str = ""
         controls.append(f"{pause} pauses the call and resumes it later with nothing lost")
     if call:
         controls.append(f"{call} starts and ends a call")
-    where = delivery_label or "the notifications on their Mac"
+    where = (f"the chat they picked in setup ({delivery_label})" if delivery_label
+             else "a notification on their Mac")
     if channels:
         labels = ", ".join(str(c.get("label") or "") for c in channels if c.get("label"))
         where += f" by default, or one of their channels ({labels}) when a task fits one or they name it"
@@ -183,8 +184,9 @@ def tour_block(names: Names, shortcuts: dict[str, str], delivery_label: str = ""
         f"2. Invite a small real task (suggest one idea, like looking something up). When they give "
         f"one, hand it off as usual and point out that you can keep talking while it runs.\n"
         f"3. While it runs, cover the controls briefly: {'; '.join(controls)}.\n"
-        f"4. Say where finished work goes: {where}. They can ask how a task is going, or follow "
-        f"up on it, in this call or a later one.\n"
+        f"4. Say where finished work goes: {where}. Name it the way they would, not by platform "
+        f"alone. They can change it in Speakeasy's settings. They can ask how a task is going, or "
+        f"follow up on it, in this call or a later one.\n"
         f"5. Close in one sentence and carry on normally.\n"
         f"If they say skip, say they've got it, or ask for something else, drop the tour at once and "
         f"just help. Never restart it.")

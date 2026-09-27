@@ -871,8 +871,13 @@ class SidebandWorker:
             # Follow-ups to this task continue inside the thread (thread continuity).
             self.store.set_continued(idem, session_id, f"{channel.label} thread")
 
+        def on_title(title: str) -> None:
+            # Hermes names the thread after its first turn; show the same name in the panel.
+            self.store.set_title(idem, title)
+            self.publish()
+
         try:
-            answer = await asyncio.to_thread(self.rt.threads.wait, opened, on_session)
+            answer = await asyncio.to_thread(self.rt.threads.wait, opened, on_session, on_title)
         except Exception as exc:
             answer, backend.error = None, type(exc).__name__
         if answer is None:
