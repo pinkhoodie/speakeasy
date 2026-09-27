@@ -14,7 +14,27 @@ know about their setup, and ask in one short question if it's unclear.
 
 If it's already installed, update it instead: `hermes plugins update speakeasy`.
 
-## 2. Run setup
+## 2. A different Mac? Make sure Tailscale connects them
+
+Skip this step when the user talks from the machine Hermes runs on.
+
+Otherwise their Mac reaches Hermes over Tailscale, privately, with nothing opened to the
+internet. Check this machine with `tailscale status`:
+
+- **Connected:** good. Setup publishes the voice server to their tailnet only.
+- **Installed but stopped:** run `tailscale up` if you can; if it needs a browser sign-in, give
+  the user the sign-in link it prints.
+- **Not installed:** tell the user Speakeasy needs Tailscale when Hermes is on another computer,
+  and install it if you can (`brew install --cask tailscale` on a Mac, or the command at
+  https://tailscale.com/download for Linux). Signing in needs them once.
+
+Their Mac needs Tailscale too, signed in with the **same account**: https://tailscale.com/download.
+Say so in the same message, since you can't check their Mac from here (unless you can operate it).
+
+If setup reports that HTTPS certificates are off for the tailnet, the user turns them on once at
+https://login.tailscale.com/admin/dns (HTTPS Certificates), then you run setup again.
+
+## 3. Run setup
 
 **Same Mac as Hermes:** setup opens the pairing link on this Mac itself: Speakeasy if it's
 installed, otherwise the download page, which connects the app once it's in.
@@ -36,10 +56,10 @@ link in chat is enough on its own.
   Setup then asks for the key on a hidden prompt; if you can't answer hidden prompts, tell the
   user to put `OPENAI_API_KEY` in their Hermes `.env` themselves. Never ask them to paste a key
   in chat.
-- Setup publishes the voice server on the user's Tailscale network when Tailscale is connected,
-  so their Mac can reach it from anywhere on their tailnet. It never uses Tailscale Funnel.
+- Setup publishes the voice server on the user's Tailscale network when Tailscale is connected
+  (never Tailscale Funnel, so nothing is exposed to the internet).
 
-## 3. Read the result and tell the user the one thing to do
+## 4. Read the result and tell the user the one thing to do
 
 Setup never restarts Hermes. Its exit code tells you where things stand:
 

@@ -54,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        applyDockPolicy()
         let args = ProcessInfo.processInfo.arguments
         if args.contains("--native-offer-smoke") { NativeSmoke.offer(); return }
         if args.contains("--native-mic-smoke") { NativeSmoke.mic(); return }
@@ -88,7 +88,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { false }
+    /// Clicking the Dock icon (or opening the app again from Finder) brings back what's unfinished:
+    /// setup if it isn't done, otherwise Settings. Nothing gets lost behind other windows.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if onboarding != nil || !app.isPaired || !UserDefaults.standard.bool(forKey: Prefs.onboardingDone) {
+            showOnboarding()
+        } else if !flag {
+            openSettings()
+        }
+        return false
+    }
+
+    /// Dock icon on by default; Settings › General › Show in Dock turns Speakeasy into a
+    /// menu-bar-only app.
+    private func applyDockPolicy() {
+        let policy: NSApplication.ActivationPolicy = UserDefaults.standard.bool(forKey: Prefs.showInDock) ? .regular : .accessory
+        if NSApp.activationPolicy() != policy { NSApp.setActivationPolicy(policy) }
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         if active { native.end() }
@@ -127,7 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.applyClientPrefs() }
+            .sink { [weak self] _ in self?.applyClientPrefs(); self?.applyDockPolicy() }
             .store(in: &bag)
     }
 

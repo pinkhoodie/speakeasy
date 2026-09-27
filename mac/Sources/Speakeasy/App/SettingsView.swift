@@ -104,6 +104,11 @@ private struct GeneralSettings: View {
             }
             Section {
                 Toggle("Launch at login", isOn: Binding(get: { app.launchAtLogin }, set: { app.launchAtLogin = $0 }))
+                Toggle(isOn: Binding(get: { UserDefaults.standard.bool(forKey: Prefs.showInDock) },
+                                     set: { UserDefaults.standard.set($0, forKey: Prefs.showInDock) })) {
+                    Text("Show in Dock")
+                    Text("Off: Speakeasy lives only in the menu bar.")
+                }
             }
             Section {
                 LabeledContent("Microphone") {

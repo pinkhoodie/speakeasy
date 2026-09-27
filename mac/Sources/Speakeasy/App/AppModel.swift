@@ -21,6 +21,7 @@ enum Prefs {
     static let showCaptions = "showCaptions"
     static let notifyWhenDone = "notifyWhenDone"
     static let panelOnAllSpaces = "panelOnAllSpaces"
+    static let showInDock = "showInDock"
     static let checkForUpdates = "checkForUpdates"
     static let lastUpdateCheck = "lastUpdateCheck"
     /// The next new call starts with the first-call tour (set when onboarding finishes, or
@@ -31,7 +32,8 @@ enum Prefs {
 
     static func register() {
         UserDefaults.standard.register(defaults: [showPanelOnStart: true, followSystemAudio: true, startMuted: false, startSlim: false,
-                                                 showCaptions: true, notifyWhenDone: true, panelOnAllSpaces: true])
+                                                 showCaptions: true, notifyWhenDone: true, panelOnAllSpaces: true,
+                                                 showInDock: true])
     }
 
     /// The call shortcut (default ⌃⌥Space). Stored as e.g. `ctrl+opt+space`.
@@ -348,10 +350,16 @@ final class AppModel: ObservableObject {
     func describe(_ error: Error) -> String {
         if let http = error as? ServerClient.HTTPError {
             if http.status == 401 || http.status == 403 { return "This Mac isn't paired anymore. Pair again in Settings › Connection." }
+            if http.status == 404 {
+                return "Your Hermes has an older Speakeasy plugin that can't do this yet. Ask your agent to update Speakeasy, then restart Hermes."
+            }
             return http.message
         }
         let ns = error as NSError
         if ns.domain == NSURLErrorDomain {
+            if let host = config.serverURL?.host, host.hasSuffix(".ts.net") {
+                return "Can't reach your Hermes at \(host). It's on your Tailscale network: make sure Tailscale is installed and signed in on this Mac, with the same account as the computer running Hermes (tailscale.com/download)."
+            }
             return "Can't reach the Speakeasy server at \(config.serverURL?.absoluteString ?? "?"). Is the Hermes gateway running?"
         }
         return error.localizedDescription
