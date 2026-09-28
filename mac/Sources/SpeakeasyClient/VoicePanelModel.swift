@@ -4,6 +4,7 @@ import SpeakeasyCore
 /// Observable model the SwiftUI panel renders. The controller owns all mutation.
 @MainActor
 public final class VoicePanelModel: ObservableObject {
+    public init() {}
     public static let defaultWidth: CGFloat = 400
     @Published public var state = VoiceState()
     @Published public var workExpanded = false
