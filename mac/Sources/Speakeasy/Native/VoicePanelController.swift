@@ -7,6 +7,11 @@ import SpeakeasyCore
 /// so Escape works only when the user is interacting with the panel.
 final class VoicePanel: NSPanel {
     var onEscape: (() -> Void)?
+    /// Left/right arrow: returns true when it stepped through images (then the key is consumed).
+    var onArrow: ((Int) -> Bool)?
+    /// True while arrow keys would do something: a click then makes the panel key so they reach it.
+    /// Otherwise the panel stays non-key on click and never takes typing away from other apps.
+    var wantsKeysOnClick: (() -> Bool)?
     /// Called once when a drag that moved the panel ends.
     var onMoved: (() -> Void)?
     /// Edge resize: live size delta (dx wider, dy taller) and end-of-drag commit.
@@ -55,8 +60,15 @@ final class VoicePanel: NSPanel {
     static let dragSlop: CGFloat = 4
 
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, !(firstResponder is NSText),
+           let delta = ImageReviewLayout.arrowStep(keyCode: event.keyCode,
+                                                   commandOptionControl: !event.modifierFlags.intersection([.command, .option, .control]).isEmpty),
+           onArrow?(delta) == true {
+            return
+        }
         switch event.type {
         case .leftMouseDown:
+            if !isKeyWindow, wantsKeysOnClick?() == true { makeKey() }
             isDraggingPanel = false
             isResizingPanel = false
             var edges = resizeEdges(at: event.locationInWindow)
@@ -292,6 +304,8 @@ final class VoicePanelController {
             if p != .zero { userTopLeft = p }
         }
         panel.onMoved = { [weak self] in self?.panelDidMove() }
+        panel.onArrow = { [weak model] delta in model?.stepOpenReview(by: delta) ?? false }
+        panel.wantsKeysOnClick = { [weak model] in model?.steppableReview != nil }
         if let saved = UserDefaults.standard.string(forKey: Self.sizeKey) {
             let s = NSSizeFromString(saved)
             model.panelWidth = Self.clampWidth(s.width == 0 ? Tokens.width : s.width)

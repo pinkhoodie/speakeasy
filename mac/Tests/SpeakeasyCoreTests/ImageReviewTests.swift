@@ -79,3 +79,22 @@ final class ImageReviewTests: XCTestCase {
         XCTAssertFalse(ShowRequest(taskID: "t", runID: "r", image: .review, seq: 3).opensDetail)
     }
 }
+
+final class ImageReviewArrowKeyTests: XCTestCase {
+    func testLeftAndRightArrowsStepImages() {
+        XCTAssertEqual(ImageReviewLayout.arrowStep(keyCode: 123, commandOptionControl: false), -1)
+        XCTAssertEqual(ImageReviewLayout.arrowStep(keyCode: 124, commandOptionControl: false), 1)
+    }
+
+    func testOtherKeysAndShortcutsAreLeftAlone() {
+        XCTAssertNil(ImageReviewLayout.arrowStep(keyCode: 125, commandOptionControl: false))  // down
+        XCTAssertNil(ImageReviewLayout.arrowStep(keyCode: 126, commandOptionControl: false))  // up
+        XCTAssertNil(ImageReviewLayout.arrowStep(keyCode: 0, commandOptionControl: false))    // "a"
+        XCTAssertNil(ImageReviewLayout.arrowStep(keyCode: 123, commandOptionControl: true))   // cmd-left
+    }
+
+    func testArrowsWrapAround() {
+        XCTAssertEqual(ImageReviewLayout.step(0, by: -1, count: 3), 2)
+        XCTAssertEqual(ImageReviewLayout.step(2, by: 1, count: 3), 0)
+    }
+}

@@ -92,7 +92,7 @@ struct ImageReviewCard: View {
 
     private var preview: some View {
         Button {
-            if let image { ImagePreviewWindow.shared.show(image, title: card?.name ?? review.taskName) }
+            if let image { openFullSize(image) }
         } label: {
             ZStack(alignment: .bottomTrailing) {
                 Color.primary.opacity(0.05)
@@ -117,6 +117,17 @@ struct ImageReviewCard: View {
         .disabled(image == nil)
         .help(image == nil ? (failed ? "Image unavailable" : "Loading image") : "Open full size")
         .accessibilityLabel("\(card?.name ?? "Image"), open full size")
+    }
+
+    /// Full size, with arrow keys stepping through this review's images.
+    private func openFullSize(_ image: NSImage) {
+        let runID = review.runID, images = review.images, fallback = review.taskName
+        let load = model.loadProductImage
+        ImagePreviewWindow.shared.show(image, title: card?.name ?? fallback, index: index, count: images.count) { i in
+            guard images.indices.contains(i), let data = await load(runID, images[i].number),
+                  let loaded = NSImage(data: data) else { return nil }
+            return (loaded, images[i].name)
+        }
     }
 
     private func step(_ delta: Int) {

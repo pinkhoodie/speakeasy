@@ -76,6 +76,17 @@ public enum ImageReviewLayout {
         return reviews.last?.runID
     }
 
+    /// Left/right arrow key codes -> step; nil = not an image-stepping key.
+    /// Keys with Command/Option/Control held are left alone so system shortcuts keep working.
+    public static func arrowStep(keyCode: UInt16, commandOptionControl: Bool) -> Int? {
+        guard !commandOptionControl else { return nil }
+        switch keyCode {
+        case 123: return -1   // left arrow
+        case 124: return 1    // right arrow
+        default: return nil
+        }
+    }
+
     /// The image shown after stepping `by` from `index` (wraps around).
     public static func step(_ index: Int, by delta: Int, count: Int) -> Int {
         guard count > 0 else { return 0 }

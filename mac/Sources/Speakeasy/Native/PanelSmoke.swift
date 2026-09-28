@@ -369,6 +369,22 @@ enum PanelSmoke {
         check(visible.contains(win.frame), "design review: card stays on screen")
         do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/design-review.png")); record("snapshot \(dir)/design-review.png") }
         catch { fail("snapshot failed: \(error)") }
+        // Arrow keys step through the images: real key events delivered through the panel window.
+        func arrow(_ code: UInt16) -> NSEvent? {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                             windowNumber: win.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "",
+                             isARepeat: false, keyCode: code)
+        }
+        c.model.reviewIndex["run_preview"] = 0
+        if let right = arrow(124) { win.sendEvent(right) }
+        await settle(0.3)
+        check(c.model.reviewIndex["run_preview"] == 1, "design review: right arrow shows the next image")
+        if let left = arrow(123) { win.sendEvent(left); win.sendEvent(left) }
+        await settle(0.3)
+        check(c.model.reviewIndex["run_preview"] == 2, "design review: left arrow goes back and wraps to the last image")
+        if let down = arrow(125) { win.sendEvent(down) }
+        await settle(0.2)
+        check(c.model.reviewIndex["run_preview"] == 2, "design review: other keys leave the images alone")
         c.model.reviewIndex["run_preview"] = 1
         await settle(0.8)
         do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/design-review-next.png")); record("snapshot \(dir)/design-review-next.png") }

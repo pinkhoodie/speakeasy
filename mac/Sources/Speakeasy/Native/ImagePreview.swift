@@ -9,13 +9,15 @@ import SpeakeasyCore
 struct ImageResultCard: View {
     let runID: String
     let card: ImageCard
+    /// Every image in the task, so the full-size window can step through them with arrow keys.
+    var all: [ImageCard] = []
     @ObservedObject var model: VoicePanelModel
     @State private var image: NSImage?
     @State private var failed = false
 
     var body: some View {
         Button {
-            if let image { ImagePreviewWindow.shared.show(image, title: card.name) }
+            if let image { openFullSize(image) }
         } label: {
             VStack(alignment: .leading, spacing: 5) {
                 ZStack {
@@ -50,6 +52,16 @@ struct ImageResultCard: View {
             } else {
                 failed = true
             }
+        }
+    }
+
+    private func openFullSize(_ image: NSImage) {
+        let images = all.isEmpty ? [card] : all, runID = runID, load = model.loadProductImage
+        let start = images.firstIndex(where: { $0.number == card.number }) ?? 0
+        ImagePreviewWindow.shared.show(image, title: card.name, index: start, count: images.count) { i in
+            guard images.indices.contains(i), let data = await load(runID, images[i].number),
+                  let loaded = NSImage(data: data) else { return nil }
+            return (loaded, images[i].name)
         }
     }
 }
@@ -110,20 +122,52 @@ final class ImagePreviewWindow: NSObject, NSWindowDelegate {
     static let shared = ImagePreviewWindow()
     private var panel: NSPanel?
 
+    /// Gallery state: how many images, which one is showing, and how to fetch another (nil = single image).
+    private var count = 1
+    private var index = 0
+    private var fetch: ((Int) async -> (NSImage, String)?)?
+    private var loading: Task<Void, Never>?
+
     func show(_ image: NSImage, title: String) {
+        count = 1; index = 0; fetch = nil
+        present(image, title: title, resize: true)
+    }
+
+    /// Several images: left/right arrow keys step through them (wrapping), fetched on demand.
+    func show(_ image: NSImage, title: String, index: Int, count: Int, fetch: @escaping (Int) async -> (NSImage, String)?) {
+        self.count = max(1, count); self.index = index; self.fetch = count > 1 ? fetch : nil
+        present(image, title: title, resize: true)
+    }
+
+    fileprivate func step(_ delta: Int) {
+        guard let fetch, count > 1 else { return }
+        let next = ImageReviewLayout.step(index, by: delta, count: count)
+        index = next
+        loading?.cancel()
+        loading = Task { @MainActor [weak self] in
+            guard let loaded = await fetch(next), !Task.isCancelled, let self, self.index == next else { return }
+            self.present(loaded.0, title: loaded.1, resize: false)
+        }
+    }
+
+    private func present(_ image: NSImage, title: String, resize: Bool) {
         let panel = self.panel ?? makePanel()
         self.panel = panel
-        let view = NSImageView(image: image)
+        let view = PreviewImageView(image: image)
+        view.onArrow = { [weak self] delta in self?.step(delta) }
         view.imageScaling = .scaleProportionallyUpOrDown
         view.imageAlignment = .alignCenter
         view.animates = true
         view.setAccessibilityLabel(title)
         panel.contentView = view
-        panel.title = title
-        panel.setContentSize(imagePreviewSize(for: image.size, screen: (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.size))
-        panel.center()
+        panel.title = count > 1 ? "\(title) (\(index + 1) of \(count))" : title
+        if resize {
+            panel.setContentSize(imagePreviewSize(for: image.size, screen: (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.size))
+            panel.center()
+        }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(view)
     }
 
     private func makePanel() -> NSPanel {
@@ -151,6 +195,22 @@ final class ImagePreviewWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        loading?.cancel()
+        fetch = nil
         panel?.contentView = nil  // release the image bytes
+    }
+}
+
+/// The full-size image; takes key focus so left/right arrows step through a gallery.
+private final class PreviewImageView: NSImageView {
+    var onArrow: ((Int) -> Void)?
+    override var acceptsFirstResponder: Bool { true }
+    override func keyDown(with event: NSEvent) {
+        let modified = !event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+        if let delta = ImageReviewLayout.arrowStep(keyCode: event.keyCode, commandOptionControl: modified) {
+            onArrow?(delta)
+        } else {
+            super.keyDown(with: event)
+        }
     }
 }

@@ -92,6 +92,25 @@ final class VoicePanelModel: ObservableObject {
     /// Review cards to pin in the call panel (like drafts): most recent three.
     var pinnedReviews: [ImageReview] { state.pendingReviews }
 
+    /// The open review card when it has more than one image and is on screen.
+    var steppableReview: ImageReview? {
+        guard !(workExpanded || state.workOnly),
+              let open = ImageReviewLayout.focused(pinnedReviews, picked: focusedReviewID),
+              let review = pinnedReviews.first(where: { $0.runID == open }), review.images.count > 1 else { return nil }
+        return review
+    }
+
+    /// Arrow keys on the panel: step the open review card's images. False when there's nothing to step
+    /// (no review showing, one image, or the work view covers the cards) so the key goes elsewhere.
+    @discardableResult
+    func stepOpenReview(by delta: Int) -> Bool {
+        guard let review = steppableReview else { return false }
+        let open = review.runID
+        let current = min(reviewIndex[open] ?? 0, review.images.count - 1)
+        reviewIndex[open] = ImageReviewLayout.step(current, by: delta, count: review.images.count)
+        return true
+    }
+
     // MARK: Panel visibility
     /// The close (x) button: hide the panel (ends nothing).
     var onClosePanel: () -> Void = {}

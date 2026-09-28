@@ -922,7 +922,7 @@ struct WorkDetailView: View {
                         section(images.count == 1 ? "Image" : "Images") {
                             VStack(spacing: 8) {
                                 ForEach(images) { card in
-                                    ImageResultCard(runID: runID, card: card, model: model)
+                                    ImageResultCard(runID: runID, card: card, all: images, model: model)
                                 }
                             }
                         }
