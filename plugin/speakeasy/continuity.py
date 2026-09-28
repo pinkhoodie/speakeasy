@@ -127,6 +127,18 @@ def recent_conversations(state_db: Path, *, days: int = RECENT_DAYS, limit: int 
 
 
 def conversation_by_session(state_db: Path, session_id: str) -> Conversation | None:
+    """The chat a session belongs to, backed by that chat's CURRENT live session. A Discord thread
+    or Telegram chat keeps its id while Hermes swaps the session behind it (/new, a session switch,
+    an auto-reset, compression); continuing the old session id would write into a dead session
+    the chat no longer shows."""
+    conv = _conversation_row(state_db, session_id)
+    if conv is None:
+        return None
+    live = next((c for c in recent_conversations(state_db) if c.target == conv.target), None)
+    return live or conv
+
+
+def _conversation_row(state_db: Path, session_id: str) -> Conversation | None:
     db = _open(state_db)
     if db is None:
         return None
@@ -164,6 +176,169 @@ def session_busy(state_db: Path, session_id: str, *, window_s: float = 900, now:
 
 def _words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 and w not in _STOP}
+
+
+# -- finding the conversation by what was said in it --------------------------------------------
+#
+# A chat's title is set by its first turn ("Gateway tests exit code 1") and rarely says what the
+# chat is about hours later. So candidates are found by what was actually said in each chat, and
+# every chat is shown to the routing model with its recent user lines, not just its name.
+
+MAX_SNIPPETS = 3
+SNIPPET_CHARS = 160
+POOL = 150          # recent chats searched by content (the model sees at most ``limit`` of them)
+MIN_SCORE = 2.0     # about one rare shared word, or several less rare ones
+# Gateway scaffolding around a user's words; stripped so the model sees what the person said.
+_NOISE = re.compile(
+    r"\[(?:Triggering message id|Image attached|Gateway message origin|IMPORTANT: Background)[^\]]*\]"
+    r"|\[(?:Voice request from [^\]]*|Replying to: [^\]]*)\]"
+    r"|\[OUT-OF-BAND USER MESSAGE[^\]]*\]|\[/OUT-OF-BAND USER MESSAGE\]"
+    r"|Gateway message origin \(JSON[^\n]*\n\{[^\n]*\}\n?[^\n]*"
+    r"|<memory-context>.*?</memory-context>|^\[[A-Za-z0-9_.-]{2,32}\]\s", re.S | re.M)
+_MACHINE_LINE = re.compile(r"^\[?(?:ASYNC DELEGATION|IMPORTANT:|SYSTEM:|Cronjob Response|CONTEXT COMPACTION)", re.I)
+
+
+@dataclasses.dataclass(frozen=True)
+class Candidate:
+    conv: Conversation
+    snippets: tuple[str, ...]   # the user's latest lines in it, newest first
+    hits: float = 0.0           # how strongly its recent talk matches the request (rare shared words)
+    voice_request: str = ""     # the last spoken request sent into this chat, when there was one
+    voice_at: float = 0.0
+
+
+def with_placements(state_db: Path, candidates: list[Candidate], placements: list[dict[str, Any]],
+                    limit: int = 8) -> list[Candidate]:
+    """Mark (or add) the chats voice work was recently sent into. Placements name the session at
+    the time; the chat may be backed by a newer session now, so match by chat, not session."""
+    by_chat = {_chat_key(c.conv): c for c in candidates}
+    order = [_chat_key(c.conv) for c in candidates]
+    for placed in placements:
+        conv = conversation_by_session(state_db, placed["session_id"])
+        if conv is None:
+            continue
+        key = _chat_key(conv)
+        current = by_chat.get(key)
+        if current is not None and current.voice_at:
+            continue  # newest placement already recorded
+        if current is None:
+            live = next((c for c in recent_conversations(state_db) if _chat_key(c) == key), None)
+            if live is None:
+                continue  # that chat is gone or ended
+            current = Candidate(live, ())
+            order.insert(0, key)
+        by_chat[key] = dataclasses.replace(current, voice_request=_clean_line(placed.get("request", "")),
+                                           voice_at=float(placed.get("at") or 0))
+    ranked = [by_chat[k] for k in dict.fromkeys(order)]
+    voiced = sorted((c for c in ranked if c.voice_at), key=lambda c: -c.voice_at)
+    return (voiced + [c for c in ranked if not c.voice_at])[:limit]
+
+
+def _clean_line(text: str) -> str:
+    text = _NOISE.sub(" ", text or "")
+    return " ".join(text.split())[:SNIPPET_CHARS]
+
+
+def _chat_key(conv: Conversation) -> str:
+    """One chat, whatever Hermes session currently backs it (a thread keeps its id across
+    resets and switches; the session id does not)."""
+    return conv.target
+
+
+# Only what the person typed or said: assistant replies and machine notices (subagent reports,
+# background-process notices, cron output) mention everything and would make one busy thread
+# match every request.
+_HUMAN = ("AND m.content NOT LIKE '%[ASYNC DELEGATION%' AND m.content NOT LIKE '%[IMPORTANT: Background%' "
+          "AND m.content NOT LIKE '[SYSTEM:%' AND m.content NOT LIKE '%CONTEXT COMPACTION%' "
+          "AND m.content NOT LIKE '[Cron delivery%' AND length(m.content) < 4000")
+
+
+def _term_sessions(db: sqlite3.Connection, term: str, since: float, sessions: list[str]) -> set[str]:
+    """Sessions (of those given) where the person recently used the word."""
+    marks = ",".join("?" * len(sessions))
+    try:
+        rows = db.execute(
+            f"""SELECT DISTINCT m.session_id FROM messages_fts f JOIN messages m ON m.id = f.rowid
+                WHERE messages_fts MATCH ? AND m.timestamp > ? AND m.role = 'user' {_HUMAN}
+                  AND m.session_id IN ({marks})""", ('"' + term.replace('"', "") + '"', since, *sessions)).fetchall()
+    except sqlite3.Error:  # no full-text index (older Hermes): a plain scan
+        rows = db.execute(
+            f"""SELECT DISTINCT m.session_id FROM messages m WHERE m.timestamp > ? AND m.role = 'user' {_HUMAN}
+                AND m.session_id IN ({marks}) AND m.content LIKE ?""", (since, *sessions, f"%{term}%")).fetchall()
+    return {r[0] for r in rows}
+
+
+def conversations_with_context(state_db: Path, request: str, *, days: int = RECENT_DAYS,
+                               limit: int = 8, now: float | None = None) -> list[Candidate]:
+    """The chats worth showing the routing model: the most recently active ones plus the ones
+    whose recent messages talk about what was asked, each with the user's latest lines.
+
+    Relevance is how many of the request's words a chat used, weighted by how rare each word is
+    across chats (a word every chat uses, like "going", counts for little). Not a raw message
+    count: a long-running thread would otherwise match everything.
+
+    Read-only. Keyed by chat, not by session: a Discord thread whose session was reset, switched
+    or compressed is still one chat, and its newest live session is the one to continue.
+    """
+    import math
+    convs = recent_conversations(state_db, days=days, now=now, limit=POOL)
+    if not convs:
+        return []
+    db = _open(state_db)
+    if db is None:
+        return [Candidate(c, ()) for c in convs[:limit]]
+    try:
+        scores: dict[str, float] = {}
+        terms = sorted(_words(request), key=len, reverse=True)[:10]
+        if terms:
+            since = (now or time.time()) - days * 86400
+            ids = [c.session_id for c in convs]
+            for term in terms:
+                found = _term_sessions(db, term, since, ids)
+                if not found or len(found) > len(ids) * 0.5:
+                    continue  # absent, or so common it says nothing about which chat
+                weight = math.log(len(ids) / len(found))
+                for sid in found:
+                    scores[sid] = scores.get(sid, 0.0) + weight
+        recent = convs[:max(1, limit - 3)]
+        topical = sorted((c for c in convs if scores.get(c.session_id, 0) >= MIN_SCORE),
+                         key=lambda c: (-scores[c.session_id], -c.last_active))
+        picked: list[Conversation] = []
+        for c in [*recent[:3], *topical[:limit - 3], *recent[3:]]:
+            if c not in picked and len(picked) < limit:
+                picked.append(c)
+        return [Candidate(c, _snippets(db, c.session_id), round(scores.get(c.session_id, 0.0), 2)) for c in picked]
+    except sqlite3.Error:
+        return [Candidate(c, ()) for c in convs[:limit]]
+    finally:
+        db.close()
+
+
+def _snippets(db: sqlite3.Connection, session_id: str) -> tuple[str, ...]:
+    rows = db.execute("SELECT content FROM messages WHERE session_id=? AND role='user' AND content IS NOT NULL "
+                      "ORDER BY id DESC LIMIT 15", (session_id,)).fetchall()
+    out: list[str] = []
+    for (text,) in rows:
+        line = _clean_line(text)
+        if len(line) > 8 and not _MACHINE_LINE.match(line) and line not in out:
+            out.append(line)
+        if len(out) >= MAX_SNIPPETS:
+            break
+    return tuple(out)
+
+
+def best_by_content(request: str, candidates: list[Candidate]) -> Conversation | None:
+    """No routing model: continue the chat whose recent talk clearly matches, only with a
+    continuation cue ("the thread where we...", "continue the ...") and a clear winner."""
+    if not candidates or not _CONTINUE_CUES.search(request or ""):
+        return None
+    if re.search(r"(?i)\b(how is|how's|where are we|what did we|status of|any update)\b", request):
+        return None
+    ranked = sorted(candidates, key=lambda c: (c.hits, c.conv.last_active), reverse=True)
+    top = ranked[0]
+    if top.hits < MIN_SCORE * 1.5 or (len(ranked) > 1 and ranked[1].hits * 1.5 > top.hits):
+        return None
+    return top.conv
 
 
 def match(request: str, conversations: list[Conversation]) -> Conversation | None:

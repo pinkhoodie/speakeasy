@@ -219,6 +219,24 @@ class StateStore:
                 "SELECT text FROM work_events WHERE idem_key=? AND kind='request' ORDER BY seq LIMIT 1", (key,)).fetchone()
         return row[0] if row else None
 
+    def recent_placements(self, since_s: float = 7 * 86400, limit: int = 20) -> list[dict[str, Any]]:
+        """Chats this assistant recently sent voice work into (thread tasks and continued
+        conversations), newest first, across calls: the strongest hint for "where we were working"."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT idem_key, continued, updated FROM runs WHERE continued IS NOT NULL AND updated > ? "
+                "ORDER BY updated DESC LIMIT ?", (time.time() - since_s, limit)).fetchall()
+        out = []
+        for key, continued, updated in rows:
+            try:
+                placed = json.loads(continued)
+            except ValueError:
+                continue
+            if isinstance(placed, dict) and placed.get("session_id"):
+                out.append({"session_id": str(placed["session_id"]), "request": self.request_text(key) or "",
+                            "at": float(updated or 0)})
+        return out
+
     def away(self, limit: int = 3) -> list[dict[str, Any]]:
         """Runs that settled (terminal or approval-needed) since the previous call ended."""
         ended = self.get_meta("last_call_end")

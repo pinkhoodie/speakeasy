@@ -33,6 +33,7 @@ AUX_TASK = "speakeasy_router"
 AUX_DISPLAY_NAME = "Speakeasy task routing"
 AUX_DESCRIPTION = "Decides, per spoken request, follow-up vs new task, splits compound asks, and picks a chat channel."
 ROUTE_TIMEOUT_S = 3.0
+CHAT_ROUTE_TIMEOUT_S = 5.0   # a longer prompt when existing conversations are in play
 TITLE_TIMEOUT_S = 15.0
 _EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="speakeasy-router")
 NEW = "new"
@@ -126,14 +127,47 @@ class Topic:
 
 
 @dataclasses.dataclass(frozen=True)
+class Chat:
+    """An existing conversation the request might continue, as the routing model sees it."""
+    ref: str                       # "c1", "c2", ... (the model answers with this)
+    label: str                     # where it is: 'Discord "Todd Voice"'
+    lines: tuple[str, ...] = ()    # the user's latest lines there, newest first
+    voice_request: str = ""        # the last spoken request sent there
+    age_s: float | None = None     # since its last message
+
+
+@dataclasses.dataclass(frozen=True)
 class Decision:
     parts: list[Part]
     channel: str | None = None     # an opted-in channel label picked by topic, or None
     source: str = "fallback"       # "model" | "marked" | "fallback"
     latency_ms: int = 0
+    conversation: str | None = None  # a Chat.ref to continue in, or None
 
 
-def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic]) -> list[dict[str, str]]:
+def _ago(seconds: float | None) -> str:
+    if seconds is None:
+        return ""
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{max(minutes, 1)} min ago"
+    return f"{minutes // 60} h ago" if minutes < 48 * 60 else f"{minutes // 1440} days ago"
+
+
+def chat_lines(chats: list[Chat]) -> str:
+    out = []
+    for c in chats:
+        head = f"- {c.ref}: {c.label}" + (f", last active {_ago(c.age_s)}" if c.age_s is not None else "")
+        if c.voice_request:
+            head += f'\n    you last sent work there by voice: "{c.voice_request}"'
+        for line in c.lines:
+            head += f'\n    user said: "{line}"'
+        out.append(head)
+    return "\n".join(out) or "none"
+
+
+def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
+                   chats: list[Chat] | None = None, call_so_far: str = "") -> list[dict[str, str]]:
     open_lines = "\n".join(f"- {t.task_id}: {t.request[:200]} ({t.status}"
                            + (f", started {int(t.age_s)}s ago" if t.age_s is not None else "") + ")"
                            for t in tasks[-MAX_OPEN_TASKS:]) or "none"
@@ -141,19 +175,30 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic]) -> 
     return [
         {"role": "system", "content":
             "You route one spoken request for a voice assistant. Reply with strict JSON only, no prose: "
-            '{"follow_up_task_id": string or null, "parts": [strings], "channel": string or null}. '
+            '{"follow_up_task_id": string or null, "conversation": string or null, "parts": [strings], '
+            '"channel": string or null}. '
             "follow_up_task_id: the id of an open task ONLY when the request clearly adds to, changes, corrects "
             "or asks about that task; else null. People pause mid-thought: a short fragment said seconds after "
             "a task started that only makes sense as the end of that request (\"...and am I gonna win?\") is a "
             "follow-up to it, never a new task. parts: when not a follow-up, the request as 1 to 4 independent, "
             "self-contained asks (split only clearly separate asks; keep one ask whole; each part must make sense "
-            "alone). channel: the label of the channel whose description clearly fits, else null."},
+            "alone). channel: the label of the channel whose description clearly fits, else null. "
+            "conversation: when the request is not a follow-up to an open task but continues work already going "
+            "on in one of the existing conversations (same project, same bug, same thing being built, or it "
+            "says 'that thread', 'where we were working on', 'keep going on'), that conversation's ref; judge by "
+            "what was said there, not by its name, which is often stale. When several fit, prefer the one the "
+            "user last sent work to by voice, then the most recently active. Null for anything new, for general "
+            "questions, and when unsure; a conversation is never split into parts."},
         {"role": "user", "content": f"Open tasks:\n{open_lines}\n\nChannels:\n{channel_lines}\n\n"
-                                    f"Request: {request[:1500]}"},
+                                    f"Existing conversations:\n{chat_lines(chats or [])}\n\n"
+                                    + (f"The call so far (for what 'that', 'it', 'the X one' refer to):\n"
+                                       f"{call_so_far[-1200:]}\n\n" if call_so_far and chats else "")
+                                    + f"Request: {request[:1500]}"},
     ]
 
 
-def parse_decision(text: Any, request: str, tasks: list[OpenTask], topics: list[Topic]) -> Decision | None:
+def parse_decision(text: Any, request: str, tasks: list[OpenTask], topics: list[Topic],
+                   chats: list[Chat] | None = None) -> Decision | None:
     """Validate the model's JSON strictly; None when anything is off (the caller falls back)."""
     if not isinstance(text, str):
         return None
@@ -174,6 +219,14 @@ def parse_decision(text: Any, request: str, tasks: list[OpenTask], topics: list[
         if not isinstance(follow, str) or not any(t.task_id == follow for t in tasks[-MAX_OPEN_TASKS:]):
             return None
         return Decision([Part("follow_up", request, follow)], None, "model")
+    conversation = data.get("conversation")
+    if conversation is not None:
+        if not isinstance(conversation, str):
+            return None
+        if conversation.strip():
+            if not any(c.ref == conversation.strip() for c in chats or []):
+                return None
+            return Decision([Part(NEW, request)], None, "model", conversation=conversation.strip())
     parts = data.get("parts")
     if not isinstance(parts, list) or not 1 <= len(parts) <= MAX_PARTS:
         return None
@@ -188,10 +241,10 @@ def parse_decision(text: Any, request: str, tasks: list[OpenTask], topics: list[
 _COMPOUND = re.compile(r"(?i)\b(?:and|also|plus|then|as well)\b|[,;]")
 
 
-def needs_model(request: str, tasks: list[OpenTask], topics: list[Topic]) -> bool:
+def needs_model(request: str, tasks: list[OpenTask], topics: list[Topic], chats: list[Chat] | None = None) -> bool:
     """Skip the model when there is nothing to decide: no open task to follow, no channel to pick,
-    and nothing that could split. Keeps the spoken acknowledgement instant for the plain case."""
-    return bool(request) and bool(tasks or topics or _COMPOUND.search(request))
+    no conversation to continue, and nothing that could split. Keeps the plain case instant."""
+    return bool(request) and bool(tasks or topics or chats or _COMPOUND.search(request))
 
 
 def aux_call(messages: list[dict[str, str]], timeout: float = ROUTE_TIMEOUT_S) -> str | None:
@@ -345,7 +398,8 @@ def _profile_scope():
 
 def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topics: list[Topic] | None = None,
            call: Callable[[list[dict[str, str]]], str | None] | None = None,
-           timeout: float = ROUTE_TIMEOUT_S) -> Decision:
+           timeout: float = ROUTE_TIMEOUT_S, chats: list[Chat] | None = None,
+           call_so_far: str = "") -> Decision:
     """Route one handoff. A task id the voice model marked wins outright (no model call)."""
     request = (request or "").strip()
     topics = topics or []
@@ -357,10 +411,12 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
         return Decision([Part("follow_up", request, tail.task_id)], None, "fragment")
     started = time.monotonic()
     decision = None
-    if needs_model(request, open_tasks, topics):
-        future = _EXECUTOR.submit(call or aux_call, route_messages(request, open_tasks, topics))
+    if chats:
+        timeout = max(timeout, CHAT_ROUTE_TIMEOUT_S)
+    if needs_model(request, open_tasks, topics, chats):
+        future = _EXECUTOR.submit(call or aux_call, route_messages(request, open_tasks, topics, chats, call_so_far))
         try:
-            decision = parse_decision(future.result(timeout=timeout), request, open_tasks, topics)
+            decision = parse_decision(future.result(timeout=timeout), request, open_tasks, topics, chats)
         except Exception as exc:  # timeout or provider error: the rules below
             logger.info("speakeasy: routing model unavailable, using the fallback (%s)", type(exc).__name__)
     latency = int((time.monotonic() - started) * 1000)
