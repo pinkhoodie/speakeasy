@@ -147,3 +147,20 @@ def test_sse_stream_emits_initial_state(server):
         while b"\n\n" not in seen:
             seen += r.readline()
     assert b"event: snapshot" in seen and b'"interaction"' in seen and b'"email_drafts"' in seen
+
+
+def test_destinations_skip_chats_another_profile_answers(server, home):
+    # Two #research channels: one answered here, one routed to a different Hermes profile.
+    (home / "gateway_state.json").write_text(json.dumps({"platforms": {"discord": {"state": "connected"}}}))
+    (home / "config.yaml").write_text(
+        "gateway:\n  profile_routes:\n    - {name: other-research, platform: discord, profile: other, chat_id: '222'}\n"
+        "    - {name: mine, platform: discord, profile: default, chat_id: '333'}\n")
+    (home / "channel_directory.json").write_text(json.dumps({"platforms": {"discord": [
+        {"id": "111", "name": "research", "guild": "Server", "type": "group"},
+        {"id": "222", "name": "research", "guild": "Server", "type": "group"},
+        {"id": "333", "name": "build", "guild": "Server", "type": "group"}]}}))
+    status, body = http(server.base_url, "GET", "/voice/destinations", token=server.token)
+    assert status == 200
+    targets = [c["target"] for d in body["destinations"] for c in d["chats"]]
+    assert "discord:111" in targets and "discord:333" in targets
+    assert "discord:222" not in targets

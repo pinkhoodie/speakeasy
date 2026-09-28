@@ -70,23 +70,36 @@ class Runtime:
     def state_db(self) -> Path:
         return self.hermes_home / "state.db"
 
+    def routable(self) -> dict[str, Any]:
+        """Settings minus any topic channel another Hermes profile answers (see
+        delivery.other_profile_chats): a task sent there would finish where this profile can't see."""
+        from .delivery import in_other_profile, other_profile_chats
+        settings = self.settings()
+        foreign = other_profile_chats(self.hermes_home)
+        if not foreign:
+            return settings
+        delivery = dict(settings["delivery"])
+        delivery["channels"] = [ch for ch in delivery.get("channels") or []
+                                if not in_other_profile(ch.get("target", ""), foreign)]
+        return {**settings, "delivery": delivery}
+
     def delivery_label(self) -> str:
         from .delivery import target_label
         return target_label(self.settings()["delivery"]["target"])
 
     def channel_label(self, target: str) -> str:
-        found = next((c for c in channels.opted_in(self.settings()) if c.target == target), None)
+        found = next((c for c in channels.opted_in(self.routable()) if c.target == target), None)
         return found.label if found else self.delivery_label()
 
     def route(self, request: str, tasks: list[router.OpenTask], marked: Any) -> router.Decision:
-        topics = [router.Topic(c.label, c.topic) for c in channels.opted_in(self.settings())]
+        topics = [router.Topic(c.label, c.topic) for c in channels.opted_in(self.routable())]
         return router.decide(request, tasks, marked, topics, self.route_call)
 
     def explicit_channel(self, request: str) -> channels.Choice | None:
-        return channels.explicit(request, self.settings(), P.clarify_channel)
+        return channels.explicit(request, self.routable(), P.clarify_channel)
 
     def topical_channel(self, picked: str | None) -> channels.Choice:
-        return channels.resolve(self.settings(), self.delivery_label(), picked)
+        return channels.resolve(self.routable(), self.delivery_label(), picked)
 
 
 # -- live event feed ------------------------------------------------------------------------

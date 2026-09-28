@@ -90,6 +90,33 @@ def _config_platform_blocks(config: dict[str, Any]) -> dict[str, dict[str, Any]]
     return out
 
 
+def _own_profile(hermes_home: Path) -> str:
+    """This Hermes home's profile name: `default` for the root home, else the profiles/<name> dir."""
+    home = Path(hermes_home)
+    return home.name if home.parent.name == "profiles" else "default"
+
+
+def other_profile_chats(hermes_home: Path) -> set[str]:
+    """`platform:chat_id` for chats the gateway hands to a *different* Hermes profile
+    (`gateway.profile_routes`). Answers there land in that profile's history, which this one can't
+    (and shouldn't) read, so they must never be voice destinations."""
+    config = _hermes_config(hermes_home)
+    gateway = config.get("gateway") if isinstance(config.get("gateway"), dict) else {}
+    own = _own_profile(hermes_home)
+    out: set[str] = set()
+    for route in gateway.get("profile_routes") or []:
+        if not isinstance(route, dict) or not route.get("platform") or not route.get("chat_id"):
+            continue
+        if str(route.get("profile") or "default") != own:
+            out.add(f"{route['platform']}:{route['chat_id']}")
+    return out
+
+
+def in_other_profile(target: str, foreign: set[str]) -> bool:
+    parts = str(target).split(":")
+    return len(parts) >= 2 and f"{parts[0]}:{parts[1]}" in foreign
+
+
 def _gateway_home_channels(hermes_home: Path) -> dict[str, dict[str, str]]:
     """Home channels as the running gateway resolved them (config.yaml *and* env such as
     DISCORD_HOME_CHANNEL). Only used when this process belongs to the same Hermes home."""
@@ -134,6 +161,7 @@ def destinations(hermes_home: Path) -> dict[str, Any]:
     chats_by_platform = directory.get("platforms") if isinstance(directory, dict) else None
     chats_by_platform = chats_by_platform if isinstance(chats_by_platform, dict) else {}
 
+    foreign = other_profile_chats(hermes_home)
     names = {n for n in (set(platform_states) | set(configured) | set(chats_by_platform))
              if isinstance(n, str) and ":" not in n} - INTERNAL_PLATFORMS
     out = []
@@ -168,7 +196,7 @@ def destinations(hermes_home: Path) -> dict[str, Any]:
             if len(entry["chats"]) >= MAX_CHATS_PER_PLATFORM:
                 break
             target = _chat_target(name, chat)
-            if target in seen or not valid_delivery_target(target):
+            if target in seen or not valid_delivery_target(target) or in_other_profile(target, foreign):
                 continue
             seen.add(target)
             label = str(chat.get("name") or chat["id"])

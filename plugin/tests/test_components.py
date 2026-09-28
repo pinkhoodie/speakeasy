@@ -242,3 +242,16 @@ def test_reported_version_matches_plugin_manifest():
     import speakeasy
     manifest = (Path(speakeasy.__file__).with_name("plugin.yaml")).read_text()
     assert speakeasy.__version__ == re.search(r"^version:\s*(\S+)", manifest, re.M).group(1)
+
+
+def test_calls_never_route_to_a_channel_another_profile_answers(tmp_path):
+    from speakeasy.calls import Runtime
+    (tmp_path / "config.yaml").write_text(
+        "gateway:\n  profile_routes:\n    - {name: other, platform: discord, profile: other, chat_id: '222'}\n")
+    settings = {"delivery": {"target": "discord:999", "new_thread": False, "channels": [
+        {"target": "discord:111", "label": "#research", "topic": "Research", "new_thread": True},
+        {"target": "discord:222", "label": "#research", "topic": "Research", "new_thread": True}]}}
+    rt = Runtime(store=None, hermes=None, settings=lambda: settings, hermes_home=tmp_path,
+                 image_roots=lambda: (), notices=None)
+    assert [c["target"] for c in rt.routable()["delivery"]["channels"]] == ["discord:111"]
+    assert len(settings["delivery"]["channels"]) == 2  # saved settings untouched
