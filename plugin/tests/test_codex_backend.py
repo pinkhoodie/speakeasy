@@ -403,3 +403,20 @@ def test_diff_is_capped(backend):
     event = [e for e in run.events if e["event"] == "files.changed"][-1]
     assert len(event["diff"].encode()) <= 64 * 1024
     assert event["files"] == [{"path": "big.txt", "added": 40000, "removed": 0}]
+
+
+
+def test_default_binary_is_codex_inside_the_chatgpt_app(tmp_path, monkeypatch):
+    """Codex lives in the ChatGPT desktop app now: that copy wins over an older PATH/Homebrew CLI."""
+    from speakeasy import settings as S
+    apps = tmp_path / "Applications" / "ChatGPT.app" / "Contents" / "Resources"
+    apps.mkdir(parents=True)
+    bundled = apps / "codex"
+    bundled.write_text("#!/bin/sh\n")
+    bundled.chmod(0o755)
+    assert S.chatgpt_codex(app_dirs=(tmp_path / "Applications",)) == bundled
+    assert S.chatgpt_codex(app_dirs=(tmp_path / "nothing",)) is None
+    monkeypatch.setattr(S, "chatgpt_codex", lambda home=None, app_dirs=None: bundled)
+    assert CodexBackend(tmp_path).codex_bin == str(bundled)
+    # An explicit binary still wins.
+    assert CodexBackend(tmp_path, codex_bin="/x/codex").codex_bin == "/x/codex"

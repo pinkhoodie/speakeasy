@@ -408,6 +408,18 @@ def codex_candidates(home: Path | None = None) -> list[Path]:
     return out
 
 
+def chatgpt_codex(home: Path | None = None, app_dirs: tuple[Path, ...] | None = None) -> Path | None:
+    """The Codex that ships inside the ChatGPT desktop app (Codex lives in ChatGPT since July 2026;
+    the standalone Codex app and a PATH/Homebrew CLI are older and may reject current models)."""
+    home = home or Path.home()
+    for apps in app_dirs if app_dirs is not None else (Path("/Applications"), home / "Applications"):
+        for path in (apps / "ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+                     apps / "ChatGPT.app/Contents/Resources/codex"):
+            if path.is_file() and os.access(path, os.X_OK):
+                return path
+    return None
+
+
 def find_codex(configured: str = "", version_fn: Any = None, candidates: list[Path] | None = None) -> Path | None:
     """The configured Codex, else the newest one found (PATH, the ChatGPT app, a Speakeasy copy)."""
     if configured:

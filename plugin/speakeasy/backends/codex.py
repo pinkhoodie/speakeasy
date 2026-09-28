@@ -124,10 +124,18 @@ class _Run:
         return self.status in TERMINAL
 
 
+def default_codex_bin() -> str:
+    """Codex in the ChatGPT desktop app first; otherwise the newest Codex found; else ``codex``
+    on PATH (which then fails with a clear 502 if absent)."""
+    from ..settings import chatgpt_codex, find_codex
+    found = chatgpt_codex() or find_codex()
+    return str(found) if found else "codex"
+
+
 class CodexBackend:
     """A ``TaskBackend`` driving ``codex app-server`` in one workspace directory."""
 
-    def __init__(self, workspace: str | Path, *, codex_bin: str = "codex", model: str | None = None,
+    def __init__(self, workspace: str | Path, *, codex_bin: str | None = None, model: str | None = None,
                  sandbox: str = "workspace-write", approval_policy: str = "on-request",
                  spawn: Callable[[list[str], str, dict[str, str]], Any] = _default_spawn):
         path = Path(workspace).expanduser()
@@ -138,7 +146,7 @@ class CodexBackend:
         if approval_policy not in APPROVAL_POLICIES:
             raise BackendError(400, f"unknown approval policy {approval_policy!r}")
         self.workspace = path.resolve()
-        self.codex_bin, self.model = codex_bin, model
+        self.codex_bin, self.model = codex_bin or default_codex_bin(), model
         self.sandbox, self.approval_policy = sandbox, approval_policy
         self.spawn = spawn
         self.last_error = ""
