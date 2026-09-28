@@ -38,7 +38,7 @@ def state_db(path, sessions, messages, fts=True):
 
 
 FILLER = [(f"s_f{i}", str(950 + i), f"Other chat {i}", False) for i in range(8)]
-FILLER_TALK = [(f"s_f{i}", "user", f"[geo] please check the thing number {i} again", 4000 + i) for i in range(8)]
+FILLER_TALK = [(f"s_f{i}", "user", f"[sam] please check the thing number {i} again", 4000 + i) for i in range(8)]
 
 
 def workspace(tmp_path, fts=True):
@@ -47,12 +47,12 @@ def workspace(tmp_path, fts=True):
                     [("s_build", "900", "Gateway tests exit code 1", False),
                      ("s_trip", "901", "Lisbon trip", False),
                      ("s_new", "902", "Halloween costume ideas", False), *FILLER],
-                    [("s_build", "user", "[Triggering message id: `1` — use as `message_id`]\n\n[geo] the thread "
+                    [("s_build", "user", "[Triggering message id: `1` — use as `message_id`]\n\n[sam] the thread "
                                          "routing is still hit or miss finding the right thread", 600),
                      ("s_build", "assistant", "Thread routing matches titles only; routing needs content.", 590),
-                     ("s_build", "user", "[geo] make speakeasy routing use what was said in each thread", 500),
-                     ("s_trip", "user", "[geo] find a hotel in Lisbon near the river", 3000),
-                     ("s_new", "user", "[geo] halloween costume research please", 30), *FILLER_TALK], fts=fts)
+                     ("s_build", "user", "[sam] make speakeasy routing use what was said in each thread", 500),
+                     ("s_trip", "user", "[sam] find a hotel in Lisbon near the river", 3000),
+                     ("s_new", "user", "[sam] halloween costume research please", 30), *FILLER_TALK], fts=fts)
 
 
 def test_candidates_come_from_what_was_said_not_the_title(tmp_path):
@@ -63,7 +63,7 @@ def test_candidates_come_from_what_was_said_not_the_title(tmp_path):
     assert found[0].conv.session_id == "s_new"  # the most recently active chat is always offered
     # the user's own lines, without gateway scaffolding
     assert by_id["s_build"].snippets[0] == "make speakeasy routing use what was said in each thread"
-    assert all("Triggering" not in s and "[geo]" not in s for c in found for s in c.snippets)
+    assert all("Triggering" not in s and "[sam]" not in s for c in found for s in c.snippets)
     asked = "continue the thread routing work on speakeasy"
     found = continuity.conversations_with_context(db, asked)
     assert continuity.best_by_content(asked, found).session_id == "s_build"
@@ -79,7 +79,7 @@ def test_candidates_work_without_a_full_text_index(tmp_path):
 def test_a_thread_whose_session_was_reset_continues_in_its_current_session(tmp_path):
     db = state_db(tmp_path / "state.db",
                   [("s_old", "900", "Old title", True), ("s_cur", "900", "Old title", False)],
-                  [("s_old", "user", "[geo] routing work", 5000), ("s_cur", "user", "[geo] still routing", 100)])
+                  [("s_old", "user", "[sam] routing work", 5000), ("s_cur", "user", "[sam] still routing", 100)])
     # Speakeasy recorded the old session when it first sent work there.
     assert continuity.conversation_by_session(db, "s_old").session_id == "s_cur"
 
@@ -88,8 +88,8 @@ def test_voice_placements_rank_first_and_survive_session_swaps(tmp_path):
     db = state_db(tmp_path / "state.db",
                   [("s_old", "900", "Gateway tests", True), ("s_cur", "900", "Gateway tests", False),
                    ("s_busy", "905", "Lots of chatter", False)],
-                  [("s_old", "user", "[geo] x", 9000), ("s_cur", "user", "[geo] y", 4000),
-                   ("s_busy", "user", "[geo] newest chat", 10)])
+                  [("s_old", "user", "[sam] x", 9000), ("s_cur", "user", "[sam] y", 4000),
+                   ("s_busy", "user", "[sam] newest chat", 10)])
     found = continuity.conversations_with_context(db, "keep going")
     assert found[0].conv.session_id == "s_busy"  # most recent activity first, before placements
     ranked = continuity.with_placements(db, found, [{"session_id": "s_old", "request": "fix thread routing",
@@ -101,7 +101,7 @@ def test_store_remembers_where_voice_work_went_across_calls(tmp_path):
     store = Store(tmp_path / "voice.db")
     store.reserve_run("k1", "call_a", "d1", 1)
     store.progress("k1", "request", "fix the thread routing")
-    store.set_continued("k1", "s_build", 'Discord "Todd Voice"')
+    store.set_continued("k1", "s_build", 'Discord "Voice build"')
     store.reserve_run("k2", "call_b", "d2", 1)  # a later call, not placed anywhere
     assert store.recent_placements() == [
         {"session_id": "s_build", "request": "fix the thread routing", "at": store.recent_placements()[0]["at"]}]

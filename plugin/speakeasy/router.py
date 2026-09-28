@@ -180,7 +180,7 @@ class Topic:
 class Chat:
     """An existing conversation the request might continue, as the routing model sees it."""
     ref: str                       # "c1", "c2", ... (the model answers with this)
-    label: str                     # where it is: 'Discord "Todd Voice"'
+    label: str                     # where it is: 'Discord "Voice build"'
     lines: tuple[str, ...] = ()    # the user's latest lines there, newest first
     voice_request: str = ""        # the last spoken request sent there
     age_s: float | None = None     # since its last message
