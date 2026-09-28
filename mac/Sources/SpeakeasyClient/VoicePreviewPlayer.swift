@@ -8,6 +8,8 @@ public final class VoicePreviewPlayer: NSObject, ObservableObject, AVAudioPlayer
     @Published public private(set) var playing: String?
     private var player: AVAudioPlayer?
 
+    public override init() { super.init() }
+
     public static func url(for voice: String) -> URL? {
         Bundle.main.url(forResource: voice, withExtension: "m4a", subdirectory: "VoiceSamples")
     }
