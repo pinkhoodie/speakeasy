@@ -352,6 +352,7 @@ class SidebandWorker:
         self.fragments: deque[dict[str, Any]] = deque(maxlen=512)
         self.handoff_at: dict[str, float] = {}   # delegation id -> when the handoff arrived (monotonic)
         self.show_pending: set[str] = set()      # task keys asked for a screenshot by "show me"
+        self.wants_show: set[str] = set()        # delegation ids the user wants to SEE (routing said show)
         self.show_seq = 0
         self.route_timings: dict[str, int] = {}  # task id -> routing latency (ms), stored with the task
         self.delegations: set[str] = set()
@@ -657,6 +658,13 @@ class SidebandWorker:
                                            earlier[-1200:])
         self.route_timings[delegation_id] = decision.latency_ms
         part = decision.parts[0]
+        if decision.show:
+            # "What do those speakers look like?": about an open task, show what it already has (or ask
+            # it for a screenshot); otherwise the work that answers must come back with a picture.
+            if part.kind == "follow_up" and part.task_id and await self.show_me(
+                    delegation_id, last_request, task_id=part.task_id, only_if_visible=True):
+                return
+            self.wants_show.add(delegation_id)
         if part.kind == "follow_up" and part.task_id:
             await self.follow_up(delegation_id, revision, context, part)
             return
@@ -674,7 +682,8 @@ class SidebandWorker:
             return
         await self.start_routed(delegation_id, revision, context, last_request, choice)
 
-    async def show_me(self, delegation_id: str, request: str) -> bool:
+    async def show_me(self, delegation_id: str, request: str, task_id: str | None = None,
+                      only_if_visible: bool = False) -> bool:
         """'Show me' / 'what are you looking at' about existing work: open that task's image in the
         panel instead of starting new work. Returns False when there is nothing to point at (the
         request is then handled as ordinary work).
@@ -688,7 +697,13 @@ class SidebandWorker:
         has_image = {task_id for task_id, key in keys.items()
                      if self.store.live_image(key) or (self.store.work(idem_key=key) or {}).get("review")
                      or (((self.store.work(idem_key=key) or {}).get("result") or {}).get("cards"))}
-        target = router.show_me_target(request, tasks, has_image)
+        if task_id is not None:
+            target = next((t for t in tasks if t.task_id == task_id), None)
+            if target is None or (only_if_visible and target.task_id not in has_image
+                                  and target.status not in {"admitting", "working", "running"}):
+                return False  # a finished task with no picture: the caller asks for one as new work
+        else:
+            target = router.show_me_target(request, tasks, has_image)
         self.handoff_at.pop(delegation_id, None)
         if target is None:
             # Nothing in this call: an earlier call's finished images still waiting on a review card.
@@ -719,6 +734,18 @@ class SidebandWorker:
                 await self.append("session.commentary.append", delegation_id, P.SHOW_ME_REQUESTED)
                 return True
         await self.append("session.commentary.append", delegation_id, P.SHOW_ME_NOTHING)
+        return True
+
+    def _take_show(self, delegation_id: str, idem: str) -> bool:
+        """The user wants to see this task's result: tell the task, and open the first picture it
+        shares as soon as it arrives."""
+        base = delegation_id.split("-p")[0]
+        with self.interaction.lock:
+            if base not in self.wants_show:
+                return False
+            if base == delegation_id:
+                self.wants_show.discard(base)
+            self.show_pending.add(idem)
         return True
 
     def show_action(self, run_id: str | None, task_id: str, kind: str) -> None:
@@ -868,6 +895,9 @@ class SidebandWorker:
         if not session_id:
             session_id = TASK_SESSION_PREFIX + hashlib.sha256(idem.encode()).hexdigest()[:24]
         label = self.rt.channel_label(deliver_to) if deliver_to else self.rt.delivery_label()
+        show = self._take_show(voice_id or task_id, idem)
+        if show:
+            focus = (focus or request) + P.SHOW_IT_FOCUS
         prompt = P.build_task_prompt(self.names, revision, context, focus, label)
         state, known_run = self.store.reserve_run(idem, self.interaction.interaction_id, task_id, revision)
         if state != "created":
@@ -977,7 +1007,8 @@ class SidebandWorker:
             await asyncio.sleep(CONTINUITY_POLL_S)
             waited += CONTINUITY_POLL_S
         try:
-            message = P.continuation_message(self.names, request, notice_text(request, 200) or "voice request")
+            asked = request + (P.SHOW_IT_FOCUS if self._take_show(task_id, idem) else "")
+            message = P.continuation_message(self.names, asked, notice_text(request, 200) or "voice request")
             loop = asyncio.get_running_loop()
             final: dict[str, Any] = {}
 
@@ -1192,6 +1223,11 @@ class SidebandWorker:
             with self.interaction.lock:
                 backend.status, backend.approval = status, None
             stored_drafts = [self.store.add_draft(idem, self.store.session_for(idem), d) for d in drafts]
+            with self.interaction.lock:
+                wanted = idem in self.show_pending
+                self.show_pending.discard(idem)
+            if wanted and (self.store.work(idem_key=idem) or {}).get("review"):
+                self.show_action(backend.run_id, backend.delegation_id, "review")  # they asked to see it
             head = self.interaction.head()
             with head.lock:
                 latest = head.runs.get(head.latest_delegation_id or "")

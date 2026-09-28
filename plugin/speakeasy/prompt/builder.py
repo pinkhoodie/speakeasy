@@ -266,6 +266,8 @@ EMAIL_DRAFT_RULE = (
 
 # "Show me": the server opens the image in the app, then (and only then) the voice says so.
 SHOW_ME_ON_SCREEN = "It's on your screen."
+SHOW_IT_FOCUS = (" (They want to SEE this, not just hear about it: include a picture of it, an image of the "
+                 "product, place or thing, or a render or screenshot of the work, as MEDIA:<absolute path>.)")
 SHOW_ME_REQUESTED = ("There's no picture yet. I've asked for a screenshot of what it's looking at; "
                      "it will open in the app when it arrives.")
 SHOW_ME_NOTHING = "That task has no picture to show. The details are in the app."

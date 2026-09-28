@@ -193,6 +193,7 @@ class Decision:
     source: str = "fallback"       # "model" | "marked" | "fallback"
     latency_ms: int = 0
     conversation: str | None = None  # a Chat.ref to continue in, or None
+    show: bool = False             # the user wants to SEE something (what it looks like), not just hear it
 
 
 def _ago(seconds: float | None) -> str:
@@ -226,7 +227,7 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
         {"role": "system", "content":
             "You route one spoken request for a voice assistant. Reply with strict JSON only, no prose: "
             '{"follow_up_task_id": string or null, "conversation": string or null, "parts": [strings], '
-            '"channel": string or null}. '
+            '"channel": string or null, "show": true or false}. '
             "follow_up_task_id: the id of an open task ONLY when the request clearly adds to, changes, corrects "
             "or asks about that task; else null. People pause mid-thought: a short fragment said seconds after "
             "a task started that only makes sense as the end of that request (\"...and am I gonna win?\") is a "
@@ -238,7 +239,12 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
             "says 'that thread', 'where we were working on', 'keep going on'), that conversation's ref; judge by "
             "what was said there, not by its name, which is often stale. When several fit, prefer the one the "
             "user last sent work to by voice, then the most recently active. Null for anything new, for general "
-            "questions, and when unsure; a conversation is never split into parts."},
+            "questions, and when unsure; a conversation is never split into parts. "
+            "show: true when the user wants to SEE something rather than just hear about it: how a thing looks "
+            "(\"what does the new logo look like\", \"how do those office speakers it recommended look\", "
+            "\"let me see the hotel\"), a design, page, product, place or a task's visual state. False for "
+            "questions about facts, status or prices, and for asks to find new things to look at "
+            "(\"show me flights to Paris\" is new work with show false)."},
         {"role": "user", "content": f"Open tasks:\n{open_lines}\n\nChannels:\n{channel_lines}\n\n"
                                     f"Existing conversations:\n{chat_lines(chats or [])}\n\n"
                                     + (f"The call so far (for what 'that', 'it', 'the X one' refer to):\n"
@@ -264,11 +270,12 @@ def parse_decision(text: Any, request: str, tasks: list[OpenTask], topics: list[
     if raw_channel is not None and not isinstance(raw_channel, str):
         return None
     channel = labels.get((raw_channel or "").lower().lstrip("#")) if raw_channel else None
+    show = data.get("show") is True
     follow = data.get("follow_up_task_id")
     if follow is not None:
         if not isinstance(follow, str) or not any(t.task_id == follow for t in tasks[-MAX_OPEN_TASKS:]):
             return None
-        return Decision([Part("follow_up", request, follow)], None, "model")
+        return Decision([Part("follow_up", request, follow)], None, "model", show=show)
     conversation = data.get("conversation")
     if conversation is not None:
         if not isinstance(conversation, str):
@@ -276,7 +283,7 @@ def parse_decision(text: Any, request: str, tasks: list[OpenTask], topics: list[
         if conversation.strip():
             if not any(c.ref == conversation.strip() for c in chats or []):
                 return None
-            return Decision([Part(NEW, request)], None, "model", conversation=conversation.strip())
+            return Decision([Part(NEW, request)], None, "model", conversation=conversation.strip(), show=show)
     parts = data.get("parts")
     if not isinstance(parts, list) or not 1 <= len(parts) <= MAX_PARTS:
         return None
@@ -285,16 +292,19 @@ def parse_decision(text: Any, request: str, tasks: list[OpenTask], topics: list[
         return None
     if len(clean) == 1:
         clean = [request]  # one ask: keep the user's own words
-    return Decision([Part(NEW, p) for p in clean], channel, "model")
+    return Decision([Part(NEW, p) for p in clean], channel, "model", show=show)
 
 
 _COMPOUND = re.compile(r"(?i)\b(?:and|also|plus|then|as well)\b|[,;]")
+# Wanting to SEE something: the model decides whether a picture should come back and open on screen.
+_VISUAL = re.compile(r"(?i)\b(?:look(?:s|ed|ing)?(?: like)?|see|show|picture|photo|image|screenshot|design|"
+                     r"mock-?up|render|preview|what .{0,30} looks?)\b")
 
 
 def needs_model(request: str, tasks: list[OpenTask], topics: list[Topic], chats: list[Chat] | None = None) -> bool:
     """Skip the model when there is nothing to decide: no open task to follow, no channel to pick,
     no conversation to continue, and nothing that could split. Keeps the plain case instant."""
-    return bool(request) and bool(tasks or topics or chats or _COMPOUND.search(request))
+    return bool(request) and bool(tasks or topics or chats or _COMPOUND.search(request) or _VISUAL.search(request))
 
 
 def aux_call(messages: list[dict[str, str]], timeout: float = ROUTE_TIMEOUT_S) -> str | None:
