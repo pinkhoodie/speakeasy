@@ -155,9 +155,9 @@ def test_pick_conversation_maps_the_ref_and_trusts_a_model_no(tmp_path):
     # the model said no conversation: a keyword match must not override it
     assert CallWorker.pick_conversation("continue the thread routing work on speakeasy",
                                         router.Decision([], source="model"), cands, chats) is None
-    # no model: a clear content match
+    # no model (timed out / unavailable): never guess a thread from shared words; start new work
     assert CallWorker.pick_conversation("continue the thread routing work on speakeasy",
-                                        router.Decision([], source="fallback"), cands, chats).session_id == "s_build"
+                                        router.Decision([], source="fallback"), cands, chats) is None
 
 
 def test_the_model_gets_the_call_so_far_to_resolve_references():
@@ -168,3 +168,37 @@ def test_the_model_gets_the_call_so_far_to_resolve_references():
     seen.clear()
     router.decide("x and y", [], None, [], lambda m: seen.append(m[1]["content"]) or None, call_so_far="User: hi")
     assert "The call so far" not in seen[0]  # only when there are conversations to tell apart
+
+
+def test_a_routing_timeout_never_lands_work_in_an_existing_thread(tmp_path):
+    """Live bug: the routing model timed out and the keyword fallback sent an hourly-reminder request
+    into an unrelated thread that happened to share words with it. Without the model's pick it is
+    new work, even when the request says "continue" and one chat clearly shares its words."""
+    db = workspace(tmp_path)
+    asked = "continue the thread routing work on speakeasy"
+    cands = continuity.conversations_with_context(db, asked)
+    chats = [router.Chat(f"c{i + 1}", c.conv.where) for i, c in enumerate(cands)]
+    def timed_out(messages):
+        raise TimeoutError
+    slow = router.decide(asked, [], None, [], timed_out, chats=chats)
+    assert slow.source == "fallback" and slow.conversation is None
+    assert CallWorker.pick_conversation(asked, slow, cands, chats) is None
+
+
+def test_the_content_search_is_bounded_so_routing_is_not_kept_waiting(tmp_path, monkeypatch):
+    """The word search runs before the routing model on every request; on a big history it took
+    7-20 s. It stops after a budget, keeping the rarest words it already searched."""
+    db = workspace(tmp_path)
+    real = continuity._term_sessions
+    seen = []
+
+    def slow(*a, **k):
+        seen.append(a[1])
+        time.sleep(0.2)
+        return real(*a, **k)
+    monkeypatch.setattr(continuity, "_term_sessions", slow)
+    monkeypatch.setattr(continuity, "SEARCH_BUDGET_S", 0.3)
+    started = time.monotonic()
+    continuity.conversations_with_context(db, "keep going on the thread routing fix for speakeasy tomorrow please")
+    assert time.monotonic() - started < 1.0 and 1 <= len(seen) <= 3
+    assert seen[0] == max(seen, key=len)  # longest (rarest) words first

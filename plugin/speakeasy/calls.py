@@ -762,8 +762,6 @@ class SidebandWorker:
         named = self.rt.explicit_channel(last_request)
         if named is None and len(decision.parts) == 1:
             conv = self.pick_conversation(last_request, decision, candidates, chats)
-            if conv is None and decision.source != "model":
-                conv = await self.match_conversation(last_request)
             if conv is not None:
                 await self.start_continuity_task(delegation_id, revision, context, last_request, conv)
                 return
@@ -897,23 +895,14 @@ class SidebandWorker:
     @staticmethod
     def pick_conversation(request: str, decision: router.Decision, candidates: list[continuity.Candidate],
                           chats: list[router.Chat]) -> continuity.Conversation | None:
-        """The model's pick when it made one; without the model, only a clear content match."""
-        if decision.conversation:
-            index = next((i for i, c in enumerate(chats) if c.ref == decision.conversation), None)
-            return candidates[index].conv if index is not None else None
-        if decision.source == "model":
+        """Only the routing model continues an existing chat. Without it (timed out, unavailable),
+        word overlap is too weak a signal: a reminder about "new comments on the repo" landed in an
+        unrelated thread that happened to mention the repo. A new task in the usual place is the
+        safe miss; the wrong thread is not."""
+        if not decision.conversation:
             return None
-        return continuity.best_by_content(request, candidates)
-
-    async def match_conversation(self, request: str) -> continuity.Conversation | None:
-        if not request or not self.rt.settings()["continuity"]["enabled"]:
-            return None
-        try:
-            options = await asyncio.to_thread(continuity.recent_conversations, self.rt.state_db)
-            return continuity.match(request, options)
-        except Exception as exc:  # never let matching break a request
-            logger.warning("speakeasy: conversation match failed: %s", type(exc).__name__)
-            return None
+        index = next((i for i, c in enumerate(chats) if c.ref == decision.conversation), None)
+        return candidates[index].conv if index is not None else None
 
     async def follow_up(self, delegation_id: str, revision: int, context: str, part: router.Part) -> None:
         """Add to an open task when its run still accepts guidance; otherwise continue in that

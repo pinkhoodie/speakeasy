@@ -188,6 +188,7 @@ MAX_SNIPPETS = 3
 SNIPPET_CHARS = 160
 POOL = 150          # recent chats searched by content (the model sees at most ``limit`` of them)
 MIN_SCORE = 2.0     # about one rare shared word, or several less rare ones
+SEARCH_BUDGET_S = 1.5  # the content search runs before routing, so it is on the user's wait
 # Gateway scaffolding around a user's words; stripped so the model sees what the person said.
 _NOISE = re.compile(
     r"\[(?:Triggering message id|Image attached|Gateway message origin|IMPORTANT: Background)[^\]]*\]"
@@ -253,14 +254,41 @@ _HUMAN = ("AND m.content NOT LIKE '%[ASYNC DELEGATION%' AND m.content NOT LIKE '
           "AND m.content NOT LIKE '[Cron delivery%' AND length(m.content) < 4000")
 
 
-def _term_sessions(db: sqlite3.Connection, term: str, since: float, sessions: list[str]) -> set[str]:
-    """Sessions (of those given) where the person recently used the word."""
+def _recent_floor(db: sqlite3.Connection, since: float) -> int:
+    """A message id at or before the start of the lookback window, found by bisecting ids (they
+    grow with time) with primary-key lookups; a plain MIN(id) WHERE timestamp scanned the table.
+    Errs low: an early floor only costs speed, never a missed match (timestamp is still checked)."""
+    try:
+        lo, hi = db.execute("SELECT MIN(id), MAX(id) FROM messages").fetchone()
+        if lo is None:
+            return 0
+        lo, hi = int(lo), int(hi)
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            row = db.execute("SELECT timestamp FROM messages WHERE id >= ? ORDER BY id LIMIT 1", (mid,)).fetchone()
+            if row is None or row[0] is None or float(row[0]) > since:
+                hi = mid
+            else:
+                lo = mid
+        return max(0, lo - 1000)  # slack for out-of-order timestamps
+    except (sqlite3.Error, TypeError, ValueError):
+        return 0
+
+
+def _term_sessions(db: sqlite3.Connection, term: str, since: float, sessions: list[str],
+                   floor: int = 0) -> set[str]:
+    """Sessions (of those given) where the person recently used the word.
+
+    Drives the search from the word index, limited to recent message ids. Letting SQLite pick
+    the plan walked every message of each candidate chat and re-checked the word against it:
+    7-20 s per request on a large history, spent before the routing model even started."""
     marks = ",".join("?" * len(sessions))
     try:
         rows = db.execute(
-            f"""SELECT DISTINCT m.session_id FROM messages_fts f JOIN messages m ON m.id = f.rowid
-                WHERE messages_fts MATCH ? AND m.timestamp > ? AND m.role = 'user' {_HUMAN}
-                  AND m.session_id IN ({marks})""", ('"' + term.replace('"', "") + '"', since, *sessions)).fetchall()
+            f"""SELECT DISTINCT m.session_id FROM messages_fts f CROSS JOIN messages m ON m.id = f.rowid
+                WHERE messages_fts MATCH ? AND f.rowid >= ? AND m.timestamp > ? AND m.role = 'user' {_HUMAN}
+                  AND m.session_id IN ({marks})""",
+            ('"' + term.replace('"', "") + '"', floor, since, *sessions)).fetchall()
     except sqlite3.Error:  # no full-text index (older Hermes): a plain scan
         rows = db.execute(
             f"""SELECT DISTINCT m.session_id FROM messages m WHERE m.timestamp > ? AND m.role = 'user' {_HUMAN}
@@ -293,8 +321,12 @@ def conversations_with_context(state_db: Path, request: str, *, days: int = RECE
         if terms:
             since = (now or time.time()) - days * 86400
             ids = [c.session_id for c in convs]
+            floor = _recent_floor(db, since)
+            deadline = time.monotonic() + SEARCH_BUDGET_S
             for term in terms:
-                found = _term_sessions(db, term, since, ids)
+                if time.monotonic() > deadline:
+                    break  # routing waits on this: the rarest (longest) words were searched first
+                found = _term_sessions(db, term, since, ids, floor)
                 if not found or len(found) > len(ids) * 0.5:
                     continue  # absent, or so common it says nothing about which chat
                 weight = math.log(len(ids) / len(found))

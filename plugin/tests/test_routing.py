@@ -431,9 +431,12 @@ def test_continuing_a_chat_posts_there_and_never_writes_hermes_config(server, se
     is posted into the thread by Speakeasy itself. Hermes' config.yaml is not written at all."""
     conv = continuity.Conversation("s_league", "discord", "777", "thread", "777", "42", "111",
                                    "Server / #work / League", "League team", time.time())
-    monkeypatch.setattr(continuity, "recent_conversations", lambda db, **kw: [conv])
-    monkeypatch.setattr(continuity, "match", lambda request, convs: conv)
+    monkeypatch.setattr(continuity, "conversations_with_context", lambda db, request, **kw: [continuity.Candidate(conv, ())])
     monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
+    # the routing model is the only thing that continues a chat
+    from speakeasy import router
+    monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S:
+                        '{"follow_up_task_id": null, "conversation": "c1", "parts": ["x"], "channel": null}')
     streamed = []
 
     def fake_stream(base, key, c, message, callback, **k):
