@@ -248,7 +248,8 @@ PRODUCT_CARDS_RULE = (
 )
 
 EMAIL_DRAFT_RULE = (
-    "When this task produces an email to send on {user_possessive} behalf, do NOT send it. Write the draft and end "
+    "When this task produces an email to send on {user_possessive} behalf, do NOT send it. You may save it as a draft "
+    "in the mail account if that helps. Either way, end "
     "your answer with a fenced block labeled `email-draft` containing one JSON object: {\"from\": \"<sender address>\", "
     "\"to\": [\"...\"], \"cc\": [], \"bcc\": [], \"subject\": \"...\", \"body\": \"<plain text>\", "
     "\"reply_to_message_id\": \"<optional>\", \"account\": \"<optional mail account>\"}, then the DONE and SPOKEN lines, "
@@ -333,7 +334,8 @@ def thread_task_message(names: Names, request: str, summary: str, context: str) 
 
 
 THREAD_EMAIL_DRAFT_RULE = (
-    "If this produces an email to send on {user_possessive} behalf, do NOT send it or save it anywhere. Show the "
+    "If this produces an email to send on {user_possessive} behalf, do NOT send it. You may save it as a draft in the "
+    "mail account if that helps. Show the "
     "draft readably in your reply, then end the reply with a fenced block labeled `email-draft` containing one JSON "
     "object: {\"from\": \"<sender address>\", \"to\": [\"...\"], \"cc\": [], \"bcc\": [], \"subject\": \"...\", "
     "\"body\": \"<plain text>\", \"reply_to_message_id\": \"<optional>\", \"account\": \"<optional mail account>\"}. "
@@ -352,21 +354,23 @@ def without_voice_header(text: str) -> str:
 def draft_approved_message(names: Names, draft_json: str) -> str:
     return render(
         "{user_name_cap} approved exactly this email draft by pressing Approve on the email card. Send it now, "
-        "unchanged, with your email tool, from the given account, then report the result in one line "
+        "unchanged, with your email tool, from the given account (if you saved it as a draft, send that saved draft "
+        "rather than a second copy), then report the result in one line "
         "(sent, or the exact error). Do not change any field. End with DONE and SPOKEN lines as before.\n\n",
         names) + "```json\n" + draft_json + "\n```"
 
 
 def draft_denied_message(names: Names) -> str:
     return render(
-        "{user_name_cap} denied the email draft on the card. Do not send it. Discard the draft and reply in one line "
+        "{user_name_cap} denied the email draft on the card. Do not send it. Discard the draft (delete it from the mail "
+        "account too if you saved it there) and reply in one line "
         "that it was discarded. End with DONE and SPOKEN lines as before.", names)
 
 
 def draft_revise_message(names: Names, instructions: str) -> str:
     return render(
         "{user_name_cap} asked for changes to the email draft before approving it: ", names) + instructions.strip() + (
-        "\nRewrite the draft accordingly. Do NOT send it. End your answer with a new fenced `email-draft` block "
+        "\nRewrite the draft accordingly (update the saved draft too if you saved one). Do NOT send it. End your answer with a new fenced `email-draft` block "
         "(same JSON shape), then the DONE and SPOKEN lines.")
 
 
