@@ -10,7 +10,7 @@ know about their setup, and ask in one short question if it's unclear.
 
 ## 1. Install the plugin
 
-    hermes plugins install rungmc357/speakeasy#plugin/speakeasy --enable
+    hermes plugins install rungmc357/speakeasy/plugin/speakeasy --enable
 
 If it's already installed, update it instead: `hermes plugins update speakeasy`. Then check
 `hermes plugins show speakeasy`: if it says `Status: not enabled`, run

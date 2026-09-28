@@ -43,7 +43,7 @@ exact guide the agent follows.
 
 **By hand**, on the machine that runs Hermes:
 
-    hermes plugins install rungmc357/speakeasy#plugin/speakeasy --enable
+    hermes plugins install rungmc357/speakeasy/plugin/speakeasy --enable
     hermes voice setup --send telegram      # the chat that should get the link: discord, slack…
 
 Setup turns on Hermes' local API, signs you in to GPT-Live-1 with your ChatGPT account through
