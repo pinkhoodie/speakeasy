@@ -645,3 +645,9 @@ def test_thread_email_draft_becomes_an_approvable_card(server, service, hermes):
     assert len(cards) == 1 and cards[0]["subject"] == "Portugal trip details" and cards[0]["status"] == "pending"
     # Approving goes back into the thread's own session, never a fresh one.
     assert service.store.draft(cards[0]["draft_id"])["_session_id"] == "thread_session_1"
+
+
+def test_voice_rules_never_claim_a_draft_before_it_exists():
+    text = P.rules_text(P.Names.from_settings(S.validate({})), "Telegram", [])
+    email = text.split("# Email drafts", 1)[1]
+    assert "I drafted it" not in email and "never that it is drafted" in email
