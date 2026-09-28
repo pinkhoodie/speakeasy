@@ -219,6 +219,46 @@ def product_cards(output: str) -> tuple[str, list[dict[str, Any]]]:
 
 MEDIA_TAG_RE = re.compile(r"""(?m)(?P<lead>^[ \t]*|[ \t]+)MEDIA:[ \t]*(?:`(?P<tick>[^`\n]+)`|"(?P<quote>[^"\n]+)"|(?P<bare>\S+))[ \t]*$""")
 MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]\n]{0,120})\]\((https://[^\s)<>]{4,1500})\)")
+# Hermes' API server inlines every MEDIA:<path> image as a base64 data URL (remote frontends can't read
+# the host's files), so this is the form finished images actually arrive in over the API.
+DATA_IMAGE_RE = re.compile(r"!\[([^\]\n]{0,120})\]\(data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=\s]{16,})\)")
+DATA_IMAGE_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+
+
+def saved_data_images(output: str, roots: tuple[Path, ...]) -> tuple[str, list[str]]:
+    """Decode inline ``data:image`` markdown into files under the first image root (the Hermes home)
+    and put a ``MEDIA:<path>`` tag in its place, so these images take the same vetted path as any other.
+    The type must match the bytes; oversized or undecodable images are dropped from the text."""
+    import base64
+    import hashlib
+
+    from .cards import MAX_LOCAL_IMAGE_BYTES, _sniff
+
+    if "data:image/" not in output or not roots:
+        return output, []
+    folder = Path(roots[0]) / "cache" / "speakeasy" / "images"
+    saved: list[str] = []
+
+    def replace(match: re.Match) -> str:
+        try:
+            blob = base64.b64decode(re.sub(r"\s+", "", match.group(3)), validate=True)
+        except (ValueError, TypeError):
+            return ""
+        if not blob or len(blob) > MAX_LOCAL_IMAGE_BYTES or _sniff(blob[:16]) != match.group(2):
+            return ""
+        path = folder / (hashlib.sha256(blob).hexdigest()[:32] + DATA_IMAGE_EXT[match.group(2)])
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                tmp = path.with_suffix(path.suffix + ".part")
+                tmp.write_bytes(blob)
+                tmp.replace(path)
+        except OSError:
+            return ""
+        saved.append(str(path))
+        return f"\nMEDIA:{path}\n"
+
+    return DATA_IMAGE_RE.sub(replace, output), saved
 
 
 def media_images(output: str, roots: tuple[Path, ...]) -> tuple[str, list[dict[str, Any]], list[str]]:
@@ -356,6 +396,7 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
         spoken_raw = matches[-1].group(1)
         output = output[:matches[-1].start()] + output[matches[-1].end():]
     output, drafts = extract_email_drafts(output)
+    output, _ = saved_data_images(output, image_roots)
     output, cards = product_cards(output)
     output, images, media_tags = media_images(output, image_roots)
     cards = (cards + images)[:MAX_CARDS]
