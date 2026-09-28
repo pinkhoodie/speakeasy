@@ -28,6 +28,16 @@ def _finished_with_images(store, key: str, run_id: str, n: int = 2, settled_offs
             store._db.execute("UPDATE runs SET settled_at=? WHERE idem_key=?", (time.time() + settled_offset, key))
 
 
+# -- task prompt ------------------------------------------------------------------------------------
+
+def test_task_prompt_asks_for_rendered_visual_results():
+    from speakeasy.prompt import builder as P
+    prompt = P.build_task_prompt(P.Names("Hermes", "Sam"), 1, "User: design a landing page")
+    assert "render or screenshot the finished result" in prompt
+    assert "MEDIA:<absolute path>" in prompt and "what you are looking at" in prompt
+    assert "{user_name}" not in prompt and "Sam can review it" in prompt
+
+
 # -- store: review state survives calls, capped to the latest three ---------------------------------
 
 def test_review_waits_until_dismissed_and_survives_new_calls(service):

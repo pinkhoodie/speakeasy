@@ -247,6 +247,12 @@ PRODUCT_CARDS_RULE = (
     "or destinations. Omit a field you cannot verify. Number products in your prose to match the array order. "
 )
 
+VISUAL_RESULTS_RULE = (
+    "When the task creates or edits anything visual (a design, UI, chart, page, image or diagram), render or screenshot "
+    "the finished result and include it as MEDIA:<absolute path> in your answer so {user_name} can review it in the app; "
+    "when {user_name} asks to see what you are looking at, include a screenshot of it the same way. "
+)
+
 EMAIL_DRAFT_RULE = (
     "When this task produces an email to send on {user_possessive} behalf, do NOT send it. You may save it as a draft "
     "in the mail account if that helps. Either way, end "
@@ -288,7 +294,7 @@ def build_task_prompt(names: Names, revision: int, context: str, focus: str | No
         "another board or session. "
         + truthfulness(names) + " "
         "Do not auto-approve consequential actions. Return concise verified facts and status suitable for speech. "
-        + PRODUCT_CARDS_RULE + render(EMAIL_DRAFT_RULE, names)
+        + PRODUCT_CARDS_RULE + render(VISUAL_RESULTS_RULE, names) + render(EMAIL_DRAFT_RULE, names)
         + (render("Your task: ", names) + f"{focus} " + render(
             "Other parts of what {user_name} said run as separate tasks; do not do them, and do not "
             "redo or cancel another task's work. ", names) if focus else
