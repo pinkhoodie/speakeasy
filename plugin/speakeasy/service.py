@@ -26,6 +26,9 @@ from .cards import ImageRejected, default_image_roots, fetch_image, read_local_i
 from .devices import DeviceStore
 from .emails import canonical_json, extract_email_drafts
 from .hermes_api import HermesAPI, HermesError
+
+RESTART_NEEDED = ("Speakeasy was updated while Hermes was running. Restart the Hermes gateway "
+                  "(hermes gateway restart) to finish the update.")
 from .prompt import builder as P
 from .router import routing_model
 from .threads import THREAD_PLATFORMS
@@ -172,6 +175,8 @@ class VoiceService:
                                          if tour is not None else "")
 
     def create_session(self, body: dict[str, Any], request_id: str, device_id: str = "") -> dict[str, Any]:
+        if self.updated_underneath():
+            raise ServiceError(503, RESTART_NEEDED)
         resume_from = body.get("resume_from")
         if (not set(body) <= {"sdp", "resume_from", "tour"} or not isinstance(body.get("sdp"), str)
                 or resume_from is not None and not (isinstance(resume_from, str) and ID_RE.fullmatch(resume_from))):
@@ -747,6 +752,15 @@ class VoiceService:
             ok, msg = login_status(binary)
         return binary is not None, ok, msg
 
+    @staticmethod
+    def updated_underneath() -> bool:
+        """True when the plugin was reinstalled into a running gateway: Hermes re-imports the new
+        files but this running server keeps the old ones, and mixing them breaks every handoff
+        (seen live: new call code calling the old Runtime.route). Only a restart fixes it."""
+        import sys
+        live = sys.modules.get(SidebandWorker.__module__)
+        return live is not None and getattr(live, "SidebandWorker", SidebandWorker) is not SidebandWorker
+
     def status(self) -> dict[str, Any]:
         s = self.settings.get()
         found, signed_in, codex_message = self.codex_state()
@@ -755,7 +769,8 @@ class VoiceService:
         voice_ready = signed_in if provider == "codex" else api_key_set
         return {
             "assistant_name": s["assistant_name"], "user_name": s["user_name"], "provider": provider,
-            "voice": default_voice(s), "voice_ready": voice_ready,
+            "voice": default_voice(s), "voice_ready": voice_ready and not self.updated_underneath(),
+            "restart_needed": self.updated_underneath(),
             "codex_found": found, "codex_signed_in": signed_in, "codex_message": codex_message,
             "api_key_set": api_key_set, "brief_state": self.brief.status()["state"],
             "hermes_api_ok": self.hermes.health(), "hermes_api_key_set": bool(self.hermes_key()),
