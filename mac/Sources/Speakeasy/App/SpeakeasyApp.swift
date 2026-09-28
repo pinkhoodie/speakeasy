@@ -67,6 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             PanelSmoke.run(config: app.config, snapshotDir: dir); return
         }
         if let index = args.firstIndex(of: "--ui-preview") { runPreview(args, index: index); return }
+        if let i = args.firstIndex(of: "--settings-smoke"), i + 3 < args.count {
+            SettingsSmoke.run(app: app, dir: args[i + 1], provider: args[i + 2], model: args[i + 3]); return
+        }
 
         native = NativeVoiceClient(config: app.config)
         applyClientPrefs()

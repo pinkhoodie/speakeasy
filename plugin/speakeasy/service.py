@@ -41,8 +41,9 @@ from .text import ID_RE, MAX_CARDS, TERMINAL, notice_text, split_result
 
 logger = logging.getLogger(__name__)
 
-ROUTING_HINT = ("Switch it here, or with `hermes voice routing <choice>`. Takes effect on the next request. "
-                "Anything else can be set in your Hermes config under auxiliary → speakeasy_router.")
+ROUTING_EXPLAINER = ("When you ask for something on a call, a quick model first decides where it goes: a new task, an addition to a task that's already running, several separate tasks, or a Hermes chat or thread you were already working in. It also decides whether you want to see something on screen. It doesn't do the work; your Hermes agent does. Every request waits on this step, so pick a fast model; a wrong call can put a task in the wrong place.")
+ROUTING_HINT = ("Also: `hermes voice routing` on the machine that runs Hermes. "
+                "Stored in your Hermes config under auxiliary → speakeasy_router.")
 
 MAX_SDP = 96 * 1024
 PAUSE_NOTICE_AFTER_S = 15 * 60
@@ -716,13 +717,19 @@ class VoiceService:
         from . import routing_choice
         return routing_choice.choices(self.home)
 
+    def routing_models(self, provider: str) -> dict[str, Any]:
+        from . import routing_choice
+        return {"provider": provider, "models": routing_choice.provider_models(provider)}
+
     def choose_routing(self, body: dict[str, Any]) -> dict[str, Any]:
         from . import hermes_config, routing_choice
-        choice = body.get("model") if isinstance(body, dict) else None
-        if not isinstance(choice, str) or not choice.strip():
-            raise ServiceError(400, "model is required")
+        body = body if isinstance(body, dict) else {}
+        provider, model, thinking = body.get("provider"), body.get("model", ""), body.get("thinking")
+        if not isinstance(provider, str) or not isinstance(model, str) or \
+                not (thinking is None or isinstance(thinking, bool)):
+            raise ServiceError(400, "provider (string), model (string) and thinking (true/false) expected")
         try:
-            return routing_choice.choose(self.home, choice)
+            return routing_choice.choose(self.home, provider, model, thinking)
         except routing_choice.RoutingChoiceError as exc:
             raise ServiceError(400, str(exc)) from None
         except hermes_config.ConfigWriteRefused as exc:
@@ -804,7 +811,7 @@ class VoiceService:
             "hermes_api_ok": self.hermes.health(), "hermes_api_key_set": bool(self.hermes_key()),
             "delivery_target": s["delivery"]["target"], **self.thread_status(),
             "continuity_enabled": s["continuity"]["enabled"], "devices": len(self.devices.devices()),
-            "routing_model": routing_model(), "routing_hint": ROUTING_HINT,
+            "routing_model": routing_model(), "routing_hint": ROUTING_HINT, "routing_explainer": ROUTING_EXPLAINER,
             "routing_choice": self.routing_choices(),
             "advertised_url": s["server"]["advertised_url"], "tailscale_name": s["server"]["tailscale_name"],
             "version": __version__,

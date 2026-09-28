@@ -262,6 +262,8 @@ public struct ServerStatus: Codable, Equatable, Sendable {
     /// The model task routing uses (Hermes auxiliary task speakeasy_router), and how to change it.
     public var routingModel: String?
     public var routingHint: String?
+    /// What task routing is, in plain words (servers from plugin 0.2.20 on).
+    public var routingExplainer: String?
     /// The routing models the user can switch between (servers from plugin 0.2.19 on).
     public var routingChoice: RoutingChoices?
     /// The address `hermes voice setup` advertised for other devices (empty = local only).
@@ -274,6 +276,7 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         case threadsSupported = "threads_supported", voiceReady = "voice_ready"
         case threadsReason = "threads_reason", threadPlatforms = "thread_platforms", continuityEnabled = "continuity_enabled"
         case routingModel = "routing_model", routingHint = "routing_hint", routingChoice = "routing_choice"
+        case routingExplainer = "routing_explainer"
         case advertisedURL = "advertised_url", tailscaleName = "tailscale_name"
     }
 
@@ -300,6 +303,7 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         routingModel = try? c.decodeIfPresent(String.self, forKey: .routingModel)
         routingHint = try? c.decodeIfPresent(String.self, forKey: .routingHint)
         routingChoice = try? c.decodeIfPresent(RoutingChoices.self, forKey: .routingChoice)
+        routingExplainer = try? c.decodeIfPresent(String.self, forKey: .routingExplainer)
         advertisedURL = try? c.decodeIfPresent(String.self, forKey: .advertisedURL)
         tailscaleName = try? c.decodeIfPresent(String.self, forKey: .tailscaleName)
     }
@@ -505,25 +509,44 @@ public enum ChannelSuggestions {
 }
 
 
-/// `GET /voice/routing`: the routing models on offer and which one is in use.
+/// `GET /voice/routing`: the model routing uses now, and the providers (with their models) this
+/// Hermes is signed in to. The list comes from Hermes itself, never from the app.
 public struct RoutingChoices: Codable, Equatable, Sendable {
-    public struct Choice: Codable, Equatable, Sendable, Identifiable {
-        public var id: String
-        public var label: String
-        public var note: String
-        public var available: Bool
-        public var reason: String
-        public init(id: String, label: String, note: String = "", available: Bool = true, reason: String = "") {
-            self.id = id; self.label = label; self.note = note; self.available = available; self.reason = reason
+    public struct Current: Codable, Equatable, Sendable {
+        public var provider: String
+        public var model: String
+        public var thinking: Bool
+        public var isDefault: Bool
+        enum CodingKeys: String, CodingKey { case provider, model, thinking, isDefault = "is_default" }
+        public init(provider: String = "auto", model: String = "", thinking: Bool = true, isDefault: Bool = true) {
+            self.provider = provider; self.model = model; self.thinking = thinking; self.isDefault = isDefault
         }
     }
-    /// A preset id, or "custom" when the user set something by hand in config.yaml.
-    public var current: String
-    public var custom: String
-    public var choices: [Choice]
-    public init(current: String, custom: String = "", choices: [Choice]) {
-        self.current = current; self.custom = custom; self.choices = choices
+    public struct Provider: Codable, Equatable, Sendable, Identifiable {
+        public var id: String
+        public var name: String
+        public var models: [String]
+        public init(id: String, name: String, models: [String]) { self.id = id; self.name = name; self.models = models }
     }
+    public var current: Current
+    public var providers: [Provider]
+    public var label: String
+    public init(current: Current, providers: [Provider], label: String = "") {
+        self.current = current; self.providers = providers; self.label = label
+    }
+    public static let defaultID = "auto"
     public static func decode(_ data: Data) throws -> RoutingChoices { try JSONDecoder().decode(RoutingChoices.self, from: data) }
-    public static func postBody(model: String) throws -> Data { try JSONSerialization.data(withJSONObject: ["model": model]) }
+    /// `POST /voice/routing`. `provider` "auto" goes back to Hermes' default (the main model).
+    public static func postBody(provider: String, model: String, thinking: Bool?) throws -> Data {
+        var body: [String: Any] = ["provider": provider, "model": model]
+        if let thinking { body["thinking"] = thinking }
+        return try JSONSerialization.data(withJSONObject: body)
+    }
+}
+
+/// `GET /voice/routing/models?provider=`: every model Hermes knows for one provider.
+public struct ProviderModels: Codable, Equatable, Sendable {
+    public var provider: String
+    public var models: [String]
+    public static func decode(_ data: Data) throws -> ProviderModels { try JSONDecoder().decode(ProviderModels.self, from: data) }
 }

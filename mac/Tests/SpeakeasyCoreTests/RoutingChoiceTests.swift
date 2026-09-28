@@ -2,33 +2,42 @@ import XCTest
 @testable import SpeakeasyCore
 
 final class RoutingChoiceTests: XCTestCase {
-    func testStatusCarriesTheRoutingChoices() throws {
+    func testStatusCarriesHermesProviders() throws {
         let json = """
-        {"routing_model": "DeepSeek V4.1 Flash (Venice)", "routing_hint": "Switch it here",
-         "routing_choice": {"current": "deepseek-v4.1-flash", "custom": "",
-           "choices": [
-             {"id": "default", "label": "Hermes default (your main model)", "note": "n", "available": true, "reason": ""},
-             {"id": "deepseek-v4.1-flash", "label": "DeepSeek V4.1 Flash (Venice)", "note": "Fast", "available": true, "reason": ""},
-             {"id": "claude-sonnet-5.5", "label": "Claude Sonnet 5.5 (Anthropic)", "note": "n", "available": false,
-              "reason": "Needs Anthropic set up in Hermes"}]}}
+        {"routing_model": "venice · deepseek-v4-1-flash (thinking off)",
+         "routing_choice": {"current": {"provider": "venice", "model": "deepseek-v4-1-flash", "thinking": false, "is_default": false},
+                            "label": "venice · deepseek-v4-1-flash (thinking off)",
+                            "providers": [{"id": "anthropic", "name": "Anthropic", "models": ["claude-sonnet-5-5"]},
+                                          {"id": "venice", "name": "Venice.ai", "models": ["deepseek-v4-1-flash"]}]}}
         """
         let status = try JSONDecoder().decode(ServerStatus.self, from: Data(json.utf8))
         let routing = try XCTUnwrap(status.routingChoice)
-        XCTAssertEqual(routing.current, "deepseek-v4.1-flash")
-        XCTAssertEqual(routing.choices.map(\.id), ["default", "deepseek-v4.1-flash", "claude-sonnet-5.5"])
-        XCTAssertFalse(routing.choices[2].available)
-        XCTAssertEqual(routing.choices[2].reason, "Needs Anthropic set up in Hermes")
+        XCTAssertEqual(routing.current.provider, "venice")
+        XCTAssertFalse(routing.current.thinking)
+        XCTAssertFalse(routing.current.isDefault)
+        XCTAssertEqual(routing.providers.map(\.id), ["anthropic", "venice"])
+        XCTAssertEqual(routing.providers[1].models, ["deepseek-v4-1-flash"])
     }
 
     func testOlderServersWithoutChoicesStillDecode() throws {
-        let status = try JSONDecoder().decode(ServerStatus.self, from: Data(#"{"routing_model": "anthropic · claude-opus-5-5"}"#.utf8))
+        let status = try JSONDecoder().decode(ServerStatus.self, from: Data(#"{"routing_model": "x · y"}"#.utf8))
         XCTAssertNil(status.routingChoice)
-        XCTAssertEqual(status.routingModel, "anthropic · claude-opus-5-5")
+        XCTAssertEqual(status.routingModel, "x · y")
     }
 
-    func testSwitchBodyNamesTheModel() throws {
-        let body = try RoutingChoices.postBody(model: "claude-sonnet-5.5")
-        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: String])
-        XCTAssertEqual(object, ["model": "claude-sonnet-5.5"])
+    func testSwitchBodyNamesProviderModelAndThinking() throws {
+        let body = try RoutingChoices.postBody(provider: "venice", model: "deepseek-v4-1-flash", thinking: false)
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(obj["provider"] as? String, "venice")
+        XCTAssertEqual(obj["model"] as? String, "deepseek-v4-1-flash")
+        XCTAssertEqual(obj["thinking"] as? Bool, false)
+        let keep = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: try RoutingChoices.postBody(provider: "auto", model: "", thinking: nil)) as? [String: Any])
+        XCTAssertNil(keep["thinking"])  // not mentioned: the server keeps the current setting
+    }
+
+    func testModelListDecodes() throws {
+        let list = try ProviderModels.decode(Data(#"{"provider": "venice", "models": ["a", "b"]}"#.utf8))
+        XCTAssertEqual(list.models, ["a", "b"])
     }
 }

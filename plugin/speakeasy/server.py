@@ -167,6 +167,10 @@ class Handler(BaseHTTPRequestHandler):
             }
             if path in routes:
                 self._reply(200, routes[path]())
+            elif path == "/voice/routing/models":
+                from urllib.parse import parse_qs
+                provider = (parse_qs(urlsplit(self.path).query).get("provider") or [""])[0]
+                self._reply(200, self.service.routing_models(provider))
             elif work:
                 self._reply(200, self.service.work(work.group(1)))
             elif match:

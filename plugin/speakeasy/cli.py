@@ -65,8 +65,15 @@ def setup_parser(parser) -> None:
     set_.add_argument("value")
     sub.add_parser("status", help="Show voice provider, Hermes API and brief status")
     routing = sub.add_parser("routing", help="Show or switch the model that routes voice requests")
-    routing.add_argument("choice", nargs="?", default="",
-                         help="default | deepseek-v4.1-flash | claude-sonnet-5.5 (omit to list)")
+    routing.add_argument("provider", nargs="?", default="",
+                         help="a provider Hermes is signed in to, or 'default' (omit to list)")
+    routing.add_argument("model", nargs="?", default="", help="a model of that provider")
+    thinking = routing.add_mutually_exclusive_group()
+    thinking.add_argument("--no-thinking", dest="thinking", action="store_false", default=None,
+                          help="turn the model's reasoning off (much faster for routing)")
+    thinking.add_argument("--thinking", dest="thinking", action="store_true",
+                          help="leave the model's reasoning on")
+    routing.add_argument("--models", action="store_true", help="list every model of PROVIDER")
     reload_ = sub.add_parser("reload", help="Load a newly installed Speakeasy now, without restarting Hermes "
                                             "(ends a live call; running tasks keep going in Hermes)")
     reload_.add_argument("--timeout", type=float, default=30, help=argparse.SUPPRESS)
@@ -380,25 +387,32 @@ def cmd_config(args, home: Path) -> int:
     return 0
 
 
-def cmd_routing(home: Path, choice: str) -> int:
+def cmd_routing(home: Path, args) -> int:
     from . import hermes_config, routing_choice
-    if choice:
+    provider, model = getattr(args, "provider", ""), getattr(args, "model", "")
+    if provider and getattr(args, "models", False):
+        models = routing_choice.provider_models(provider)
+        print("\n".join(models) if models else f"Hermes lists no models for {provider!r}.")
+        return 0 if models else 1
+    if provider:
         try:
-            state = routing_choice.choose(home, choice)
+            state = routing_choice.choose(home, provider, model, getattr(args, "thinking", None))
         except (routing_choice.RoutingChoiceError, hermes_config.ConfigWriteRefused) as exc:
             print(f"Error: {exc}")
             return 2
-        picked = next(c for c in state["choices"] if c["id"] == state["current"])
-        print(f"Routing now uses {picked['label']}. Takes effect on the next request; no restart needed.")
+        print(f"Routing now uses {state['label']}. Takes effect on the next request; no restart needed.")
         return 0
     state = routing_choice.choices(home)
-    for c in state["choices"]:
-        mark = "→" if c["id"] == state["current"] else " "
-        extra = "" if c["available"] else f"  ({c['reason']})"
-        print(f"{mark} {c['id']:<22} {c['label']}{extra}\n    {c['note']}")
-    if state["current"] == "custom":
-        print(f"→ custom: {state['custom']} (set by hand in config.yaml)")
-    print("\nSwitch with: hermes voice routing <choice>")
+    from .service import ROUTING_EXPLAINER
+    print("Task routing: " + ROUTING_EXPLAINER + "\n")
+    print(f"Routing uses: {state['label']}\n")
+    print("Providers Hermes is signed in to (the same list `hermes model` shows):")
+    for p in state["providers"]:
+        sample = ", ".join(p["models"][:4]) + (" …" if len(p["models"]) > 4 else "")
+        print(f"  {p['id']:<28} {sample}")
+    print("\nSwitch:   hermes voice routing <provider> <model> [--no-thinking]")
+    print("Models:   hermes voice routing <provider> --models")
+    print("Default:  hermes voice routing default")
     return 0
 
 
@@ -457,7 +471,7 @@ def handle(args) -> int:
     if command == "reload":
         return cmd_reload(home, getattr(args, "timeout", 30))
     if command == "routing":
-        return cmd_routing(home, getattr(args, "choice", ""))
+        return cmd_routing(home, args)
     store = _store(home)
     if command == "devices":
         devices = store.devices()

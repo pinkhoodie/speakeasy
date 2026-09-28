@@ -51,6 +51,27 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var config: AppConfig
     @Published var status: ServerStatus?
+    /// An unsaved routing-model change from Settings; nil when nothing is pending. Saved and
+    /// reverted by the same Save/Revert bar as the other server settings.
+    @Published var routingDraft: RoutingChoices.Current?
+
+    /// The routing edit, when there is one that differs from what the server uses.
+    var routingEdit: RoutingChoices.Current? {
+        guard let draft = routingDraft, let current = status?.routingChoice?.current else { return nil }
+        if draft.isDefault && current.isDefault { return nil }
+        return draft == current ? nil : draft
+    }
+    /// A provider was picked but not yet a model: Save waits for one.
+    var routingNeedsModel: Bool { routingEdit.map { !$0.isDefault && $0.model.isEmpty } ?? false }
+
+    func saveRoutingEdit() async -> Bool {
+        guard let edit = routingEdit else { return true }
+        let ok = await chooseRouting(provider: edit.isDefault ? RoutingChoices.defaultID : edit.provider,
+                                     model: edit.isDefault ? "" : edit.model,
+                                     thinking: edit.isDefault ? nil : edit.thinking)
+        if ok { routingDraft = nil }
+        return ok
+    }
     @Published var settings = ServerSettings()
     @Published var brief: VoiceBrief?
     @Published var destinations: [Destination] = []
@@ -291,13 +312,13 @@ final class AppModel: ObservableObject {
     }
 
     /// Switch the model that routes voice requests. Takes effect on the next request.
-    func chooseRouting(_ model: String) async -> Bool {
+    func chooseRouting(provider: String, model: String, thinking: Bool?) async -> Bool {
         guard let api else { lastError = "Not connected"; return false }
         do {
-            let choices = try await api.chooseRouting(model)
+            let choices = try await api.chooseRouting(provider: provider, model: model, thinking: thinking)
             if var s = status {
                 s.routingChoice = choices
-                s.routingModel = choices.choices.first { $0.id == choices.current }?.label ?? s.routingModel
+                s.routingModel = choices.label
                 status = s
             }
             if let s = try? await api.status() { status = s }
@@ -307,6 +328,12 @@ final class AppModel: ObservableObject {
             lastError = "Couldn't switch the routing model: \(describe(error))"
             return false
         }
+    }
+
+    /// Every model Hermes lists for one provider (for the routing model picker).
+    func routingModels(_ provider: String) async -> [String] {
+        guard let api else { return [] }
+        return (try? await api.routingModels(provider)) ?? []
     }
 
     /// Ask the user's Hermes to propose delivery channels. Returns suggestions, or sets `lastError`.

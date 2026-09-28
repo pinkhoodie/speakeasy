@@ -38,17 +38,25 @@ private struct ServerForm<Content: View>: View {
                 if let error = app.lastError { Text(error).font(.caption).foregroundStyle(.orange).lineLimit(2) }
                 else if saved { Text("Saved").font(.caption).foregroundStyle(.secondary) }
                 Spacer()
-                Button("Revert") { draft = app.settings }.disabled(draft == app.settings || saving)
+                if app.routingNeedsModel && app.lastError == nil {
+                    Text("Choose a routing model to save").font(.caption).foregroundStyle(.secondary)
+                }
+                Button("Revert") { draft = app.settings; app.routingDraft = nil }
+                    .disabled((draft == app.settings && app.routingEdit == nil) || saving)
                 Button("Save") {
                     saving = true
                     Task {
-                        saved = await app.save(draft)
+                        var ok = true
+                        if draft != app.settings { ok = await app.save(draft) }
+                        if ok { ok = await app.saveRoutingEdit() }
+                        saved = ok
                         saving = false
-                        if saved { draft = app.settings }
+                        if ok { draft = app.settings }
                     }
                 }
                 .keyboardShortcut("s", modifiers: .command)
-                .disabled(draft == app.settings || saving || !app.isPaired)
+                .disabled((draft == app.settings && app.routingEdit == nil) || app.routingNeedsModel
+                          || saving || !app.isPaired)
             }
             .padding(.horizontal, 20).padding(.bottom, 14)
         }
@@ -384,8 +392,11 @@ private struct BehaviorSettings: View {
             }
             .help("A hard cap per call so a forgotten call can't run up your plan or bill")
             Section("Task routing") {
+                Text(app.status?.routingExplainer ?? routingExplainerFallback)
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 RoutingModelPicker(app: app)
-                Text(app.status?.routingHint ?? "Change it in your Hermes config under auxiliary → speakeasy_router.")
+                Text(app.status?.routingHint ?? "Stored in your Hermes config under auxiliary → speakeasy_router.")
                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -733,36 +744,123 @@ func suggestedChannelLabel(_ destination: String) -> String {
 
 
 /// Pick the model that routes voice requests. Falls back to a read-only label on older servers.
+/// Shown when the server predates plugin 0.2.20 and doesn't send its own explanation.
+let routingExplainerFallback = "When you ask for something on a call, a quick model first decides where it goes: a new task, an addition to a task that's already running, several separate tasks, or a Hermes chat or thread you were already working in. It also decides whether you want to see something on screen. It doesn't do the work; your Hermes agent does. Every request waits on this step, so pick a fast model; a wrong call can put a task in the wrong place."
+
 struct RoutingModelPicker: View {
     @ObservedObject var app: AppModel
-    @State private var saving = false
+    /// Full model lists fetched per provider (the status list carries only Hermes' short list).
+    @State private var fullModels: [String: [String]] = [:]
 
     var body: some View {
         if let routing = app.status?.routingChoice {
-            let selection = Binding<String>(
-                get: { routing.current },
-                set: { picked in
-                    guard picked != routing.current, picked != "custom" else { return }
-                    saving = true
-                    Task { _ = await app.chooseRouting(picked); saving = false }
-                })
-            Picker("Routing model", selection: selection) {
-                ForEach(routing.choices) { choice in
-                    Text(choice.available ? choice.label : "\(choice.label) — \(choice.reason)")
-                        .tag(choice.id)
-                        .disabled(!choice.available)
-                }
-                if routing.current == "custom" {
-                    Text("Custom: \(routing.custom)").tag("custom")
-                }
+            let shown = app.routingDraft ?? routing.current
+            let provider = shown.isDefault ? RoutingChoices.defaultID : shown.provider
+            Picker("Provider", selection: Binding<String>(
+                get: { provider },
+                set: { picked in pickProvider(picked, routing: routing) })) {
+                Text("Hermes default (your main model)").tag(RoutingChoices.defaultID)
+                ForEach(routing.providers) { p in Text(p.name).tag(p.id) }
             }
-            .disabled(saving)
-            if let note = routing.choices.first(where: { $0.id == routing.current })?.note, !note.isEmpty {
-                Text(note).font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            if provider != RoutingChoices.defaultID {
+                let listed = modelList(provider, routing: routing)
+                // The chosen model always shows, even before the full list has loaded.
+                let models = shown.model.isEmpty || listed.contains(shown.model) ? listed : [shown.model] + listed
+                Picker("Model", selection: Binding<String>(
+                    get: { shown.model },
+                    set: { picked in var d = shown; d.model = picked; app.routingDraft = d })) {
+                    if shown.model.isEmpty { Text("Choose a model").tag("") }
+                    ForEach(models, id: \.self) { Text($0).tag($0) }
+                }
+                .disabled(models.isEmpty)
+                Toggle("Let the model think first", isOn: Binding(
+                    get: { shown.thinking },
+                    set: { on in var d = shown; d.thinking = on; app.routingDraft = d }))
+                    .help("Off makes routing much faster; most models route fine without thinking.")
             }
+            Text("From the providers Hermes is signed in to. Takes effect on the next request after you save.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
             LabeledContent("Routing model", value: app.status?.routingModel ?? "Unknown")
+        }
+    }
+
+    private func modelList(_ provider: String, routing: RoutingChoices) -> [String] {
+        let short = routing.providers.first { $0.id == provider }?.models ?? []
+        guard let full = fullModels[provider], !full.isEmpty else { return short }
+        return short + full.filter { !short.contains($0) }
+    }
+
+    private func pickProvider(_ picked: String, routing: RoutingChoices) {
+        let current = routing.current
+        if picked == RoutingChoices.defaultID {
+            app.routingDraft = RoutingChoices.Current()
+        } else if !current.isDefault && picked == current.provider {
+            app.routingDraft = nil  // back to what is saved
+        } else {
+            app.routingDraft = RoutingChoices.Current(provider: picked, model: "", thinking: false, isDefault: false)
+        }
+        if picked != RoutingChoices.defaultID && fullModels[picked] == nil {
+            Task { fullModels[picked] = await app.routingModels(picked) }
+        }
+    }
+}
+
+
+// MARK: Settings smoke (development only)
+
+/// `--settings-smoke <dir>`: the real Behavior tab against the paired server. Walks the routing
+/// picker through the same state changes its dropdowns make, checks the Save/Revert bar at each
+/// step, saves, and snapshots each state. Run on a development machine, never a user's.
+@MainActor
+enum SettingsSmoke {
+    static func run(app: AppModel, dir: String, provider: String, model: String) {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let host = NSHostingController(rootView: BehaviorSettings().environmentObject(app).frame(width: 560, height: 700))
+        let window = NSWindow(contentViewController: host)
+        window.title = "Behavior"
+        window.setContentSize(NSSize(width: 560, height: 700))
+        window.makeKeyAndOrderFront(nil)
+        Task { @MainActor in
+            func settle() async { try? await Task.sleep(nanoseconds: 1_500_000_000) }
+            @MainActor func snap(_ name: String) {
+                guard let view = window.contentView,
+                      let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+                view.cacheDisplay(in: view.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+                print("snapshot \(dir)/\(name).png")
+            }
+            @MainActor func bar(_ step: String) {
+                let edit = app.routingEdit
+                let needs = app.routingNeedsModel
+                let saveOn = edit != nil && !needs
+                print("\(step): save=\(saveOn ? "on" : "off") revert=\(edit != nil ? "on" : "off") "
+                      + "needsModel=\(needs) server=\(app.status?.routingChoice?.label ?? "-")")
+            }
+            await app.refresh(); await settle()
+            let saved = app.status?.routingChoice?.current
+            bar("1 loaded"); snap("1-loaded")
+            // Provider dropdown → a different provider: nothing chosen yet, Save waits for a model.
+            app.routingDraft = RoutingChoices.Current(provider: provider, model: "", thinking: false, isDefault: false)
+            await settle(); bar("2 provider picked"); snap("2-provider-picked")
+            // Model dropdown.
+            var d = app.routingDraft!; d.model = model; app.routingDraft = d
+            await settle(); bar("3 model picked"); snap("3-model-picked")
+            // Revert.
+            app.routingDraft = nil
+            await settle(); bar("4 reverted")
+            // Pick again and Save.
+            app.routingDraft = RoutingChoices.Current(provider: provider, model: model, thinking: false, isDefault: false)
+            let ok = await app.saveRoutingEdit()
+            await settle(); bar("5 saved ok=\(ok)"); snap("5-saved")
+            // Put the original back through the same path.
+            if let saved {
+                app.routingDraft = saved.isDefault ? RoutingChoices.Current() : saved
+                let back = await app.saveRoutingEdit()
+                await settle(); bar("6 restored ok=\(back)")
+            }
+            exit(0)
         }
     }
 }

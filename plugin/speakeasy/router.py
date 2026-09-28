@@ -560,11 +560,6 @@ def routing_model(config: dict[str, Any] | None = None) -> str:
     model = str(block.get("model") or "").strip()
     if provider == "auto" and not model:
         return "Hermes default (your main model)"
-    try:
-        from .routing_choice import PRESETS
-        for preset in PRESETS[1:]:
-            if preset["config"]["provider"] == provider and preset["config"]["model"] == model:
-                return preset["label"]
-    except Exception:
-        pass
-    return f"{provider} · {model}" if model else provider
+    from .routing_choice import thinking_on
+    text = f"{provider} · {model}" if model else provider
+    return text if thinking_on(block) else f"{text} (thinking off)"
