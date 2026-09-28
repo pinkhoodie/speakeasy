@@ -43,6 +43,12 @@ DEFAULTS: dict[str, Any] = {
     "onboarding": {"names_set": False, "delivery_set": False},
 }
 DEFAULT_VOICES = {"codex": "cove", "openai": "marin"}
+# Voices each provider accepts; they do not overlap (the ChatGPT-sign-in voice model rejects API
+# voice names). Keep in sync with mac/Sources/SpeakeasyCore/VoiceCatalog.swift.
+PROVIDER_VOICES = {
+    "codex": ("arbor", "ember", "cove", "spruce", "breeze", "sol", "vale", "juniper", "maple"),
+    "openai": ("alloy", "ash", "ballad", "cedar", "coral", "echo", "marin", "sage", "shimmer", "verse"),
+}
 
 # Hermes `hermes send` target: platform, platform:chat_id, platform:chat_id:thread_id, platform:#name.
 DELIVERY_TARGET_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}(?::(?:#[A-Za-z0-9_.-]{1,80}|[A-Za-z0-9_@+.=-]{1,128})(?::[A-Za-z0-9_.-]{1,64})?)?$")
@@ -424,5 +430,8 @@ def codex_too_old(binary: Path | None, version_fn: Any = None) -> bool:
 
 
 def default_voice(settings: dict[str, Any]) -> str:
+    """The saved voice when the provider accepts it; otherwise that provider's default, so switching
+    providers never leaves a call unable to start."""
     voice = settings["voice"]
-    return voice.get("voice") or DEFAULT_VOICES[voice["provider"]]
+    chosen, provider = voice.get("voice"), voice["provider"]
+    return chosen if chosen in PROVIDER_VOICES[provider] else DEFAULT_VOICES[provider]

@@ -196,8 +196,6 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         return min(minutes, 24 * 60) * 60
     }
 
-    /// Voices offered in the picker. The server passes the name through to the provider.
-    public static let knownVoices = ["alloy", "ash", "ballad", "cedar", "coral", "echo", "marin", "sage", "shimmer", "verse"]
 }
 
 /// `GET /voice/brief`.

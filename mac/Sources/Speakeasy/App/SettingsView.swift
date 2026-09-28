@@ -189,18 +189,16 @@ private struct VoiceSettings: View {
                                                          set: { draft.userName = $0.isEmpty ? nil : $0 }),
                       prompt: Text("Optional"))
             Picker("Voice provider", selection: Binding(get: { draft.resolvedProvider },
-                                                         set: { p in var v = draft.voice ?? .init(); v.provider = p.rawValue; draft.voice = v })) {
+                                                         set: { p in
+                                                             var v = draft.voice ?? .init(); v.provider = p.rawValue
+                                                             v.voice = VoiceCatalog.compatible(v.voice, provider: p)
+                                                             draft.voice = v })) {
                 ForEach(VoiceProvider.allCases) { Text($0.label).tag($0) }
             }
             providerStatus
-            Picker("Voice", selection: Binding(get: { draft.voice?.voice ?? "" },
-                                               set: { v in var voice = draft.voice ?? .init(); voice.voice = v.isEmpty ? nil : v; draft.voice = voice })) {
-                Text("Default").tag("")
-                ForEach(ServerSettings.knownVoices, id: \.self) { Text($0.capitalized).tag($0) }
-                if let current = draft.voice?.voice, !current.isEmpty, !ServerSettings.knownVoices.contains(current) {
-                    Text(current).tag(current)
-                }
-            }
+            VoiceChooser(provider: draft.resolvedProvider,
+                         selection: Binding(get: { draft.voice?.voice ?? "" },
+                                            set: { v in var voice = draft.voice ?? .init(); voice.voice = v.isEmpty ? nil : v; draft.voice = voice }))
         }
     }
 
@@ -223,6 +221,61 @@ private struct VoiceSettings: View {
             Text("The key stays on the Hermes machine. Speakeasy never asks for it or stores it on this Mac.")
                 .font(.caption).foregroundStyle(.secondary)
         }
+    }
+}
+
+/// Voice list for the selected provider: pick by listening, not by label. Applies from the next call.
+private struct VoiceChooser: View {
+    let provider: VoiceProvider
+    @Binding var selection: String
+    @StateObject private var player = VoicePreviewPlayer()
+
+    private var effective: String { selection.isEmpty ? VoiceCatalog.defaultVoice(for: provider) : selection }
+
+    var body: some View {
+        LabeledContent("Voice") {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(VoiceCatalog.voices(for: provider)) { option in row(option) }
+                if !selection.isEmpty, VoiceCatalog.option(selection, provider: provider) == nil {
+                    row(VoiceOption(id: selection, summary: "Not in this provider's list; the default is used.", hasPreview: false))
+                }
+                Text("Changes apply from your next call.").font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+            }
+        }
+        .onChange(of: provider) { _, _ in player.stop() }
+        .onDisappear { player.stop() }
+    }
+
+    private func row(_ option: VoiceOption) -> some View {
+        let chosen = option.id == effective
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Button {
+                selection = option.id == VoiceCatalog.defaultVoice(for: provider) ? "" : option.id
+            } label: {
+                Image(systemName: chosen ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(chosen ? Color.accentColor : Color.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Use \(option.name)")
+            .accessibilityAddTraits(chosen ? .isSelected : [])
+            VStack(alignment: .leading, spacing: 0) {
+                Text(option.name)
+                if !option.summary.isEmpty { Text(option.summary).font(.caption).foregroundStyle(.secondary) }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { selection = option.id == VoiceCatalog.defaultVoice(for: provider) ? "" : option.id }
+            Spacer(minLength: 12)
+            if option.hasPreview {
+                let playing = player.playing == option.id
+                Button { player.toggle(option.id) } label: {
+                    Image(systemName: playing ? "stop.circle" : "play.circle").imageScale(.large)
+                }
+                .buttonStyle(.borderless)
+                .help(playing ? "Stop" : "Hear \(option.name)")
+                .accessibilityLabel(playing ? "Stop \(option.name) sample" : "Play \(option.name) sample")
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 
