@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -22,6 +24,7 @@ from .text import ID_RE, clean_transcript
 
 CODEX_MODEL = "gpt-live-1-codex"
 _ENV_KEEP = ("HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "CODEX_HOME")
+logger = logging.getLogger(__name__)
 _LOGIN_CACHE: dict[str, tuple[float, tuple[bool, str]]] = {}
 
 
@@ -38,11 +41,49 @@ def explain_codex_error(message: str) -> str:
                 "or run hermes voice setup to use a current copy.")
     if "voice" in text and "not supported" in text:
         return "That voice isn't available. Pick another voice in Speakeasy Settings."
-    if "login" in text or "auth" in text or "unauthorized" in text or "401" in text:
+    if "didn't provide an api key" in text or "not logged in" in text:
         return "Codex isn't signed in to ChatGPT. Run codex login on the Hermes machine."
+    if "login" in text or "auth" in text or "unauthorized" in text or "401" in text:
+        return ("OpenAI rejected Codex's saved sign-in (it may have expired or been signed out). "
+                "Run codex login again on the Hermes machine.")
     if "rate" in text and "limit" in text:
         return "ChatGPT's voice limit was reached. Try again later or switch to an OpenAI API key."
     return "Codex couldn't start the voice call."
+
+
+def is_auth_error(message: str) -> bool:
+    """A start failure that means the saved sign-in doesn't work, whatever `codex login status` says."""
+    text = message.lower()
+    return any(k in text for k in ("401", "unauthorized", "api key", "not logged in", "login", "auth"))
+
+
+_REJECTED: dict[str, tuple[float | None, str]] = {}
+
+
+def _auth_stamp() -> float | None:
+    """When Codex's saved sign-in last changed (a new `codex login` rewrites it)."""
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    try:
+        return (home / "auth.json").stat().st_mtime
+    except OSError:
+        return None
+
+
+def mark_signed_out(binary: Path | None, reason: str) -> None:
+    """A call just proved the saved sign-in doesn't work. `codex login status` only reads the file,
+    so it keeps saying "logged in"; Settings shows "not signed in" until the user signs in again."""
+    if binary is not None:
+        _REJECTED[str(binary)] = (_auth_stamp(), reason)
+        _LOGIN_CACHE.pop(str(binary), None)
+
+
+def mark_signed_in(binary: Path | None) -> None:
+    if binary is not None:
+        _REJECTED.pop(str(binary), None)
+
+
+def _redacted(message: str) -> str:
+    return re.sub(r"(sk-[A-Za-z0-9_*-]{2})[A-Za-z0-9_*-]+", r"\1…", message)[:300]
 
 
 def child_env() -> dict[str, str]:
@@ -55,14 +96,25 @@ def login_status(binary: Path | None, runner: Callable[..., Any] = subprocess.ru
     """(signed_in, message) from `codex login status`, cached briefly."""
     if binary is None:
         return False, "Codex CLI not found. Install it and run `codex login`, or set voice.codex_path."
+    rejected = _REJECTED.get(str(binary))
+    if rejected is not None:
+        if rejected[0] == _auth_stamp():
+            return False, rejected[1]
+        _REJECTED.pop(str(binary), None)  # signed in again since the failed call
     cached = _LOGIN_CACHE.get(str(binary))
     if cached and time.monotonic() - cached[0] < ttl_s:
         return cached[1]
     try:
         done = runner([str(binary), "login", "status"], capture_output=True, text=True, timeout=10, env=child_env())
         text = f"{getattr(done, 'stdout', '') or ''}{getattr(done, 'stderr', '') or ''}".strip()
-        ok = getattr(done, "returncode", 1) == 0 and "logged in" in text.lower() and "not logged in" not in text.lower()
-        result = (ok, "Signed in to Codex." if ok else "Codex is not signed in. Run `codex login`.")
+        lowered = text.lower()
+        ok = getattr(done, "returncode", 1) == 0 and "logged in" in lowered and "not logged in" not in lowered
+        if ok and "api key" in lowered:
+            # Voice through Codex is the ChatGPT-plan path; an API-key login bills the API key instead
+            # and fails outright when that key is revoked. Say which one this is.
+            result = (True, "Codex is signed in with an OpenAI API key, not a ChatGPT account.")
+        else:
+            result = (ok, "Signed in to Codex with ChatGPT." if ok else "Codex is not signed in. Run `codex login`.")
     except (OSError, subprocess.SubprocessError) as exc:
         result = (False, f"Could not run Codex ({type(exc).__name__}).")
     _LOGIN_CACHE[str(binary)] = (time.monotonic(), result)
@@ -78,6 +130,7 @@ class CodexTransport:
             raise RuntimeError("Codex app-server executable unavailable")
         workdir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.max_call_s = max_call_s
+        self.binary = Path(binary)
         self.process = popen(
             [str(binary), "app-server", "--stdio", "--enable", "realtime_conversation"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -124,6 +177,14 @@ class CodexTransport:
             self.process.stdin.write(json.dumps(event) + "\n")
             self.process.stdin.flush()
 
+    def _fail(self, message: str) -> None:
+        # The raw reason goes only to the Hermes log (keys masked); the user sees the mapped one.
+        logger.warning("speakeasy: codex voice start failed: %s", _redacted(message))
+        explained = explain_codex_error(message)
+        if is_auth_error(message):
+            mark_signed_out(self.binary, explained)
+        raise CodexStartError(explained)
+
     def request(self, method: str, params: dict | None = None, timeout: float = 20) -> dict:
         waiter: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=1)
         with self.lock:
@@ -135,7 +196,7 @@ class CodexTransport:
             event = waiter.get(timeout=timeout)
             if "error" in event:
                 message = str((event.get("error") or {}).get("message") or "")
-                raise CodexStartError(explain_codex_error(message))
+                self._fail(message)
             return event.get("result") or {}
         except queue.Empty as exc:
             raise TimeoutError("Codex request timed out") from exc
@@ -184,10 +245,11 @@ class CodexTransport:
                 elif method == "thread/realtime/started" and p.get("threadId") == self.thread_id:
                     started = True
                 elif method in {"thread/realtime/error", "thread/realtime/closed", "transport/eof"}:
-                    raise CodexStartError(explain_codex_error(str(p.get("message") or "")))
+                    self._fail(str(p.get("message") or ""))
                 else:
                     deferred.append(event)
                 if answer and started:
+                    mark_signed_in(self.binary)
                     return answer
             raise TimeoutError("Codex realtime startup incomplete")
         finally:

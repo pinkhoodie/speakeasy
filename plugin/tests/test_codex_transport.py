@@ -67,7 +67,7 @@ def fake_codex(tmp_path, monkeypatch):
 
 
 def test_login_status_and_missing_binary(fake_codex):
-    assert C.login_status(fake_codex) == (True, "Signed in to Codex.")
+    assert C.login_status(fake_codex) == (True, "Signed in to Codex with ChatGPT.")
     ok, message = C.login_status(None)
     assert ok is False and "codex login" in message
 
