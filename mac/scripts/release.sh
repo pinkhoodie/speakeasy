@@ -61,8 +61,11 @@ shasum -a 256 "$DMG" | tee "$DMG.sha256"
 if [[ "$PUBLISH" == "--publish" ]]; then
     # Also as a fixed name, so https://github.com/rungmc357/speakeasy/releases/latest/download/Speakeasy.dmg
     # always downloads the newest app directly (the website's Download button).
+    # Only the fixed name is uploaded: the website, the in-app updater (which takes the first .dmg it
+    # finds) and every download all get "Speakeasy.dmg", never a versioned file next to an old one.
     cp "$DMG" "$ROOT/dist/Speakeasy.dmg"
-    gh release create "v$VERSION" "$DMG" "$DMG.sha256" "$ROOT/dist/Speakeasy.dmg" --title "Speakeasy $VERSION" \
+    (cd "$ROOT/dist" && shasum -a 256 Speakeasy.dmg > Speakeasy.dmg.sha256)
+    gh release create "v$VERSION" "$ROOT/dist/Speakeasy.dmg" "$ROOT/dist/Speakeasy.dmg.sha256" --title "Speakeasy $VERSION" \
         --notes "Signed and notarized macOS app (macOS 14+). Open the dmg and drag Speakeasy into Applications."
 fi
 echo "$DMG"

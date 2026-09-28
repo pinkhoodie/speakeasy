@@ -43,7 +43,10 @@ public enum UpdateCheck {
               let tag = object["tag_name"] as? String,
               let page = (object["html_url"] as? String).flatMap(URL.init(string:)) else { return nil }
         let assets = object["assets"] as? [[String: Any]] ?? []
-        let dmg = assets.first { ($0["name"] as? String)?.lowercased().hasSuffix(".dmg") == true }
+        // Prefer the fixed-name Speakeasy.dmg (what the website serves), so an update lands in Downloads
+        // under the same name every time; fall back to any .dmg for releases without it.
+        let dmgs = assets.filter { ($0["name"] as? String)?.lowercased().hasSuffix(".dmg") == true }
+        let dmg = dmgs.first { ($0["name"] as? String) == "Speakeasy.dmg" } ?? dmgs.first
         let download = (dmg?["browser_download_url"] as? String).flatMap(URL.init(string:))
         return Release(version: normalize(tag), pageURL: page, downloadURL: download)
     }

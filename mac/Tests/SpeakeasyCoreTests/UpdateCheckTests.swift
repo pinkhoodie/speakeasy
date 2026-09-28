@@ -40,4 +40,14 @@ final class UpdateCheckTests: XCTestCase {
         XCTAssertEqual(UpdateCheck.outcome(current: "0.1.0", latest: nil), .noReleases)
         XCTAssertNil(UpdateCheck.parse(Data(#"{"message":"Not Found"}"#.utf8)))
     }
+
+    func testPrefersTheFixedNameDmgOverTheVersionedOne() throws {
+        let json = #"""
+        {"tag_name":"v0.2.5","html_url":"https://github.com/rungmc357/speakeasy/releases/tag/v0.2.5",
+         "assets":[{"name":"Speakeasy-0.2.5.dmg","browser_download_url":"https://example.com/Speakeasy-0.2.5.dmg"},
+                   {"name":"Speakeasy.dmg","browser_download_url":"https://example.com/Speakeasy.dmg"}]}
+        """#
+        let release = try XCTUnwrap(UpdateCheck.parse(Data(json.utf8)))
+        XCTAssertEqual(release.downloadURL?.lastPathComponent, "Speakeasy.dmg")
+    }
 }
