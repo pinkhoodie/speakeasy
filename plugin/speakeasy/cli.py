@@ -64,6 +64,9 @@ def setup_parser(parser) -> None:
     set_.add_argument("key")
     set_.add_argument("value")
     sub.add_parser("status", help="Show voice provider, Hermes API and brief status")
+    routing = sub.add_parser("routing", help="Show or switch the model that routes voice requests")
+    routing.add_argument("choice", nargs="?", default="",
+                         help="default | deepseek-v4.1-flash | claude-sonnet-5.5 (omit to list)")
     reload_ = sub.add_parser("reload", help="Load a newly installed Speakeasy now, without restarting Hermes "
                                             "(ends a live call; running tasks keep going in Hermes)")
     reload_.add_argument("--timeout", type=float, default=30, help=argparse.SUPPRESS)
@@ -270,7 +273,7 @@ def _sync_thread_routes(home: Path, settings: Settings, out) -> None:
 
 def _print_routing_model(out) -> None:
     from .router import AUX_TASK, routing_model
-    out(f"• Task routing uses: {routing_model()}. Change it with `hermes model` → auxiliary tasks, or "
+    out(f"• Task routing uses: {routing_model()}. Switch it with `hermes voice routing`, or set "
         f"auxiliary.{AUX_TASK} in config.yaml.")
 
 
@@ -377,6 +380,28 @@ def cmd_config(args, home: Path) -> int:
     return 0
 
 
+def cmd_routing(home: Path, choice: str) -> int:
+    from . import hermes_config, routing_choice
+    if choice:
+        try:
+            state = routing_choice.choose(home, choice)
+        except (routing_choice.RoutingChoiceError, hermes_config.ConfigWriteRefused) as exc:
+            print(f"Error: {exc}")
+            return 2
+        picked = next(c for c in state["choices"] if c["id"] == state["current"])
+        print(f"Routing now uses {picked['label']}. Takes effect on the next request; no restart needed.")
+        return 0
+    state = routing_choice.choices(home)
+    for c in state["choices"]:
+        mark = "→" if c["id"] == state["current"] else " "
+        extra = "" if c["available"] else f"  ({c['reason']})"
+        print(f"{mark} {c['id']:<22} {c['label']}{extra}\n    {c['note']}")
+    if state["current"] == "custom":
+        print(f"→ custom: {state['custom']} (set by hand in config.yaml)")
+    print("\nSwitch with: hermes voice routing <choice>")
+    return 0
+
+
 def cmd_status(home: Path) -> int:
     from .service import VoiceService
     service = VoiceService(home, start_threads=False)
@@ -431,6 +456,8 @@ def handle(args) -> int:
         return cmd_status(home)
     if command == "reload":
         return cmd_reload(home, getattr(args, "timeout", 30))
+    if command == "routing":
+        return cmd_routing(home, getattr(args, "choice", ""))
     store = _store(home)
     if command == "devices":
         devices = store.devices()

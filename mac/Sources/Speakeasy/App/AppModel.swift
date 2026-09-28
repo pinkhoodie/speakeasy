@@ -290,6 +290,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Switch the model that routes voice requests. Takes effect on the next request.
+    func chooseRouting(_ model: String) async -> Bool {
+        guard let api else { lastError = "Not connected"; return false }
+        do {
+            let choices = try await api.chooseRouting(model)
+            if var s = status {
+                s.routingChoice = choices
+                s.routingModel = choices.choices.first { $0.id == choices.current }?.label ?? s.routingModel
+                status = s
+            }
+            if let s = try? await api.status() { status = s }
+            lastError = nil
+            return true
+        } catch {
+            lastError = "Couldn't switch the routing model: \(describe(error))"
+            return false
+        }
+    }
+
     /// Ask the user's Hermes to propose delivery channels. Returns suggestions, or sets `lastError`.
     func suggestChannels() async -> [ServerSettings.Channel]? {
         guard let api else { lastError = "Not connected"; return nil }

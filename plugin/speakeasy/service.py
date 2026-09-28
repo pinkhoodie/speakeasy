@@ -41,7 +41,8 @@ from .text import ID_RE, MAX_CARDS, TERMINAL, notice_text, split_result
 
 logger = logging.getLogger(__name__)
 
-ROUTING_HINT = "Change it with `hermes model` → auxiliary tasks, or in your Hermes config under auxiliary → speakeasy_router."
+ROUTING_HINT = ("Switch it here, or with `hermes voice routing <choice>`. Takes effect on the next request. "
+                "Anything else can be set in your Hermes config under auxiliary → speakeasy_router.")
 
 MAX_SDP = 96 * 1024
 PAUSE_NOTICE_AFTER_S = 15 * 60
@@ -711,6 +712,22 @@ class VoiceService:
     def get_settings(self) -> dict[str, Any]:
         return {"settings": self.settings.get()}
 
+    def routing_choices(self) -> dict[str, Any]:
+        from . import routing_choice
+        return routing_choice.choices(self.home)
+
+    def choose_routing(self, body: dict[str, Any]) -> dict[str, Any]:
+        from . import hermes_config, routing_choice
+        choice = body.get("model") if isinstance(body, dict) else None
+        if not isinstance(choice, str) or not choice.strip():
+            raise ServiceError(400, "model is required")
+        try:
+            return routing_choice.choose(self.home, choice)
+        except routing_choice.RoutingChoiceError as exc:
+            raise ServiceError(400, str(exc)) from None
+        except hermes_config.ConfigWriteRefused as exc:
+            raise ServiceError(409, f"Hermes config left unchanged: {exc}") from None
+
     def patch_settings(self, body: dict[str, Any]) -> dict[str, Any]:
         try:
             saved = self.settings.patch(body)
@@ -788,6 +805,7 @@ class VoiceService:
             "delivery_target": s["delivery"]["target"], **self.thread_status(),
             "continuity_enabled": s["continuity"]["enabled"], "devices": len(self.devices.devices()),
             "routing_model": routing_model(), "routing_hint": ROUTING_HINT,
+            "routing_choice": self.routing_choices(),
             "advertised_url": s["server"]["advertised_url"], "tailscale_name": s["server"]["tailscale_name"],
             "version": __version__,
         }

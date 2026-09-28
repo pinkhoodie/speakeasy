@@ -384,7 +384,7 @@ private struct BehaviorSettings: View {
             }
             .help("A hard cap per call so a forgotten call can't run up your plan or bill")
             Section("Task routing") {
-                LabeledContent("Routing model", value: app.status?.routingModel ?? "Unknown")
+                RoutingModelPicker(app: app)
                 Text(app.status?.routingHint ?? "Change it in your Hermes config under auxiliary → speakeasy_router.")
                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
@@ -729,4 +729,40 @@ func suggestedChannelLabel(_ destination: String) -> String {
     let last = destination.split(whereSeparator: { $0 == "·" || $0 == "/" }).last.map { $0.trimmingCharacters(in: .whitespaces) } ?? destination
     let name = last.hasPrefix("#") ? String(last.dropFirst()) : last
     return "#" + String(name.prefix(39))
+}
+
+
+/// Pick the model that routes voice requests. Falls back to a read-only label on older servers.
+struct RoutingModelPicker: View {
+    @ObservedObject var app: AppModel
+    @State private var saving = false
+
+    var body: some View {
+        if let routing = app.status?.routingChoice {
+            let selection = Binding<String>(
+                get: { routing.current },
+                set: { picked in
+                    guard picked != routing.current, picked != "custom" else { return }
+                    saving = true
+                    Task { _ = await app.chooseRouting(picked); saving = false }
+                })
+            Picker("Routing model", selection: selection) {
+                ForEach(routing.choices) { choice in
+                    Text(choice.available ? choice.label : "\(choice.label) — \(choice.reason)")
+                        .tag(choice.id)
+                        .disabled(!choice.available)
+                }
+                if routing.current == "custom" {
+                    Text("Custom: \(routing.custom)").tag("custom")
+                }
+            }
+            .disabled(saving)
+            if let note = routing.choices.first(where: { $0.id == routing.current })?.note, !note.isEmpty {
+                Text(note).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {
+            LabeledContent("Routing model", value: app.status?.routingModel ?? "Unknown")
+        }
+    }
 }

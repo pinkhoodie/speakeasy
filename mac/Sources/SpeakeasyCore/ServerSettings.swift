@@ -262,6 +262,8 @@ public struct ServerStatus: Codable, Equatable, Sendable {
     /// The model task routing uses (Hermes auxiliary task speakeasy_router), and how to change it.
     public var routingModel: String?
     public var routingHint: String?
+    /// The routing models the user can switch between (servers from plugin 0.2.19 on).
+    public var routingChoice: RoutingChoices?
     /// The address `hermes voice setup` advertised for other devices (empty = local only).
     public var advertisedURL: String?
     public var tailscaleName: String?
@@ -271,7 +273,7 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         case apiKeySet = "api_key_set", briefState = "brief_state", hermesAPIOK = "hermes_api_ok", version
         case threadsSupported = "threads_supported", voiceReady = "voice_ready"
         case threadsReason = "threads_reason", threadPlatforms = "thread_platforms", continuityEnabled = "continuity_enabled"
-        case routingModel = "routing_model", routingHint = "routing_hint"
+        case routingModel = "routing_model", routingHint = "routing_hint", routingChoice = "routing_choice"
         case advertisedURL = "advertised_url", tailscaleName = "tailscale_name"
     }
 
@@ -297,6 +299,7 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         continuityEnabled = try? c.decodeIfPresent(Bool.self, forKey: .continuityEnabled)
         routingModel = try? c.decodeIfPresent(String.self, forKey: .routingModel)
         routingHint = try? c.decodeIfPresent(String.self, forKey: .routingHint)
+        routingChoice = try? c.decodeIfPresent(RoutingChoices.self, forKey: .routingChoice)
         advertisedURL = try? c.decodeIfPresent(String.self, forKey: .advertisedURL)
         tailscaleName = try? c.decodeIfPresent(String.self, forKey: .tailscaleName)
     }
@@ -499,4 +502,28 @@ public enum ChannelSuggestions {
         }
         return out
     }
+}
+
+
+/// `GET /voice/routing`: the routing models on offer and which one is in use.
+public struct RoutingChoices: Codable, Equatable, Sendable {
+    public struct Choice: Codable, Equatable, Sendable, Identifiable {
+        public var id: String
+        public var label: String
+        public var note: String
+        public var available: Bool
+        public var reason: String
+        public init(id: String, label: String, note: String = "", available: Bool = true, reason: String = "") {
+            self.id = id; self.label = label; self.note = note; self.available = available; self.reason = reason
+        }
+    }
+    /// A preset id, or "custom" when the user set something by hand in config.yaml.
+    public var current: String
+    public var custom: String
+    public var choices: [Choice]
+    public init(current: String, custom: String = "", choices: [Choice]) {
+        self.current = current; self.custom = custom; self.choices = choices
+    }
+    public static func decode(_ data: Data) throws -> RoutingChoices { try JSONDecoder().decode(RoutingChoices.self, from: data) }
+    public static func postBody(model: String) throws -> Data { try JSONSerialization.data(withJSONObject: ["model": model]) }
 }

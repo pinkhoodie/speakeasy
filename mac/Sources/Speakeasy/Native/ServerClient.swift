@@ -87,6 +87,10 @@ final class ServerClient: @unchecked Sendable {
         let raw = try await data("/voice/destinations")
         return (Destination.list(raw), Destination.suggested(raw))
     }
+    func routingChoices() async throws -> RoutingChoices { try RoutingChoices.decode(try await data("/voice/routing")) }
+    func chooseRouting(_ model: String) async throws -> RoutingChoices {
+        try RoutingChoices.decode(try await data("/voice/routing", method: "POST", body: try RoutingChoices.postBody(model: model)))
+    }
     func onboarding() async throws -> OnboardingStatus { OnboardingStatus.parse(try await data("/voice/onboarding")) }
     func completeOnboarding(assistantName: String, userName: String, target: String?, continuity: Bool?) async throws {
         _ = try await data("/voice/onboarding", method: "POST", body: try OnboardingStatus.postBody(

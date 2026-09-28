@@ -163,6 +163,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/voice/status": self.service.status,
                 "/voice/destinations": self.service.destinations,
                 "/voice/onboarding": self.service.onboarding,
+                "/voice/routing": self.service.routing_choices,
             }
             if path in routes:
                 self._reply(200, routes[path]())
@@ -200,6 +201,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/voice/onboarding":
                 self._reply(200, self.service.save_onboarding(self._body()))
+                return
+            if path == "/voice/routing":
+                self._reply(200, self.service.choose_routing(self._body()))
                 return
             review = re.fullmatch(rf"/voice/reviews/{_ID}/dismiss", path)
             if review:

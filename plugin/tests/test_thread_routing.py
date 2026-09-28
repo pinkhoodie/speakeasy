@@ -202,3 +202,12 @@ def test_the_content_search_is_bounded_so_routing_is_not_kept_waiting(tmp_path, 
     continuity.conversations_with_context(db, "keep going on the thread routing fix for speakeasy tomorrow please")
     assert time.monotonic() - started < 1.0 and 1 <= len(seen) <= 3
     assert seen[0] == max(seen, key=len)  # longest (rarest) words first
+
+
+def test_the_model_call_gets_the_whole_routing_budget(monkeypatch):
+    """The default model call must not give up before routing does (it used to stop at 3 s while
+    routing waited 5 s whenever conversations were in play)."""
+    seen = []
+    monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S: seen.append(timeout) or None)
+    router.decide("keep going on that", [], None, [], None, chats=CHATS)
+    assert seen == [router.CHAT_ROUTE_TIMEOUT_S]

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import dataclasses
+import functools
 import json
 import logging
 import re
@@ -529,7 +530,10 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
     if chats:
         timeout = max(timeout, CHAT_ROUTE_TIMEOUT_S)
     if needs_model(request, open_tasks, topics, chats):
-        future = _EXECUTOR.submit(call or aux_call, route_messages(request, open_tasks, topics, chats, call_so_far))
+        # The model call gets the same budget routing waits for (it used to stop at the 3 s default
+        # while routing waited 5 s, so every slow reply burned a retry and a fallback that could not land).
+        model_call = call or functools.partial(aux_call, timeout=timeout)
+        future = _EXECUTOR.submit(model_call, route_messages(request, open_tasks, topics, chats, call_so_far))
         try:
             decision = parse_decision(future.result(timeout=timeout), request, open_tasks, topics, chats)
         except Exception as exc:  # timeout or provider error: the rules below
@@ -555,5 +559,12 @@ def routing_model(config: dict[str, Any] | None = None) -> str:
     provider = str(block.get("provider") or "auto").strip() or "auto"
     model = str(block.get("model") or "").strip()
     if provider == "auto" and not model:
-        return "Hermes auxiliary default (auto)"
+        return "Hermes default (your main model)"
+    try:
+        from .routing_choice import PRESETS
+        for preset in PRESETS[1:]:
+            if preset["config"]["provider"] == provider and preset["config"]["model"] == model:
+                return preset["label"]
+    except Exception:
+        pass
     return f"{provider} · {model}" if model else provider
