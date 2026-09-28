@@ -70,7 +70,8 @@ class VoiceService:
                  openai_worker: Callable[..., Any] | None = None, codex_login: Callable[..., Any] | None = None,
                  brief_run: Callable[[str, str], tuple[str, str]] | None = None, start_threads: bool = True,
                  route_call: Callable[..., Any] | None = None, thread_runner: Any = None,
-                 suggest_run: Callable[[str, str], tuple[str, str]] | None = None):
+                 suggest_run: Callable[[str, str], tuple[str, str]] | None = None,
+                 title_call: Callable[[str], str | None] | None = None):
         self.home = Path(hermes_home)
         self.dir = self.home / "speakeasy"
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -85,7 +86,7 @@ class VoiceService:
                                lambda: P.Names.from_settings(self.settings.get()))
         self.rt = Runtime(store=self.store, hermes=self.hermes, settings=self.settings.get, hermes_home=self.home,
                           image_roots=self.image_roots, notices=self.notices, hermes_key=self.hermes_key,
-                          route_call=route_call,
+                          route_call=route_call, title_call=title_call,
                           threads=thread_runner or ThreadRunner(self.home, D.threads_supported))
         self._suggest_run = suggest_run or self._brief_run
         self.brief = BriefManager(self.home, brief_run or self._brief_run, self.settings.get,

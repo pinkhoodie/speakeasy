@@ -558,3 +558,52 @@ def test_a_tail_during_a_thread_task_joins_that_thread(server, service, hermes, 
     assert sent[0][0] == "thread_session_1" and "gonna win" in sent[0][1]
     final = wait_for(lambda: [t for t in panel() if t["status"] == "completed" and "12" in str(t.get("result"))])
     assert len(panel()) == 1 and len(tasks(server)) == 1 and final
+
+
+def test_task_gets_a_semantic_name_after_the_instant_label(home, hermes):
+    from speakeasy.service import VoiceService
+    from fakes import FakeLiveWorker, FakeTransport
+    workers = []
+    svc = VoiceService(home, notifier=None, start_threads=False, codex_factory=FakeTransport,
+                       openai_negotiate=lambda key, payload: {"session": {"id": "sess_fake"}, "transport": {"sdp": "v=0\r\n"}},
+                       openai_worker=lambda rt, i: workers.append(FakeLiveWorker(rt, i)) or workers[-1],
+                       route_call=lambda m: None,
+                       title_call=lambda request: "Tomorrow's weather in New York")
+    svc.settings.patch({"voice": {"provider": "openai"}})
+    try:
+        svc.create_session({"sdp": SDP}, "req_title")
+        workers[-1].delegate("call_t", "What's the weather going to look like tomorrow in New York")
+        wait_for(lambda: len(hermes.calls) == 1)
+        key = next(iter(workers[-1].interaction.runs.values())).idem_key
+        wait_for(lambda: svc.store.title(key) == "Tomorrow's weather in New York")
+    finally:
+        svc.close()
+
+
+def test_semantic_name_never_overwrites_a_better_name(home, hermes):
+    from speakeasy.service import VoiceService
+    from fakes import FakeLiveWorker, FakeTransport
+    import threading
+    gate = threading.Event()
+    workers = []
+
+    def slow_title(request):
+        gate.wait(5)
+        return "Model title"
+
+    svc = VoiceService(home, notifier=None, start_threads=False, codex_factory=FakeTransport,
+                       openai_negotiate=lambda key, payload: {"session": {"id": "sess_fake"}, "transport": {"sdp": "v=0\r\n"}},
+                       openai_worker=lambda rt, i: workers.append(FakeLiveWorker(rt, i)) or workers[-1],
+                       route_call=lambda m: None, title_call=slow_title)
+    svc.settings.patch({"voice": {"provider": "openai"}})
+    try:
+        svc.create_session({"sdp": SDP}, "req_title2")
+        workers[-1].delegate("call_t2", "Check the status of my league team")
+        wait_for(lambda: len(hermes.calls) == 1)
+        key = next(iter(workers[-1].interaction.runs.values())).idem_key
+        svc.store.set_title(key, "Thread name from Hermes")
+        gate.set()
+        time.sleep(0.5)
+        assert svc.store.title(key) == "Thread name from Hermes"
+    finally:
+        svc.close()

@@ -61,6 +61,8 @@ class Runtime:
     # new-thread runner (None = channels only get results posted, never a thread).
     route_call: Callable[[list[dict[str, str]]], str | None] | None = None
     threads: Any = None
+    # Names a task by what it's about (None = Hermes' session titler; returns None when unavailable).
+    title_call: Callable[[str], str | None] | None = None
 
     @property
     def names(self) -> P.Names:
@@ -350,6 +352,25 @@ class SidebandWorker:
     @property
     def names(self) -> P.Names:
         return self.rt.names
+
+    def name_task(self, idem: str, request: str | None) -> None:
+        """Show the instant word-based label now, then swap in a proper name once Hermes' titler
+        answers, unless something better (a thread's name) has replaced the label meanwhile."""
+        provisional = short_title(request)
+        self.store.set_title(idem, provisional)
+        if not request or not provisional:
+            return
+        titler = self.rt.title_call or router.smart_title
+
+        async def upgrade() -> None:
+            title = await asyncio.to_thread(titler, request)
+            if title and title != provisional and self.store.title(idem) == provisional:
+                self.store.set_title(idem, title)
+                self.publish()
+
+        task = asyncio.get_running_loop().create_task(upgrade())
+        self.dispatch_tasks.add(task)
+        task.add_done_callback(self.dispatch_tasks.discard)
 
     def publish(self) -> None:
         name = self.names.assistant_name
@@ -744,7 +765,7 @@ class SidebandWorker:
         self.record_timing(task_id, idem)
         if request:
             self.store.progress(idem, "request", request)
-            self.store.set_title(idem, short_title(request))
+            self.name_task(idem, request)
         with self.interaction.lock:
             others = [r.idem_key for r in self.interaction.runs.values()
                       if r.delegation_id != task_id and r.status in ACTIVE_RUN_STATES]
@@ -808,7 +829,7 @@ class SidebandWorker:
         self.record_timing(task_id, idem)
         self.store.set_continued(idem, conv.session_id, conv.where)
         self.store.progress(idem, "request", request)
-        self.store.set_title(idem, short_title(request))
+        self.name_task(idem, request)
         self.store.progress(idem, "milestone", f"Continuing in {where}")
         if joins is not None:
             self.store.hide_key(idem)
@@ -912,7 +933,7 @@ class SidebandWorker:
         where = f"a new {channel.label} thread"
         self.record_timing(task_id, idem)
         self.store.progress(idem, "request", request)
-        self.store.set_title(idem, short_title(request))
+        self.name_task(idem, request)
         self.store.update_run(idem, None, "running")
         self.store.progress(idem, "milestone", f"Started in {where}")
         with self.interaction.lock:

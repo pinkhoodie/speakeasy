@@ -33,6 +33,7 @@ AUX_TASK = "speakeasy_router"
 AUX_DISPLAY_NAME = "Speakeasy task routing"
 AUX_DESCRIPTION = "Decides, per spoken request, follow-up vs new task, splits compound asks, and picks a chat channel."
 ROUTE_TIMEOUT_S = 3.0
+TITLE_TIMEOUT_S = 15.0
 _EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="speakeasy-router")
 NEW = "new"
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -202,6 +203,24 @@ def aux_call(messages: list[dict[str, str]], timeout: float = ROUTE_TIMEOUT_S) -
     with _profile_scope():
         response = call_llm(task=AUX_TASK, messages=messages, temperature=0, max_tokens=300, timeout=timeout)
     return extract_content_or_reasoning(response)
+
+
+def smart_title(request: str, timeout: float = TITLE_TIMEOUT_S) -> str | None:
+    """A to-do style name for a voice task from Hermes' own session titler (task
+    ``title_generation``), in this plugin's profile scope. None when unavailable; callers keep the
+    instant word-based label."""
+    try:
+        from agent.title_generator import generate_title  # type: ignore
+    except Exception:
+        return None
+    try:
+        with _profile_scope():
+            title = generate_title(request, timeout=timeout)
+    except Exception as exc:
+        logger.info("speakeasy: task title unavailable (%s)", type(exc).__name__)
+        return None
+    title = " ".join(str(title or "").split()).strip(" .")
+    return title[:60] or None
 
 
 _HOME: str | None = None
