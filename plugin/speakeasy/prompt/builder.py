@@ -328,7 +328,18 @@ def thread_task_message(names: Names, request: str, summary: str, context: str) 
                 "follow up, so write for reading here: lead with the outcome in one or two plain sentences. Approval "
                 "prompts cannot be answered from voice: if a step needs {possessive_approval}, stop before it and ask "
                 "{user_name} to confirm here in the thread.", names,
-                possessive_approval=f"{names.possessive} explicit approval"))
+                possessive_approval=f"{names.possessive} explicit approval")
+            + "\n\n" + render(THREAD_EMAIL_DRAFT_RULE, names))
+
+
+THREAD_EMAIL_DRAFT_RULE = (
+    "If this produces an email to send on {user_possessive} behalf, do NOT send it or save it anywhere. Show the "
+    "draft readably in your reply, then end the reply with a fenced block labeled `email-draft` containing one JSON "
+    "object: {\"from\": \"<sender address>\", \"to\": [\"...\"], \"cc\": [], \"bcc\": [], \"subject\": \"...\", "
+    "\"body\": \"<plain text>\", \"reply_to_message_id\": \"<optional>\", \"account\": \"<optional mail account>\"}. "
+    "{user_name_cap} reviews it on a card in the Speakeasy app and approves, denies or asks for changes there; you "
+    "will be told in this thread. Never send an email without that approval message."
+)
 
 
 def without_voice_header(text: str) -> str:

@@ -568,7 +568,8 @@ def test_task_gets_a_semantic_name_after_the_instant_label(home, hermes):
                        openai_negotiate=lambda key, payload: {"session": {"id": "sess_fake"}, "transport": {"sdp": "v=0\r\n"}},
                        openai_worker=lambda rt, i: workers.append(FakeLiveWorker(rt, i)) or workers[-1],
                        route_call=lambda m: None,
-                       title_call=lambda request: "Tomorrow's weather in New York")
+                       title_call=lambda request: "Tomorrow's weather in New York",
+                       polish_call=lambda request: "What will the weather be like in New York tomorrow?")
     svc.settings.patch({"voice": {"provider": "openai"}})
     try:
         svc.create_session({"sdp": SDP}, "req_title")
@@ -576,6 +577,9 @@ def test_task_gets_a_semantic_name_after_the_instant_label(home, hermes):
         wait_for(lambda: len(hermes.calls) == 1)
         key = next(iter(workers[-1].interaction.runs.values())).idem_key
         wait_for(lambda: svc.store.title(key) == "Tomorrow's weather in New York")
+        wait_for(lambda: (svc.store.work(idem_key=key) or {}).get("summary")
+                 == "What will the weather be like in New York tomorrow?")
+        assert svc.store.request_text(key).startswith("What's the weather going")  # raw words kept
     finally:
         svc.close()
 
@@ -594,7 +598,7 @@ def test_semantic_name_never_overwrites_a_better_name(home, hermes):
     svc = VoiceService(home, notifier=None, start_threads=False, codex_factory=FakeTransport,
                        openai_negotiate=lambda key, payload: {"session": {"id": "sess_fake"}, "transport": {"sdp": "v=0\r\n"}},
                        openai_worker=lambda rt, i: workers.append(FakeLiveWorker(rt, i)) or workers[-1],
-                       route_call=lambda m: None, title_call=slow_title)
+                       route_call=lambda m: None, title_call=slow_title, polish_call=lambda r: None)
     svc.settings.patch({"voice": {"provider": "openai"}})
     try:
         svc.create_session({"sdp": SDP}, "req_title2")
@@ -607,3 +611,37 @@ def test_semantic_name_never_overwrites_a_better_name(home, hermes):
         assert svc.store.title(key) == "Thread name from Hermes"
     finally:
         svc.close()
+
+
+def test_polished_request_rejects_answers_and_junk():
+    said = "um so like check the weather tomorrow in new york I guess"
+    assert router.clean_polished('{"request": "Check the weather in New York tomorrow."}', said) \
+        == "Check the weather in New York tomorrow."
+    assert router.clean_polished("```json\n{\"request\": \"Check the weather.\"}\n```", said) == "Check the weather."
+    assert router.clean_polished('{"request": ""}', said) is None
+    assert router.clean_polished('{"request": "' + "It will be sunny with highs near 70. " * 10 + '"}', said) is None
+    assert router.clean_polished("{not json", said) is None
+
+
+def test_thread_task_asks_for_an_email_draft_card():
+    names = P.Names.from_settings(S.validate({}))
+    message = P.thread_task_message(names, "draft an email to myself with my Portugal details", "Portugal email", "")
+    assert "`email-draft`" in message and "do NOT send" in message
+
+
+def test_thread_email_draft_becomes_an_approvable_card(server, service, hermes):
+    draft = {"from": "me@example.com", "to": ["me@example.com"], "cc": [], "bcc": [],
+             "subject": "Portugal trip details", "body": "Flights and hotels."}
+    answer = ("Voice: Portugal email\nHere is the draft.\n\n```email-draft\n" + json.dumps(draft)
+              + "\n```\nDONE: drafted\nSPOKEN: I drafted it; approve on the card.")
+    service.rt.threads = FakeThreads(answer=answer)
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [dict(WORK, new_thread=True)]}})
+    _, worker = start_call(server, service)
+    worker.delegate("call_e", "Put this in work: draft an email to myself with my Portugal details")
+    done = wait_for(lambda: [t for t in tasks(server) if t["status"] == "completed"])[0]
+    assert "email-draft" not in done["result"]["full"]
+    key = next(iter(worker.interaction.runs.values())).idem_key
+    cards = service.store.drafts_for(key)
+    assert len(cards) == 1 and cards[0]["subject"] == "Portugal trip details" and cards[0]["status"] == "pending"
+    # Approving goes back into the thread's own session, never a fresh one.
+    assert service.store.draft(cards[0]["draft_id"])["_session_id"] == "thread_session_1"

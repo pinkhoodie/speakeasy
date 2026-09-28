@@ -63,6 +63,8 @@ class Runtime:
     threads: Any = None
     # Names a task by what it's about (None = Hermes' session titler; returns None when unavailable).
     title_call: Callable[[str], str | None] | None = None
+    # The spoken request as clean written text (None = the title model; returns None when unavailable).
+    polish_call: Callable[[str], str | None] | None = None
 
     @property
     def names(self) -> P.Names:
@@ -361,11 +363,19 @@ class SidebandWorker:
         if not request or not provisional:
             return
         titler = self.rt.title_call or router.smart_title
+        polisher = self.rt.polish_call or router.polish_request
 
         async def upgrade() -> None:
-            title = await asyncio.to_thread(titler, request)
+            title, polished = await asyncio.gather(asyncio.to_thread(titler, request),
+                                                   asyncio.to_thread(polisher, request))
+            changed = False
             if title and title != provisional and self.store.title(idem) == provisional:
                 self.store.set_title(idem, title)
+                changed = True
+            if polished:
+                self.store.set_title(idem, None, summary=polished)
+                changed = True
+            if changed:
                 self.publish()
 
         task = asyncio.get_running_loop().create_task(upgrade())

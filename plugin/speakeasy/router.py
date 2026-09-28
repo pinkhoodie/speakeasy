@@ -223,6 +223,55 @@ def smart_title(request: str, timeout: float = TITLE_TIMEOUT_S) -> str | None:
     return title[:60] or None
 
 
+_POLISH_PROMPT = (
+    "You tidy a spoken request so it reads cleanly as a written one. Rewrite the user's message as "
+    "one or two clear sentences in their own voice (first person, addressed to their assistant).\n"
+    "Rules:\n"
+    "- Remove filler (um, like, you know, I don't know) and false starts.\n"
+    "- Fix obvious speech-to-text slips when the intended word is clear from context.\n"
+    "- Keep every name, number, place, date and specific detail; add nothing new.\n"
+    "- Proper capitalization and punctuation. Never answer or comment on the request.\n"
+    'Reply with JSON only: {"request": "..."}'
+)
+
+
+def polish_request(request: str, timeout: float = TITLE_TIMEOUT_S) -> str | None:
+    """The spoken request as a clean written sentence, for the task detail's "Your request".
+    Same model as Hermes' session titles (task ``title_generation``). None when unavailable."""
+    text = " ".join(str(request or "").split())
+    if not text:
+        return None
+    try:
+        from agent.auxiliary_client import call_llm  # type: ignore
+    except Exception:
+        return None
+    try:
+        with _profile_scope():
+            response = call_llm(task="title_generation",
+                                messages=[{"role": "system", "content": _POLISH_PROMPT},
+                                          {"role": "user", "content": text[:1200]}],
+                                max_tokens=400, temperature=None, timeout=timeout,
+                                reasoning_config={"enabled": False})
+        raw = (response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.info("speakeasy: request polish unavailable (%s)", type(exc).__name__)
+        return None
+    return clean_polished(raw, text)
+
+
+def clean_polished(raw: str, original: str) -> str | None:
+    """Accept only a plausible rewrite: parsed, non-empty, not much longer than what was said."""
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
+    try:
+        value = json.loads(raw).get("request") if raw.startswith("{") else raw
+    except (ValueError, AttributeError):
+        return None
+    value = " ".join(str(value or "").split()).strip('"\u201c\u201d ')
+    if not value or len(value) > len(original) * 1.5 + 40:
+        return None
+    return value
+
+
 _HOME: str | None = None
 
 
