@@ -66,6 +66,8 @@ class Runtime:
     # The spoken request as clean written text (None = the title model; returns None when unavailable).
     polish_call: Callable[[str], str | None] | None = None
     status_call: Callable[[str], str | None] | None = None
+    # Optional instant light/thermostat control (home_control.HomeControl); None or inactive = off.
+    home: Any = None
 
     @property
     def names(self) -> P.Names:
@@ -641,6 +643,8 @@ class SidebandWorker:
             return
         last_request = next((line[6:].strip() for line in reversed(context.splitlines())
                              if line.startswith("User: ")), "")
+        if await self.home_control(delegation_id, last_request, marked):
+            return
         decision = await asyncio.to_thread(self.rt.route, last_request, self.open_tasks(), marked)
         self.route_timings[delegation_id] = decision.latency_ms
         part = decision.parts[0]
@@ -658,6 +662,25 @@ class SidebandWorker:
             await self.start_parts(delegation_id, revision, context, [p.request for p in decision.parts], choice)
             return
         await self.start_routed(delegation_id, revision, context, last_request, choice)
+
+    async def home_control(self, delegation_id: str, request: str, marked: Any = None) -> bool:
+        """A clear light/thermostat command, answered straight from Home Assistant (opt-in). True when
+        it was handled and spoken; False sends the request on to Hermes unchanged. No task card: the
+        spoken line is the whole result, and nothing runs in the background."""
+        home = self.rt.home
+        if home is None or not request or (isinstance(marked, str) and marked):
+            return False
+        try:
+            reply = await asyncio.to_thread(home.respond, request, self.names.assistant_name)
+        except Exception as exc:  # never let the fast path break a request
+            logger.warning("speakeasy: home control failed, using Hermes (%s)", type(exc).__name__)
+            return False
+        if reply is None:
+            return False
+        self.handoff_at.pop(delegation_id, None)
+        logger.info("speakeasy: home control %s", "done" if reply.ok else "not done")
+        await self.append("session.commentary.append", delegation_id, reply.spoken)
+        return True
 
     async def start_parts(self, delegation_id: str, revision: int, context: str, parts: list[str],
                           choice: channels.Choice) -> None:

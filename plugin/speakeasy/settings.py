@@ -35,6 +35,9 @@ DEFAULTS: dict[str, Any] = {
     # A brief spoken update on long tasks. (Where a task went, e.g. a new thread, is always said.)
     "speech": {"progress": True},
     "brief": {"auto_refresh": True, "include_recent_voice": True},
+    # Optional: simple light/thermostat requests go straight to Home Assistant during a call. Off by
+    # default; `hermes voice home on` turns it on only when Hermes already has Home Assistant set up.
+    "home_control": {"enabled": False},
     "image_roots": [],
     # Written by `hermes voice setup`: the URL other devices use to reach this server (a tailnet
     # HTTPS name when Tailscale was imported), reused by `hermes voice pair`.
@@ -109,7 +112,7 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
     s["delivery"] = validate_delivery(s["delivery"])
     s["server"] = validate_server(s["server"])
     for group, keys in (("continuity", ("enabled",)), ("speech", ("progress",)), ("brief", ("auto_refresh", "include_recent_voice")),
-                        ("onboarding", ("names_set", "delivery_set"))):
+                        ("onboarding", ("names_set", "delivery_set")), ("home_control", ("enabled",))):
         for key in keys:
             if not isinstance(s[group].get(key), bool):
                 raise SettingsError(f"{group}.{key} must be true or false")

@@ -73,6 +73,29 @@ Routing (follow-up or new task, splitting "do X and Y", picking a channel) uses 
 your Hermes auxiliary model `speakeasy_router`; pick its model with `hermes model` → auxiliary
 tasks. If it's slow or fails, simple built-in rules take over.
 
+## Instant home control (optional)
+
+If your Hermes already controls Home Assistant (`HASS_URL` and `HASS_TOKEN` in its `.env`), Speakeasy
+can handle simple light and thermostat requests itself during a call, in about a second, instead of
+starting a full Hermes task. It is off until you turn it on:
+
+    hermes voice home on       # checks Hermes' Home Assistant settings, then turns it on
+    hermes voice home off
+    hermes voice home          # shows whether it's on
+
+It only handles:
+
+- **Lights:** on, off, brightness, by the name or area Home Assistant uses ("turn off the kitchen
+  lights", "set the desk lamp to 40 percent"), and "turn off all the lights".
+- **Thermostats:** set a temperature, switch to heat, cool or off, and "what's it set to?". With
+  several thermostats, name one; after that, "set it to 70" uses the one you used last.
+
+Everything else goes to Hermes exactly as before: locks, doors, garage, blinds, alarms, TVs and music,
+scenes and scripts, requests with "and", "then" or a time, and anything unclear (no match, or more
+than one possible device). The voice only says it's done after Home Assistant confirms. If Home
+Assistant can't be reached or refuses the token, it says so and offers to hand the request to Hermes.
+Turning it on never changes your Hermes `config.yaml` or `.env`; the token stays in Hermes.
+
 ## Contributing
 
 Building from source, running the tests and releasing: see [CONTRIBUTING.md](CONTRIBUTING.md).

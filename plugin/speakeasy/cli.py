@@ -64,6 +64,8 @@ def setup_parser(parser) -> None:
     set_.add_argument("key")
     set_.add_argument("value")
     sub.add_parser("status", help="Show voice provider, Hermes API and brief status")
+    home = sub.add_parser("home", help="Instant light and thermostat control through Home Assistant (optional)")
+    home.add_argument("state", nargs="?", choices=("on", "off", "status"), default="status")
 
 
 # -- helpers --------------------------------------------------------------------------------------
@@ -374,6 +376,23 @@ def cmd_config(args, home: Path) -> int:
     return 0
 
 
+def cmd_home(args, home: Path, check=None) -> int:
+    """`hermes voice home on|off|status`. On only when Hermes already has Home Assistant set up
+    (and it answers); writes only Speakeasy's settings."""
+    from . import home_control as HC
+    state = getattr(args, "state", "status") or "status"
+    if state == "status":
+        enabled = Settings(home).get()["home_control"]["enabled"]
+        ready = HC.credentials(home) is not None
+        print(f"Instant home control: {'on' if enabled else 'off'}"
+              + ("" if ready else f" (Home Assistant isn't set up in Hermes: {HC.TOKEN_ENV} is missing)"))
+        print("Lights and thermostats only; everything else goes to Hermes. Turn it on with `hermes voice home on`.")
+        return 0
+    ok, message = HC.enable(home, state == "on", check=check or HC.check_connection)
+    print(("✓ " if ok else "✗ ") + message)
+    return 0 if ok else 1
+
+
 def cmd_status(home: Path) -> int:
     from .service import VoiceService
     service = VoiceService(home, start_threads=False)
@@ -397,6 +416,8 @@ def handle(args) -> int:
         return cmd_config(args, home)
     if command == "status":
         return cmd_status(home)
+    if command == "home":
+        return cmd_home(args, home)
     store = _store(home)
     if command == "devices":
         devices = store.devices()
@@ -412,5 +433,5 @@ def handle(args) -> int:
             return 0
         print(f"No device {args.device_id}.")
         return 1
-    print("Usage: hermes voice {setup|pair|devices|revoke <id>|config get|set|status}")
+    print("Usage: hermes voice {setup|pair|devices|revoke <id>|config get|set|status|home on|off}")
     return 2

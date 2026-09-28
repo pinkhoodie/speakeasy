@@ -90,6 +90,10 @@ class VoiceService:
                           image_roots=self.image_roots, notices=self.notices, hermes_key=self.hermes_key,
                           route_call=route_call, title_call=title_call, polish_call=polish_call, status_call=status_call,
                           threads=thread_runner or ThreadRunner(self.home, D.threads_supported))
+        from .home_control import HomeControl, credentials
+        self.home_control = HomeControl(lambda: self.settings.get()["home_control"]["enabled"],
+                                        lambda: credentials(self.home))
+        self.rt.home = self.home_control
         self._suggest_run = suggest_run or self._brief_run
         self.brief = BriefManager(self.home, brief_run or self._brief_run, self.settings.get,
                                   error_fn=lambda: getattr(self.hermes, "last_error", "") or "")
@@ -726,7 +730,8 @@ class VoiceService:
             "api_key_set": api_key_set, "brief_state": self.brief.status()["state"],
             "hermes_api_ok": self.hermes.health(), "hermes_api_key_set": bool(self.hermes_key()),
             "delivery_target": s["delivery"]["target"], **self.thread_status(),
-            "continuity_enabled": s["continuity"]["enabled"], "devices": len(self.devices.devices()),
+            "continuity_enabled": s["continuity"]["enabled"],
+            "home_control_enabled": s["home_control"]["enabled"], "devices": len(self.devices.devices()),
             "routing_model": routing_model(), "routing_hint": ROUTING_HINT,
             "advertised_url": s["server"]["advertised_url"], "tailscale_name": s["server"]["tailscale_name"],
             "version": __version__,
