@@ -34,7 +34,11 @@ from Hermes media, "while you were away" recap on the next call, optional heads-
 one Hermes chat target (`hermes send`) when a task finishes after the call ended, and thread
 continuity: a spoken request that clearly refers to a recent Hermes chat on any platform (matched
 against `state.db` session titles/chat names) continues that Hermes session instead of starting a
-new one.
+new one, and Speakeasy posts the answer into that chat with `hermes send`.
+
+Hermes `config.yaml`: Speakeasy changes it only during `hermes voice setup` (turns on the voice
+platform and adds itself to `plugins.enabled`), through `hermes_config.update()`, which only adds
+settings and refuses to write a config it cannot read. Nothing at runtime writes it.
 
 Email approval cards: a task that writes an email ends its answer with a fenced `email-draft` JSON
 block instead of sending it. The server strips and validates it, stores it with a `draft_id` and a

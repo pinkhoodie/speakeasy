@@ -26,7 +26,6 @@ RECENT_DAYS = 21
 MIN_OVERLAP = 2
 # Platforms whose sessions are the user's own chats. Internal sources never qualify.
 EXCLUDED_SOURCES = {"cron", "subagent", "cli", "tool", "api_server", "webhook", "oneshot", "voice", "acp"}
-ALIAS_PREFIX = "speakeasy:"
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_:@.+=-]{1,128}$")
 
 _CONTINUE_CUES = re.compile(
@@ -61,15 +60,12 @@ class Conversation:
         return f"{self.platform.title()} \"{self.label}\""
 
     @property
-    def session_key(self) -> str:
-        return f"{ALIAS_PREFIX}{self.platform}:{self.thread_id or self.chat_id}"
-
-    def alias(self) -> dict[str, str]:
-        out = {"platform": self.platform, "chat_id": self.chat_id, "chat_type": self.chat_type or "dm"}
-        for key in ("thread_id", "user_id", "parent_chat_id"):
-            value = getattr(self, key)
-            if value:
-                out[key] = value
+    def target(self) -> str:
+        """Where `hermes send` posts into this chat: `platform:chat_id`, plus the thread/topic when
+        it is separate from the chat (Telegram topics; a Discord thread is its own chat id)."""
+        out = f"{self.platform}:{self.chat_id}"
+        if self.thread_id and self.thread_id != self.chat_id:
+            out += f":{self.thread_id}"
         return out
 
 
@@ -123,9 +119,9 @@ def recent_conversations(state_db: Path, *, days: int = RECENT_DAYS, limit: int 
     out, seen = [], set()
     for row in rows:
         conv = _from_row(*row)
-        if conv is None or conv.session_key in seen:
+        if conv is None or conv.target in seen:  # one entry per chat, newest first
             continue
-        seen.add(conv.session_key)
+        seen.add(conv.target)
         out.append(conv)
     return out
 
@@ -192,34 +188,6 @@ def match(request: str, conversations: list[Conversation]) -> Conversation | Non
     return scored[0][2]
 
 
-def ensure_alias(conv: Conversation) -> bool:
-    """Add a `session_key_aliases` entry for this conversation to Hermes' config, so the reply
-    fans out to the native chat. Returns False when not possible (then the turn still runs,
-    it only is not mirrored). Never removes or rewrites any other setting."""
-    try:
-        from hermes_cli.config import get_config_path  # type: ignore
-    except Exception:
-        return False
-    from . import hermes_config
-
-    def add_alias(cfg: dict) -> bool:
-        aliases = cfg.get("session_key_aliases")
-        if not isinstance(aliases, dict):
-            if aliases is not None:
-                return False  # unexpected shape: leave the user's value alone
-            aliases = cfg["session_key_aliases"] = {}
-        if aliases.get(conv.session_key) == conv.alias():
-            return False
-        aliases[conv.session_key] = conv.alias()
-        return True
-
-    try:
-        hermes_config.update(get_config_path(), add_alias)
-        return True
-    except Exception:
-        return False
-
-
 def stream_session_chat(base: str, key: str, conv: Conversation, message: str,
                         callback: Callable[[str, dict[str, Any]], None], timeout: float = 1800,
                         opener: Callable[..., Any] = urllib.request.urlopen) -> bool:
@@ -231,7 +199,6 @@ def stream_session_chat(base: str, key: str, conv: Conversation, message: str,
         req.add_header("Authorization", f"Bearer {key}")
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "text/event-stream")
-    req.add_header("X-Hermes-Session-Key", conv.session_key)
     name, terminal, total = None, False, 0
     with opener(req, timeout=timeout) as response:
         for raw in response:

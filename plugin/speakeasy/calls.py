@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import channels, continuity, router
+from .settings import valid_delivery_target
 from .prompt import builder as P
 from .text import (ID_RE, MAX_TRANSCRIPT, TERMINAL, clean_transcript, delivery_text, derive_tool_status,
                    interim_progress, notice_text, safe_user_text, short_title, split_result)
@@ -827,7 +828,6 @@ class SidebandWorker:
             await asyncio.sleep(CONTINUITY_POLL_S)
             waited += CONTINUITY_POLL_S
         try:
-            await asyncio.to_thread(continuity.ensure_alias, conv)
             message = P.continuation_message(self.names, request, notice_text(request, 200) or "voice request")
             loop = asyncio.get_running_loop()
             final: dict[str, Any] = {}
@@ -858,7 +858,11 @@ class SidebandWorker:
                     await self.reconcile_stream_end(backend)
                     return
                 raise ServiceError(502, "conversation stream ended without a result")
-            await self.handle_hermes_event(backend, {"event": f"run.{status}", "output": output, "continued": True})
+            # The turn ran in the conversation's own session (its history), over the local API. Post
+            # the answer into that chat ourselves, like any routed answer; Hermes config is untouched.
+            if valid_delivery_target(conv.target):
+                backend.deliver_to = conv.target
+            await self.handle_hermes_event(backend, {"event": f"run.{status}", "output": output})
         except Exception as exc:
             self.store.update_run(idem, None, "failed")
             self.store.progress(idem, "result", "Work failed; details unavailable")

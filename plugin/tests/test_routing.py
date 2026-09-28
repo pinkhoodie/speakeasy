@@ -340,35 +340,45 @@ def test_thread_capability_needs_the_webhook_platform(tmp_path):
     assert threads.capability(tmp_path, False)["supported"] is False
 
 
-def test_ensure_alias_keeps_unrelated_hermes_configuration(tmp_path, monkeypatch):
-    import hermes_cli.config as config
-    import yaml
+def test_continuing_a_chat_posts_there_and_never_writes_hermes_config(server, service, hermes, home, monkeypatch):
+    """A voice request continued in an existing Discord thread runs in that session and the answer
+    is posted into the thread by Speakeasy itself. Hermes' config.yaml is not written at all."""
+    conv = continuity.Conversation("s_league", "discord", "777", "thread", "777", "42", "111",
+                                   "Server / #work / League", "League team", time.time())
+    monkeypatch.setattr(continuity, "recent_conversations", lambda db, **kw: [conv])
+    monkeypatch.setattr(continuity, "match", lambda request, convs: conv)
+    monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
+    streamed = []
 
-    path = tmp_path / "config.yaml"
-    original = {"model": {"default": "claude-opus-5-5", "provider": "anthropic"},
-                "display": {"runtime_footer": {"enabled": True, "fields": ["model", "context_pct"]}},
-                "plugins": {"enabled": ["speakeasy", "wiki"]},
-                "session_key_aliases": {"existing": {"platform": "discord", "chat_id": "123"}}}
-    path.write_text(yaml.safe_dump(original))
-    monkeypatch.setattr(config, "get_config_path", lambda: path)
-    conv = continuity.Conversation("s", "discord", "999", "thread", "999", "42", "111", "work", "Task", time.time())
-    assert continuity.ensure_alias(conv)
-    saved = yaml.safe_load(path.read_text())
-    assert saved == {**original, "session_key_aliases": {**original["session_key_aliases"], conv.session_key: conv.alias()}}
-    assert continuity.ensure_alias(conv)  # idempotent
-    assert yaml.safe_load(path.read_text()) == saved
+    def fake_stream(base, key, c, message, callback, **k):
+        streamed.append(c.session_id)
+        callback("run.started", {"run_id": "run_cont1"})
+        callback("assistant.completed", {"content": "You're projected to win by 12."})
+        callback("run.completed", {})
+        return True
+    monkeypatch.setattr(continuity, "stream_session_chat", fake_stream)
+    posted = []
+    monkeypatch.setattr(service.rt.notices, "post",
+                        lambda key, text, limit=600, target=None: posted.append((key, target, text)) or True)
+    config = home / "config.yaml"
+    before = config.read_bytes() if config.exists() else None
+    mtime = config.stat().st_mtime_ns if config.exists() else None
+    _, worker = start_call(server, service)
+    worker.delegate("call_c", "In the league team thread, am I going to win this week?")
+    wait_for(lambda: [p for p in posted if p[0].startswith("answer:")])
+    answer = [p for p in posted if p[0].startswith("answer:")]
+    assert streamed == ["s_league"]
+    assert answer == [("answer:run_cont1", "discord:777", "You're projected to win by 12.")]
+    assert (config.read_bytes() if config.exists() else None) == before
+    assert (config.stat().st_mtime_ns if config.exists() else None) == mtime
 
 
-def test_ensure_alias_never_touches_an_unreadable_or_odd_config(tmp_path, monkeypatch):
-    import hermes_cli.config as config
-    path = tmp_path / "config.yaml"
-    monkeypatch.setattr(config, "get_config_path", lambda: path)
-    conv = continuity.Conversation("s", "discord", "999", "thread", "999", "42", "111", "work", "Task", time.time())
-    for text in ("model: {default: x\n  broken: [yaml\n",                    # unreadable
-                 "model:\n  default: x\nsession_key_aliases: [not, a, map]\n"):  # unexpected shape
-        path.write_text(text)
-        continuity.ensure_alias(conv)
-        assert path.read_text() == text
+def test_conversation_targets_match_hermes_send():
+    t = time.time()
+    thread = continuity.Conversation("s", "discord", "777", "thread", "777", "", "111", "", "", t)
+    topic = continuity.Conversation("s", "telegram", "-100123", "group", "17585", "", "", "", "", t)
+    dm = continuity.Conversation("s", "telegram", "555", "dm", "", "42", "", "", "", t)
+    assert [c.target for c in (thread, topic, dm)] == ["discord:777", "telegram:-100123:17585", "telegram:555"]
 
 
 # -- (C) continuity ---------------------------------------------------------------------------------
@@ -522,7 +532,6 @@ def test_a_tail_during_a_thread_task_joins_that_thread(server, service, hermes, 
     sent = []
     monkeypatch.setattr(continuity, "conversation_by_session", lambda db, sid: conv if sid == "thread_session_1" else None)
     monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
-    monkeypatch.setattr(continuity, "ensure_alias", lambda c: None)
 
     def fake_stream(base, key, c, message, callback, **k):
         sent.append((c.session_id, message))
