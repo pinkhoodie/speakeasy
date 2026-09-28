@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import SpeakeasyCore
+import SpeakeasyClient
 
 /// A finished task's images, popped into the call panel without opening the task (like an email
 /// draft): a large preview, the task name, arrows between images, full size on click, Open task and

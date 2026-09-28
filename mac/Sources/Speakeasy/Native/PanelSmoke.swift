@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import SpeakeasyCore
+import SpeakeasyClient
 
 /// `--panel-smoke [--snapshot-dir DIR]`: offline, in-process event-level checks
 /// of the native panel. Real NSEvents (scroll wheel, mouse down/drag/up, click)

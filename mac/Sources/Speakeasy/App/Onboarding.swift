@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import SpeakeasyCore
+import SpeakeasyClient
 import SwiftUI
 
 /// The guided first run, one screen per step:

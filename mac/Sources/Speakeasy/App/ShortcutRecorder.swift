@@ -1,5 +1,6 @@
 import AppKit
 import SpeakeasyCore
+import SpeakeasyClient
 import SwiftUI
 
 /// Click, then press a key combination. Esc cancels; Delete resets to the default.

@@ -1,5 +1,6 @@
 import Foundation
 import SpeakeasyCore
+import SpeakeasyClient
 
 /// `--live-call-smoke`: one real call against a real voice server, no microphone and no UI.
 /// Reads the server address and a device token from the environment (never from arguments, so the

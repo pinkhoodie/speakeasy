@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Foundation
 import SpeakeasyCore
+import SpeakeasyClient
 
 /// Offline smoke checks and canned UI previews. None of these touch the network.
 @MainActor

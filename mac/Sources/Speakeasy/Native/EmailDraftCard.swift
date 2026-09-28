@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import SpeakeasyCore
+import SpeakeasyClient
 
 /// An email a task drafted: who it goes to, what it says, and Send / Deny / Revise.
 /// Every action carries the sha256 of the draft on screen; a 409 means it changed.

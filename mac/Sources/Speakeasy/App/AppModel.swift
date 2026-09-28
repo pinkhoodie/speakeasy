@@ -4,6 +4,7 @@ import Combine
 import Foundation
 import ServiceManagement
 import SpeakeasyCore
+import SpeakeasyClient
 
 /// Client-side preferences (UserDefaults). Server-side settings live in `AppModel.settings`.
 enum Prefs {

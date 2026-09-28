@@ -1,11 +1,13 @@
+#if os(macOS)
 import AppKit
+#endif
 import AVFoundation
 import Foundation
 import SpeakeasyCore
 
 /// The call surface the app delegate drives.
 @MainActor
-protocol VoiceCallClient: AnyObject {
+public protocol VoiceCallClient: AnyObject {
     var onStatus: ((String) -> Void)? { get set }
     var onError: ((String) -> Void)? { get set }
     var onClosed: (() -> Void)? { get set }
@@ -27,45 +29,60 @@ protocol VoiceCallClient: AnyObject {
     func togglePause()
 }
 
+/// What the call client needs from the platform UI that shows it.
+@MainActor
+public protocol VoiceSurface: AnyObject {
+    var isVisible: Bool { get }
+    var onEscape: (() -> Void)? { get set }
+    /// Mac: follow across Spaces. Ignored where it means nothing (iPhone).
+    var onAllSpaces: Bool { get set }
+    func show()
+    func hide()
+    func focus()
+    func setNeedsResize()
+}
+
 /// Native call client: WebRTC transport + server SSE + pure reducer + SwiftUI panel.
 @MainActor
-final class NativeVoiceClient: VoiceCallClient {
-    var onStatus: ((String) -> Void)?
-    var onError: ((String) -> Void)?
-    var onClosed: (() -> Void)?
+public final class NativeVoiceClient: VoiceCallClient {
+    public var onStatus: ((String) -> Void)?
+    public var onError: ((String) -> Void)?
+    public var onClosed: (() -> Void)?
     /// Paused (true) or resumed (false): the conversation stays open either way.
-    var onPauseChanged: ((Bool) -> Void)?
+    public var onPauseChanged: ((Bool) -> Void)?
     /// A task settled while the call was paused (heads-up with a Resume action).
-    var onPausedTaskSettled: ((WorkNotice) -> Void)?
-    var startMuted = false
+    public var onPausedTaskSettled: ((WorkNotice) -> Void)?
+    public var startMuted = false
     /// Client preferences (Settings › General).
-    var showPanelOnStart = true
+    public var showPanelOnStart = true
     /// Settings › General "Start calls in slim mode".
-    var startSlim = false
-    var followSystemAudio = true
-    var panelOnAllSpaces = true { didSet { panel.onAllSpaces = panelOnAllSpaces } }
-    var supportsPause: Bool { true }
-    var isPaused: Bool { model.state.connection == .paused }
+    public var startSlim = false
+    public var followSystemAudio = true
+    public var panelOnAllSpaces = true { didSet { surface.onAllSpaces = panelOnAllSpaces } }
+    public var supportsPause: Bool { true }
+    public var isPaused: Bool { model.state.connection == .paused }
 
-    var micControllable: Bool { model.state.connection == .live || model.state.connection == .connecting }
-    var micMuted: Bool { model.state.mic == .muted }
-    func setMicMuted(_ muted: Bool) {
+    public var micControllable: Bool { model.state.connection == .live || model.state.connection == .connecting }
+    public var micMuted: Bool { model.state.mic == .muted }
+    public func setMicMuted(_ muted: Bool) {
         guard micControllable else { return }
         dispatch(.setMic(muted ? .muted : .live))
     }
 
-    private(set) var config: AppConfig
-    private(set) var api: ServerClient?
+    public private(set) var config: AppConfig
+    public private(set) var api: ServerClient?
     /// Set by the app before `start()`: the next new call runs the first-call tour, naming these
     /// shortcuts. Consumed once the server admits the call (`onTourStarted`).
-    var pendingTour: [String: String]?
-    var onTourStarted: (() -> Void)?
+    public var pendingTour: [String: String]?
+    public var onTourStarted: (() -> Void)?
     private var autoHide = PanelAutoHide()
     private var autoHideTimer: Timer?
     /// Fires when the panel hides itself or is closed (the app updates its menu).
-    var onPanelHidden: (() -> Void)?
-    let model = VoicePanelModel()
-    private(set) lazy var panel = VoiceSurface(model: model)
+    public var onPanelHidden: (() -> Void)?
+    public let model = VoicePanelModel()
+    /// The platform surface (Mac floating panel, iPhone call screen) the client shows and resizes.
+    public private(set) lazy var surface: any VoiceSurface = makeSurface(model)
+    private let makeSurface: @MainActor (VoicePanelModel) -> any VoiceSurface
 
     private var engine: NativeCallEngine?
     private var startTask: Task<Void, Never>?
@@ -82,10 +99,11 @@ final class NativeVoiceClient: VoiceCallClient {
     private var appliedMic: MicState?
     private var appliedRemote: Bool?
     /// Preview mode: canned state, no network, no audio.
-    private(set) var previewMode = false
+    public private(set) var previewMode = false
 
-    init(config: AppConfig) {
+    public init(config: AppConfig, makeSurface: @escaping @MainActor (VoicePanelModel) -> any VoiceSurface) {
         self.config = config
+        self.makeSurface = makeSurface
         self.api = ServerClient(config: config)
         model.onClosePanel = { [weak self] in self?.closePanel() }
         model.onDraftAction = { [weak self] draft, action, text in self?.draftAction(draft, action, instructions: text) }
@@ -96,7 +114,7 @@ final class NativeVoiceClient: VoiceCallClient {
             guard let self else { return }
             self.model.slim.toggle()
             if self.model.slim { self.model.workExpanded = false; self.model.selectedTaskID = nil }
-            self.panel.setNeedsResize()
+            self.surface.setNeedsResize()
         }
         model.onApproval = { [weak self] choice in self?.resolveApproval(choice) }
         model.onStopWork = { [weak self] in self?.stopWork() }
@@ -119,7 +137,7 @@ final class NativeVoiceClient: VoiceCallClient {
 
     // MARK: Reducer plumbing
 
-    func dispatch(_ event: VoiceEvent) {
+    public func dispatch(_ event: VoiceEvent) {
         let before = model.state
         let after = reduce(before, event, now: Date())
         model.state = after
@@ -139,10 +157,10 @@ final class NativeVoiceClient: VoiceCallClient {
         if let show = new.showRequest, show != old.showRequest { act(on: show) }
         if old.exchange.isEmpty != new.exchange.isEmpty || old.approval != new.approval ||
             old.connection != new.connection || old.workInfo != new.workInfo || old.tasks != new.tasks {
-            panel.setNeedsResize()
+            surface.setNeedsResize()
         }
         if new.connection == .paused, old.connection != .paused { callPaused() }
-        if old.exchange != new.exchange { panel.setNeedsResize() }
+        if old.exchange != new.exchange { surface.setNeedsResize() }
         if case .ended(let fin) = new.connection, old.connection != new.connection { finishCall(fin) }
         if case .failed(let message) = new.connection, old.connection != new.connection {
             onError?(message)
@@ -197,7 +215,7 @@ final class NativeVoiceClient: VoiceCallClient {
         levelTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, let engine = self.engine, self.model.state.connection == .live,
-                      self.panel.isVisible else {
+                      self.surface.isVisible else {
                     if self?.model.orbLevel != 0 { self?.model.orbLevel = 0 }
                     return
                 }
@@ -219,9 +237,9 @@ final class NativeVoiceClient: VoiceCallClient {
 
     // MARK: Call lifecycle
 
-    func start() {
+    public func start() {
         if model.state.connection == .paused { resume(); return }
-        guard !model.state.connection.isInCall else { panel.show(); return }
+        guard !model.state.connection.isInCall else { surface.show(); return }
         cancelAutoHide()
         closeNotified = false
         voiceProvider = "openai"
@@ -233,9 +251,9 @@ final class NativeVoiceClient: VoiceCallClient {
         workOnlyTask?.cancel()
         dispatch(.startRequested)
         if startMuted { dispatch(.setMic(.muted)) }
-        panel.onEscape = { [weak self] in self?.handleEscape() }
+        surface.onEscape = { [weak self] in self?.handleEscape() }
         if startSlim { model.slim = true }
-        if showPanelOnStart { panel.show() }
+        if showPanelOnStart { surface.show() }
         startTicker()
         startLevelMeter()
         #if os(macOS)
@@ -259,7 +277,11 @@ final class NativeVoiceClient: VoiceCallClient {
                 }
             }
         default:
-                dispatch(.failed("Microphone access is off — enable Speakeasy in System Settings › Privacy & Security › Microphone"))
+            #if os(macOS)
+            dispatch(.failed("Microphone access is off — enable Speakeasy in System Settings › Privacy & Security › Microphone"))
+            #else
+            dispatch(.failed("Microphone access is off — enable it in Settings › Speakeasy › Microphone"))
+            #endif
         }
     }
 
@@ -324,7 +346,7 @@ final class NativeVoiceClient: VoiceCallClient {
         }
     }
 
-    func end() {
+    public func end() {
         switch model.state.connection {
         case .paused:
             dispatch(.endRequested)
@@ -341,7 +363,7 @@ final class NativeVoiceClient: VoiceCallClient {
 
     // MARK: Pause / Resume
 
-    func togglePause() {
+    public func togglePause() {
         switch model.state.connection {
         case .paused: resume()
         case .live: pause()
@@ -403,6 +425,9 @@ final class NativeVoiceClient: VoiceCallClient {
         reconnectAfterPause = true
         pause()
     }
+    #else
+    /// iOS: AVAudioSession moves WebRTC to AirPods / the speaker itself; nothing to reopen.
+    private func audioDevicesChanged() {}
     #endif
 
     private func resume() {
@@ -410,7 +435,7 @@ final class NativeVoiceClient: VoiceCallClient {
         pollTask?.cancel(); pollTask = nil
         appliedMic = nil; appliedRemote = nil
         dispatch(.resumeRequested)
-        panel.show()
+        surface.show()
         startTicker()
         startLevelMeter()
         onPauseChanged?(false)
@@ -502,7 +527,7 @@ final class NativeVoiceClient: VoiceCallClient {
         }
     }
 
-    func skipTour() {
+    public func skipTour() {
         guard model.tourActive else { return }
         model.tourActive = false
         guard let api, let id = model.state.interactionID else { return }
@@ -522,32 +547,32 @@ final class NativeVoiceClient: VoiceCallClient {
             guard let self, !self.model.state.connection.isOpen else { return }
             // Show the finished state briefly, then hide (hover or anything that
             // needs the user holds it). The x button and Esc hide it at once.
-            if self.panel.isVisible && !self.model.workExpanded { self.armAutoHide() }
+            if self.surface.isVisible && !self.model.workExpanded { self.armAutoHide() }
             if !self.closeNotified { self.closeNotified = true; self.onClosed?() }
         }
     }
 
     private func hideNow() {
         cancelAutoHide()
-        panel.hide()
+        surface.hide()
         if !model.state.connection.isOpen && !model.state.workOnly && !model.workExpanded { stopTicker() }
         onPanelHidden?()
     }
 
-    var panelVisible: Bool { panel.isVisible }
+    public var panelVisible: Bool { surface.isVisible }
 
     /// The x button: idle → hide (leaving any work-only view); in a call → hide only.
-    func closePanel() {
+    public func closePanel() {
         if model.state.workOnly { workOnlyTask?.cancel(); workOnlyTask = nil; dispatch(.reset) }
         model.selectedTaskID = nil
         model.workExpanded = false
         hideNow()
     }
 
-    func showPanel() {
+    public func showPanel() {
         cancelAutoHide()
-        panel.onEscape = { [weak self] in self?.handleEscape() }
-        panel.show()
+        surface.onEscape = { [weak self] in self?.handleEscape() }
+        surface.show()
     }
 
     private func armAutoHide() {
@@ -556,7 +581,7 @@ final class NativeVoiceClient: VoiceCallClient {
         autoHideTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if self.model.state.connection.isOpen || !self.panel.isVisible { self.cancelAutoHide(); return }
+                if self.model.state.connection.isOpen || !self.surface.isVisible { self.cancelAutoHide(); return }
                 if self.autoHide.shouldHide(now: Date(), hovering: self.model.hovering,
                                             needsAttention: panelNeedsAttention(self.model.state) || self.model.workExpanded) {
                     self.hideNow()
@@ -571,17 +596,17 @@ final class NativeVoiceClient: VoiceCallClient {
     }
 
     /// Pairing changed or settings reloaded.
-    func update(config: AppConfig) {
+    public func update(config: AppConfig) {
         self.config = config
         api = ServerClient(config: config)
     }
 
-    func apply(settings: ServerSettings) {
+    public func apply(settings: ServerSettings) {
         model.state.assistantName = settings.resolvedAssistantName
         model.state.idleTimeout = settings.idleTimeout
     }
 
-    func setCallShortcutHint(_ hint: String) { model.state.callShortcutHint = hint }
+    public func setCallShortcutHint(_ hint: String) { model.state.callShortcutHint = hint }
 
     // MARK: Email drafts
 
@@ -630,13 +655,13 @@ final class NativeVoiceClient: VoiceCallClient {
         }
     }
 
-    func hideIfIdle() {
+    public func hideIfIdle() {
         if !model.state.connection.isOpen && !model.state.workOnly && !previewMode { hideNow() }
     }
 
     private func handleEscape() {
-        if model.selectedTaskID != nil && model.workExpanded { model.selectedTaskID = nil; panel.setNeedsResize() }
-        else if model.workExpanded && !model.state.workOnly { model.workExpanded = false; panel.setNeedsResize() }
+        if model.selectedTaskID != nil && model.workExpanded { model.selectedTaskID = nil; surface.setNeedsResize() }
+        else if model.workExpanded && !model.state.workOnly { model.workExpanded = false; surface.setNeedsResize() }
         else if model.state.workOnly { closeWorkView() }
         else if model.state.connection.isOpen { end() }
         else { hideNow() }
@@ -693,18 +718,18 @@ final class NativeVoiceClient: VoiceCallClient {
 
     // MARK: Work view, approval, stop
 
-    func showWork(active: Bool) {
+    public func showWork(active: Bool) {
         if model.state.connection.isOpen {
             model.workExpanded = true
-            panel.setNeedsResize()
-            panel.focus()
+            surface.setNeedsResize()
+            surface.focus()
             return
         }
         guard let api else { return }
         dispatch(.workOnlyOpened)
         model.workExpanded = true
-        panel.onEscape = { [weak self] in self?.handleEscape() }
-        panel.focus()
+        surface.onEscape = { [weak self] in self?.handleEscape() }
+        surface.focus()
         startTicker()
         workOnlyTask?.cancel()
         workOnlyTask = Task { [weak self] in
@@ -732,29 +757,29 @@ final class NativeVoiceClient: VoiceCallClient {
             model.selectedTaskID = nil
             if let run = show.runID { model.focusedReviewID = run }
             model.objectWillChange.send()
-            panel.setNeedsResize()
+            surface.setNeedsResize()
         }
-        if !panel.isVisible { showPanel() }
+        if !surface.isVisible { showPanel() }
     }
 
     private func selectTask(_ id: String?) {
         model.selectedTaskID = id
         model.workExpanded = true
-        panel.setNeedsResize()
-        panel.focus()
+        surface.setNeedsResize()
+        surface.focus()
     }
 
     private func toggleWorkView() {
         if model.showsSlim { model.slim = false; model.workExpanded = true }
         else { model.workExpanded.toggle() }
-        panel.setNeedsResize()
-        if model.workExpanded { panel.focus() }
+        surface.setNeedsResize()
+        if model.workExpanded { surface.focus() }
     }
 
     private func closeWorkView() {
         if model.selectedTaskID != nil && model.state.tasks.count > 1 {
             model.selectedTaskID = nil   // Back goes from one task to the task list
-            panel.setNeedsResize()
+            surface.setNeedsResize()
             return
         }
         model.selectedTaskID = nil
@@ -762,10 +787,10 @@ final class NativeVoiceClient: VoiceCallClient {
         if model.state.workOnly {
             workOnlyTask?.cancel(); workOnlyTask = nil
             dispatch(.reset)
-            panel.hide()
+            surface.hide()
             stopTicker()
         } else {
-            panel.setNeedsResize()
+            surface.setNeedsResize()
         }
     }
 
@@ -799,7 +824,7 @@ final class NativeVoiceClient: VoiceCallClient {
             model.selectedTaskID = nil
         }
         dispatch(.tasksDismissed(runIDs))
-        panel.setNeedsResize()
+        surface.setNeedsResize()
         guard let api, !previewMode else { return }
         Task { [weak self] in
             do { try await api.dismissTasks(runIDs: runIDs) }
@@ -813,7 +838,7 @@ final class NativeVoiceClient: VoiceCallClient {
         let cards = review.images.map(\.number)
         dispatch(.reviewDismissed(runID, cards))
         model.reviewIndex[runID] = nil
-        panel.setNeedsResize()
+        surface.setNeedsResize()
         guard let api, !previewMode else { return }
         Task { [weak self] in
             do { try await api.dismissReview(runID: runID, cards: cards) }
@@ -831,7 +856,7 @@ final class NativeVoiceClient: VoiceCallClient {
 
     // MARK: Preview
 
-    func showPreview(_ state: VoiceState, workExpanded: Bool, captionExpanded: Bool = false) {
+    public func showPreview(_ state: VoiceState, workExpanded: Bool, captionExpanded: Bool = false) {
         previewMode = true
         model.state = state
         model.workExpanded = workExpanded
@@ -840,8 +865,8 @@ final class NativeVoiceClient: VoiceCallClient {
         model.shownStatus = p.secondary
         model.shownTone = p.tone
         #if os(macOS)
-        panel.onEscape = { NSApp.terminate(nil) }
+        surface.onEscape = { NSApp.terminate(nil) }
         #endif
-        panel.show()
+        surface.show()
     }
 }

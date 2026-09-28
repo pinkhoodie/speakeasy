@@ -1,5 +1,6 @@
 import AppKit
 import SpeakeasyCore
+import SpeakeasyClient
 import SwiftUI
 
 /// Settings window. Server-side values load from and save to `/voice/settings`;

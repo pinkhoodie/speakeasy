@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import SpeakeasyCore
+import SpeakeasyClient
 
 // MARK: - Image result cards
 

@@ -5,10 +5,10 @@ import WebRTC
 /// Native WebRTC transport: one peer connection, one captured audio track,
 /// the `oai-events` data channel, and remote audio playout via the default ADM.
 /// All public callbacks are delivered on the main queue.
-final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDelegate {
-    enum EngineError: LocalizedError {
+public final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDelegate {
+    public enum EngineError: LocalizedError {
         case peerConnection, offer(String), iceTimeout, noLocalDescription, remote(String)
-        var errorDescription: String? {
+        public var errorDescription: String? {
             switch self {
             case .peerConnection: return "Could not create the voice connection"
             case .offer(let m): return "Could not create the voice offer: \(m)"
@@ -33,28 +33,37 @@ final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChanne
                                         decoderFactory: RTCDefaultVideoDecoderFactory())
     }()
 
+    #if os(macOS)
     private let routeWarmer = AudioRouteWarmer()
+    #endif
     /// Called on main if the output rate changes mid-call (WebRTC can't follow it).
-    var onAudioFormatChanged: (() -> Void)?
+    public var onAudioFormatChanged: (() -> Void)?
     private var answered = false
     private var formatChangedEarly = false
 
     /// AirPods (any Bluetooth headset) switch from 48 kHz music mode to 24 kHz call mode
     /// when their mic opens. WebRTC sets playout up at the rate it sees and can't adapt,
     /// so the reply plays at half speed (deep, slow). Settle the headset first.
-    func warmAudioRoute() async { await routeWarmer.warm() }
+    /// iOS: AVAudioSession (configured by the iPhone app) owns the route; nothing to warm.
+    public func warmAudioRoute() async {
+        #if os(macOS)
+        await routeWarmer.warm()
+        #endif
+    }
 
     private func watchAudioFormat() {
+        #if os(macOS)
         routeWarmer.watchOutputRate { [weak self] in
             guard let self, !self.closed else { return }
             if self.answered { self.onAudioFormatChanged?() } else { self.formatChangedEarly = true }
         }
+        #endif
     }
 
-    var onMessage: ((Data) -> Void)?
-    var onChannelOpen: (() -> Void)?
-    var onChannelClosed: (() -> Void)?
-    var onConnectionFailed: (() -> Void)?
+    public var onMessage: ((Data) -> Void)?
+    public var onChannelOpen: (() -> Void)?
+    public var onChannelClosed: (() -> Void)?
+    public var onConnectionFailed: (() -> Void)?
 
     private var peer: RTCPeerConnection?
     private var channel: RTCDataChannel?
@@ -65,7 +74,7 @@ final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChanne
 
     /// Build the peer connection, capture track (AEC/NS on), and data channel.
     /// `captureAudio=false` negotiates an audio transceiver without opening the mic.
-    func prepare(captureAudio: Bool = true) throws {
+    public func prepare(captureAudio: Bool = true) throws {
         let configuration = RTCConfiguration()
         configuration.sdpSemantics = .unifiedPlan
         configuration.iceServers = []
@@ -104,7 +113,7 @@ final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChanne
 
     /// Create the offer, set it locally, and wait for ICE gathering to finish so
     /// the returned SDP is complete (non-trickle).
-    func createOffer(iceTimeout: TimeInterval = 10) async throws -> String {
+    public func createOffer(iceTimeout: TimeInterval = 10) async throws -> String {
         guard let peer else { throw EngineError.peerConnection }
         let constraints = RTCMediaConstraints(mandatoryConstraints: [
             kRTCMediaConstraintsOfferToReceiveAudio: kRTCMediaConstraintsValueTrue,
@@ -142,7 +151,7 @@ final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChanne
         return sdp
     }
 
-    func setRemoteAnswer(_ sdp: String) async throws {
+    public func setRemoteAnswer(_ sdp: String) async throws {
         guard let peer else { throw EngineError.peerConnection }
         let answer = RTCSessionDescription(type: .answer, sdp: sdp)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -161,20 +170,20 @@ final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChanne
         }
     }
 
-    var isChannelOpen: Bool { channel?.readyState == .open }
+    public var isChannelOpen: Bool { channel?.readyState == .open }
 
     @discardableResult
-    func send(json object: [String: Any]) -> Bool {
+    public func send(json object: [String: Any]) -> Bool {
         guard let channel, channel.readyState == .open,
               let data = try? JSONSerialization.data(withJSONObject: object) else { return false }
         return channel.sendData(RTCDataBuffer(data: data, isBinary: false))
     }
 
     /// Mic mute: local track disabled; the call (and billing) stays open.
-    func setMicEnabled(_ enabled: Bool) { localTrack?.isEnabled = enabled }
+    public func setMicEnabled(_ enabled: Bool) { localTrack?.isEnabled = enabled }
 
     /// Quiet reply: disable remote audio tracks (playout silenced).
-    func setRemoteAudioEnabled(_ enabled: Bool) {
+    public func setRemoteAudioEnabled(_ enabled: Bool) {
         remoteMuted = !enabled
         applyRemoteMute()
     }
@@ -187,7 +196,7 @@ final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChanne
 
     /// Current audio levels (0...1) from WebRTC stats: `mic` = local capture ("media-source"),
     /// `voice` = the assistant's playout ("inbound-rtp"). Calls back on the main queue.
-    func audioLevels(_ completion: @escaping (_ mic: Double, _ voice: Double) -> Void) {
+    public func audioLevels(_ completion: @escaping (_ mic: Double, _ voice: Double) -> Void) {
         guard let peer, !closed else { return }
         peer.statistics { report in
             var mic = 0.0, voice = 0.0
@@ -201,11 +210,11 @@ final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChanne
         }
     }
 
-    var sdpLineCount: Int? {
+    public var sdpLineCount: Int? {
         peer?.localDescription?.sdp.components(separatedBy: .newlines).filter { !$0.isEmpty }.count
     }
 
-    func close() {
+    public func close() {
         guard !closed else { return }
         closed = true
         localTrack?.isEnabled = false
@@ -215,34 +224,36 @@ final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChanne
         channel = nil
         localTrack = nil
         peer = nil
+        #if os(macOS)
         routeWarmer.release()
+        #endif
     }
 
     // MARK: RTCPeerConnectionDelegate (signaling thread → main)
 
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
-    func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
+    public func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
+    public func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
+    public func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
+    public func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
+    public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {}
+    public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
         if newState == .complete { iceComplete?() }
     }
-    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {
+    public func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {}
+    public func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
+    public func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
+    public func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCPeerConnectionState) {
         if newState == .failed {
             DispatchQueue.main.async { [weak self] in self?.onConnectionFailed?() }
         }
     }
-    func peerConnection(_ peerConnection: RTCPeerConnection, didAdd rtpReceiver: RTCRtpReceiver, streams mediaStreams: [RTCMediaStream]) {
+    public func peerConnection(_ peerConnection: RTCPeerConnection, didAdd rtpReceiver: RTCRtpReceiver, streams mediaStreams: [RTCMediaStream]) {
         DispatchQueue.main.async { [weak self] in self?.applyRemoteMute() }
     }
 
     // MARK: RTCDataChannelDelegate
 
-    func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
+    public func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         let state = dataChannel.readyState
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -251,7 +262,7 @@ final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDataChanne
         }
     }
 
-    func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
+    public func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
         guard !buffer.isBinary else { return }
         let data = buffer.data
         DispatchQueue.main.async { [weak self] in self?.onMessage?(data) }

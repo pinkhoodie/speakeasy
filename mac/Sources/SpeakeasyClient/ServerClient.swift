@@ -3,18 +3,19 @@ import SpeakeasyCore
 
 /// Authenticated api HTTP client. The device bearer is attached only to URLs
 /// under the trusted api origin re-validated at request time.
-final class ServerClient: @unchecked Sendable {
-    struct HTTPError: LocalizedError {
-        let status: Int
-        let message: String
-        var errorDescription: String? { message }
+public final class ServerClient: @unchecked Sendable {
+    public struct HTTPError: LocalizedError {
+        public let status: Int
+        public let message: String
+        public init(status: Int, message: String) { self.status = status; self.message = message }
+        public var errorDescription: String? { message }
     }
 
-    let base: URL
+    public let base: URL
     private let token: String
     private let session: URLSession
 
-    init?(config: AppConfig) {
+    public init?(config: AppConfig) {
         guard let token = config.deviceToken, let server = config.serverURL,
               let trusted = trustedServerBaseURL(server.absoluteString) else { return nil }
         self.base = trusted
@@ -39,13 +40,13 @@ final class ServerClient: @unchecked Sendable {
         return URLSession(configuration: configuration)
     }
 
-    func url(_ path: String) -> URL {
+    public func url(_ path: String) -> URL {
         var text = base.absoluteString
         while text.hasSuffix("/") { text.removeLast() }
         return URL(string: text + path)!
     }
 
-    func request(_ path: String, method: String = "GET", body: Data? = nil,
+    public func request(_ path: String, method: String = "GET", body: Data? = nil,
                  headers: [String: String] = [:], timeout: TimeInterval = 30) -> URLRequest {
         var request = URLRequest(url: url(path), timeoutInterval: timeout)
         request.httpMethod = method
@@ -57,7 +58,7 @@ final class ServerClient: @unchecked Sendable {
     }
 
     /// Raw response for the Speakeasy settings routes (typed decoding lives in the core).
-    func data(_ path: String, method: String = "GET", body: Data? = nil, timeout: TimeInterval = 30) async throws -> Data {
+    public func data(_ path: String, method: String = "GET", body: Data? = nil, timeout: TimeInterval = 30) async throws -> Data {
         let (data, response) = try await sessionFor(timeout).data(for: request(path, method: method, body: body, timeout: timeout))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
@@ -69,45 +70,45 @@ final class ServerClient: @unchecked Sendable {
 
     // MARK: Speakeasy server routes
 
-    func settings() async throws -> ServerSettings { try ServerSettings.decode(try await data("/voice/settings")) }
-    func saveSettings(_ settings: ServerSettings) async throws -> ServerSettings {
+    public func settings() async throws -> ServerSettings { try ServerSettings.decode(try await data("/voice/settings")) }
+    public func saveSettings(_ settings: ServerSettings) async throws -> ServerSettings {
         let out = try await data("/voice/settings", method: "PATCH", body: try settings.patchBody())
         return (try? ServerSettings.decode(out)) ?? settings
     }
-    func status() async throws -> ServerStatus { try JSONDecoder().decode(ServerStatus.self, from: try await data("/voice/status")) }
-    func brief() async throws -> VoiceBrief { try JSONDecoder().decode(VoiceBrief.self, from: try await data("/voice/brief")) }
-    func saveBrief(_ text: String) async throws -> VoiceBrief? {
+    public func status() async throws -> ServerStatus { try JSONDecoder().decode(ServerStatus.self, from: try await data("/voice/status")) }
+    public func brief() async throws -> VoiceBrief { try JSONDecoder().decode(VoiceBrief.self, from: try await data("/voice/brief")) }
+    public func saveBrief(_ text: String) async throws -> VoiceBrief? {
         try? JSONDecoder().decode(VoiceBrief.self, from: try await data("/voice/brief", method: "PUT", body: try VoiceBrief.putBody(text: text)))
     }
-    func rewriteBrief() async throws -> VoiceBrief? {
+    public func rewriteBrief() async throws -> VoiceBrief? {
         try? JSONDecoder().decode(VoiceBrief.self, from: try await data("/voice/brief/rewrite", method: "POST", body: Data("{}".utf8)))
     }
-    func destinations() async throws -> [Destination] { Destination.list(try await data("/voice/destinations")) }
-    func destinationsWithSuggestion() async throws -> ([Destination], String?) {
+    public func destinations() async throws -> [Destination] { Destination.list(try await data("/voice/destinations")) }
+    public func destinationsWithSuggestion() async throws -> ([Destination], String?) {
         let raw = try await data("/voice/destinations")
         return (Destination.list(raw), Destination.suggested(raw))
     }
-    func routingChoices() async throws -> RoutingChoices { try RoutingChoices.decode(try await data("/voice/routing")) }
-    func routingModels(_ provider: String) async throws -> [String] {
+    public func routingChoices() async throws -> RoutingChoices { try RoutingChoices.decode(try await data("/voice/routing")) }
+    public func routingModels(_ provider: String) async throws -> [String] {
         let query = provider.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? provider
         return try ProviderModels.decode(try await data("/voice/routing/models?provider=\(query)", timeout: 60)).models
     }
-    func chooseRouting(provider: String, model: String, thinking: Bool?) async throws -> RoutingChoices {
+    public func chooseRouting(provider: String, model: String, thinking: Bool?) async throws -> RoutingChoices {
         try RoutingChoices.decode(try await data("/voice/routing", method: "POST",
                                                  body: try RoutingChoices.postBody(provider: provider, model: model, thinking: thinking)))
     }
-    func onboarding() async throws -> OnboardingStatus { OnboardingStatus.parse(try await data("/voice/onboarding")) }
-    func completeOnboarding(assistantName: String, userName: String, target: String?, continuity: Bool?) async throws {
+    public func onboarding() async throws -> OnboardingStatus { OnboardingStatus.parse(try await data("/voice/onboarding")) }
+    public func completeOnboarding(assistantName: String, userName: String, target: String?, continuity: Bool?) async throws {
         _ = try await data("/voice/onboarding", method: "POST", body: try OnboardingStatus.postBody(
             assistantName: assistantName, userName: userName, target: target, continuity: continuity))
     }
     /// One read-only Hermes run (up to ~90 s) that proposes delivery channels; nothing is saved.
-    func suggestChannels() async throws -> [ServerSettings.Channel] {
+    public func suggestChannels() async throws -> [ServerSettings.Channel] {
         ChannelSuggestions.parse(try await data("/voice/destinations/suggest", method: "POST", body: Data("{}".utf8), timeout: 120))
     }
 
     /// Approve / deny / revise an email draft. Throws `DraftActionError.changed` on 409.
-    func draftAction(_ action: DraftAction, draft: EmailDraft, instructions: String?) async throws {
+    public func draftAction(_ action: DraftAction, draft: EmailDraft, instructions: String?) async throws {
         do {
             _ = try await data("/voice/drafts/\(escape(draft.draftID))", method: "POST",
                                body: try draftActionBody(action, draft: draft, instructions: instructions))
@@ -122,7 +123,7 @@ final class ServerClient: @unchecked Sendable {
     }
 
     /// `POST /voice/pair` (no auth): trade a one-time code for a device token.
-    static func pair(server: URL, code: String, deviceName: String) async throws -> PairResponse {
+    public static func pair(server: URL, code: String, deviceName: String) async throws -> PairResponse {
         guard let base = trustedServerBaseURL(server.absoluteString) else {
             throw HTTPError(status: 0, message: "That server address isn't allowed. Use this Mac (127.0.0.1) or an https Tailscale address.")
         }
@@ -141,7 +142,7 @@ final class ServerClient: @unchecked Sendable {
         return try JSONDecoder().decode(PairResponse.self, from: data)
     }
 
-    func json(_ path: String, method: String = "GET", body: Data? = nil,
+    public func json(_ path: String, method: String = "GET", body: Data? = nil,
               headers: [String: String] = [:]) async throws -> [String: Any] {
         let (data, response) = try await session.data(for: request(path, method: method, body: body, headers: headers))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -152,12 +153,12 @@ final class ServerClient: @unchecked Sendable {
         return object
     }
 
-    func post(_ path: String, _ object: [String: Any], headers: [String: String] = [:]) async throws -> [String: Any] {
+    public func post(_ path: String, _ object: [String: Any], headers: [String: String] = [:]) async throws -> [String: Any] {
         try await json(path, method: "POST", body: try JSONSerialization.data(withJSONObject: object), headers: headers)
     }
 
     /// POST the SDP offer byte-for-byte (the body encoder never trims it).
-    func admitSession(sdp: String, idempotencyKey: String, resumeFrom: String? = nil,
+    public func admitSession(sdp: String, idempotencyKey: String, resumeFrom: String? = nil,
                       tour: [String: String]? = nil) async throws -> SessionAdmission {
         let body = try sessionRequestBody(sdp: sdp, resumeFrom: resumeFrom, tour: tour)
         let object = try await json("/voice/sessions", method: "POST", body: body,
@@ -168,21 +169,21 @@ final class ServerClient: @unchecked Sendable {
         return admission
     }
 
-    func interaction(_ id: String) async throws -> InteractionSnapshot? {
+    public func interaction(_ id: String) async throws -> InteractionSnapshot? {
         InteractionSnapshot(json: try await json("/voice/interactions/\(escape(id))"))
     }
 
     /// The Codex data channel closes before its app-server thread stops.
-    func finishCodexTransport(interactionID: String) async throws {
+    public func finishCodexTransport(interactionID: String) async throws {
         _ = try await post("/voice/interactions/\(escape(interactionID))/end", [:])
     }
 
-    func work(runID: String?) async throws -> WorkInfo? {
+    public func work(runID: String?) async throws -> WorkInfo? {
         let object = try await json(runID.map { "/voice/work/\(escape($0))" } ?? "/voice/work/latest")
         return WorkInfo(json: object["work"])
     }
 
-    func image(runID: String, index: Int) async throws -> Data {
+    public func image(runID: String, index: Int) async throws -> Data {
         guard (1...8).contains(index) else { throw HTTPError(status: 400, message: "Invalid card") }
         let (data, response) = try await session.data(for: request("/voice/card-image/\(escape(runID))/\(index)"))
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -203,31 +204,31 @@ final class ServerClient: @unchecked Sendable {
     }
 
     /// Latest work plus every task of the most recent call (after-call Work view).
-    func latestWork() async throws -> (WorkInfo?, [TaskItem]) {
+    public func latestWork() async throws -> (WorkInfo?, [TaskItem]) {
         let object = try await json("/voice/work/latest")
         return (WorkInfo(json: object["work"]), TaskItem.list(json: object["tasks"]) ?? [])
     }
 
     /// Clear finished tasks from the task list (running tasks are never cleared).
-    func dismissTasks(runIDs: [String]) async throws {
+    public func dismissTasks(runIDs: [String]) async throws {
         _ = try await post("/voice/tasks/dismiss", ["run_ids": runIDs])
     }
 
     /// Hold the call's conversation and tasks for Resume before the session closes.
-    func pause(interactionID: String) async throws {
+    public func pause(interactionID: String) async throws {
         _ = try await json("/voice/interactions/\(escape(interactionID))/pause", method: "POST", body: Data("{}".utf8))
     }
 
     /// Skip button during the first-call tour: the voice drops it.
-    func skipTour(interactionID: String) async throws {
+    public func skipTour(interactionID: String) async throws {
         _ = try await json("/voice/interactions/\(escape(interactionID))/skip-tour", method: "POST", body: Data("{}".utf8))
     }
 
-    func cancelBackend(interactionID: String, runID: String) async throws {
+    public func cancelBackend(interactionID: String, runID: String) async throws {
         _ = try await post("/voice/interactions/\(escape(interactionID))/cancel-backend", ["run_id": runID])
     }
 
-    func resolveApproval(interactionID: String, approval: ApprovalInfo, choice: String) async throws {
+    public func resolveApproval(interactionID: String, approval: ApprovalInfo, choice: String) async throws {
         precondition(choice == "once" || choice == "deny")
         _ = try await post("/voice/interactions/\(escape(interactionID))/approval",
                            ["run_id": approval.runID, "request_id": approval.requestID, "choice": choice])
@@ -239,11 +240,11 @@ final class ServerClient: @unchecked Sendable {
 
     // MARK: - Event stream
 
-    enum StreamOutcome { case ended, unsupported, failed(Error) }
+    public enum StreamOutcome { case ended, unsupported, failed(Error) }
 
     /// Reads `GET /voice/interactions/<id>/events` until the server ends it.
     /// Returns `.unsupported` on 404 so the caller falls back to polling.
-    func streamEvents(interactionID: String, parser: inout SSEParser,
+    public func streamEvents(interactionID: String, parser: inout SSEParser,
                       onEvent: (SSEEvent) async -> Void) async -> StreamOutcome {
         var headers = ["Accept": "text/event-stream"]
         if let last = parser.lastEventID { headers["Last-Event-ID"] = last }

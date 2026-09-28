@@ -2,11 +2,11 @@ import Foundation
 import Security
 
 /// The device token lives in the login Keychain, never in a file or UserDefaults.
-enum Keychain {
-    static var service: String { (Bundle.main.bundleIdentifier ?? "co.speakeasy.mac") + ".device-token" }
-    static let account = "speakeasy-device"
+public enum Keychain {
+    public static var service: String { (Bundle.main.bundleIdentifier ?? "co.speakeasy.mac") + ".device-token" }
+    public static let account = "speakeasy-device"
 
-    static func readToken() -> String? {
+    public static func readToken() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -21,7 +21,7 @@ enum Keychain {
     }
 
     @discardableResult
-    static func saveToken(_ token: String) -> Bool {
+    public static func saveToken(_ token: String) -> Bool {
         deleteToken()
         let attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -34,7 +34,7 @@ enum Keychain {
         return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
     }
 
-    static func deleteToken() {
+    public static func deleteToken() {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

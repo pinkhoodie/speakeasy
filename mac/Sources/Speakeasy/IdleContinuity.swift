@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SpeakeasyCore
+import SpeakeasyClient
 import UserNotifications
 
 /// Idle (no-call) continuity: follows the last call's run via `GET /voice/work/latest`

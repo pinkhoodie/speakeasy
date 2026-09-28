@@ -1,3 +1,4 @@
+#if os(macOS)
 
 import CoreAudio
 import Foundation
@@ -10,7 +11,7 @@ import Foundation
 /// underneath it ("Changing channels not supported"), so the assistant plays back at half
 /// speed: the deep, slow voice. Holding the mic open first means WebRTC sees the
 /// final call-mode format from the start. Held for the whole call, released on close.
-final class AudioRouteWarmer {
+public final class AudioRouteWarmer {
     private var device = AudioObjectID(0)
     private var proc: AudioDeviceIOProcID?
     private var rateListener: AudioObjectPropertyListenerBlock?
@@ -20,7 +21,7 @@ final class AudioRouteWarmer {
                                                          mElement: kAudioObjectPropertyElementMain)
 
     /// True when the default input is a Bluetooth device (the case that switches modes).
-    static func inputIsBluetooth() -> Bool {
+    public static func inputIsBluetooth() -> Bool {
         let input = DefaultAudioDeviceWatcher.defaultDevice(kAudioHardwarePropertyDefaultInputDevice)
         guard input != 0 else { return false }
         var transport = UInt32(0)
@@ -32,7 +33,7 @@ final class AudioRouteWarmer {
         return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
     }
 
-    static func nominalRate(_ id: AudioObjectID) -> Float64 {
+    public static func nominalRate(_ id: AudioObjectID) -> Float64 {
         var rate = Float64(0)
         var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate,
                                                  mScope: kAudioObjectPropertyScopeGlobal,
@@ -44,7 +45,7 @@ final class AudioRouteWarmer {
 
     /// Open the Bluetooth mic (silently; samples are discarded) and wait until the
     /// output rate has settled. No-op for wired/built-in devices. Max ~1.5 s.
-    func warm() async {
+    public func warm() async {
         guard proc == nil, Self.inputIsBluetooth() else { return }
         device = DefaultAudioDeviceWatcher.defaultDevice(kAudioHardwarePropertyDefaultInputDevice)
         var newProc: AudioDeviceIOProcID?
@@ -67,7 +68,7 @@ final class AudioRouteWarmer {
 
     /// Call `onChange` (main queue) if the default output's rate changes after setup:
     /// WebRTC cannot follow that, so the caller reopens the audio.
-    func watchOutputRate(onChange: @escaping @MainActor () -> Void) {
+    public func watchOutputRate(onChange: @escaping @MainActor () -> Void) {
         stopWatching()
         let output = DefaultAudioDeviceWatcher.defaultDevice(kAudioHardwarePropertyDefaultOutputDevice)
         guard output != 0 else { return }
@@ -89,7 +90,7 @@ final class AudioRouteWarmer {
         watchedOutput = 0
     }
 
-    func release() {
+    public func release() {
         stopWatching()
         if let proc {
             AudioDeviceStop(device, proc)
@@ -101,3 +102,4 @@ final class AudioRouteWarmer {
     deinit { release() }
 }
 
+#endif

@@ -1,11 +1,12 @@
 #if os(macOS)
+#if os(macOS)
 import CoreAudio
 import Foundation
 
 /// Calls `onChange` on the main queue when the Mac's default audio output or input
 /// device changes (AirPods connecting, headphones unplugged, a pick in Control
 /// Center). Bursts are coalesced: macOS usually switches output and input together.
-final class DefaultAudioDeviceWatcher {
+public final class DefaultAudioDeviceWatcher {
     private let onChange: @MainActor () -> Void
     private var pending: DispatchWorkItem?
     private var addresses: [AudioObjectPropertyAddress] = [
@@ -22,7 +23,7 @@ final class DefaultAudioDeviceWatcher {
     private var lastOutput: AudioObjectID
     private var lastInput: AudioObjectID
 
-    init(onChange: @escaping @MainActor () -> Void) {
+    public init(onChange: @escaping @MainActor () -> Void) {
         self.onChange = onChange
         lastOutput = Self.defaultDevice(kAudioHardwarePropertyDefaultOutputDevice)
         lastInput = Self.defaultDevice(kAudioHardwarePropertyDefaultInputDevice)
@@ -55,7 +56,7 @@ final class DefaultAudioDeviceWatcher {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
     }
 
-    static func defaultDevice(_ selector: AudioObjectPropertySelector) -> AudioObjectID {
+    public static func defaultDevice(_ selector: AudioObjectPropertySelector) -> AudioObjectID {
         var address = AudioObjectPropertyAddress(mSelector: selector,
                                                  mScope: kAudioObjectPropertyScopeGlobal,
                                                  mElement: kAudioObjectPropertyElementMain)
@@ -65,7 +66,7 @@ final class DefaultAudioDeviceWatcher {
         return device
     }
 
-    static func outputName() -> String? {
+    public static func outputName() -> String? {
         let device = defaultDevice(kAudioHardwarePropertyDefaultOutputDevice)
         guard device != 0 else { return nil }
         var address = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName,
@@ -80,4 +81,5 @@ final class DefaultAudioDeviceWatcher {
         return name.takeRetainedValue() as String
     }
 }
+#endif
 #endif

@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 import SpeakeasyCore
+import SpeakeasyClient
 
 /// Borderless, non-activating floating panel that becomes key only when clicked,
 /// so Escape works only when the user is interacting with the panel.
@@ -492,4 +493,13 @@ private extension NSRect {
 }
 
 /// The surface the shared call client drives: the floating panel on the Mac.
-typealias VoiceSurface = VoicePanelController
+extension VoicePanelController: VoiceSurface {}
+
+extension NativeVoiceClient {
+    /// The Mac client: drives the floating panel.
+    convenience init(config: AppConfig) {
+        self.init(config: config, makeSurface: { VoicePanelController(model: $0) })
+    }
+    // swiftlint:disable:next force_cast
+    var panel: VoicePanelController { surface as! VoicePanelController }
+}

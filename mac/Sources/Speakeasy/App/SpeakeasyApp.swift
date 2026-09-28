@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Combine
 import SpeakeasyCore
+import SpeakeasyClient
 import SwiftUI
 
 @main
