@@ -250,6 +250,7 @@ class CodexTransport:
                     deferred.append(event)
                 if answer and started:
                     mark_signed_in(self.binary)
+                    logger.info("speakeasy: codex voice started with %s", self.binary)
                     return answer
             raise TimeoutError("Codex realtime startup incomplete")
         finally:
@@ -345,14 +346,24 @@ class CodexSidebandWorker(SidebandWorker):
 
     async def _handoff(self, item: Any) -> None:
         """Only a provider-owned handoff_request can start Hermes work; transcripts never do."""
-        if not isinstance(item, dict) or item.get("type") != "handoff_request":
+        if not isinstance(item, dict):
+            return
+        if item.get("type") != "handoff_request":
+            # Logged so a handoff Codex shapes differently shows up instead of vanishing.
+            if "handoff" in str(item.get("type") or ""):
+                logger.warning("speakeasy: ignored Codex realtime item %r", str(item.get("type"))[:60])
             return
         handoff_id = item.get("handoff_id")
         request = item.get("input_transcript")
         if (not isinstance(handoff_id, str) or not ID_RE.fullmatch(handoff_id)
                 or not isinstance(request, str) or not clean_transcript(request).strip()
                 or len(request.encode()) > 8192 or handoff_id in self.delegations):
+            logger.warning("speakeasy: rejected Codex handoff (id ok: %s, request chars: %s, repeat: %s)",
+                           isinstance(handoff_id, str) and bool(ID_RE.fullmatch(handoff_id)),
+                           len(request) if isinstance(request, str) else None,
+                           handoff_id in self.delegations)
             return
+        logger.info("speakeasy: Codex handoff received (%s chars)", len(request))
         history = item.get("active_transcript")
         lines = []
         if isinstance(history, list):
