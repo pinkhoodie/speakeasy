@@ -327,6 +327,7 @@ enum PanelSmoke {
             do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/site-\(name).png")); record("snapshot \(dir)/site-\(name).png") }
             catch { fail("snapshot failed: \(error)") }
         }
+        await designReview(c, dir: dir)
         if let (draft, _) = PreviewFixtures.state("email-draft") {
             c.showPreview(draft, workExpanded: false)
             await settle()
@@ -349,6 +350,53 @@ enum PanelSmoke {
                 do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/email-draft-expanded.png")) } catch { fail("snapshot failed: \(error)") }
             }
         }
+    }
+
+    // MARK: A finished design pops up for review, pages through, and dismisses
+
+    static func designReview(_ c: NativeVoiceClient, dir: String) async {
+        guard let (state, _) = PreviewFixtures.state("design-review") else { fail("design review: fixture missing"); return }
+        let savedLoader = c.model.loadProductImage
+        c.model.loadProductImage = { _, n in PreviewFixtures.sampleDesign(variant: n - 1) }
+        defer { c.model.loadProductImage = savedLoader }
+        c.showPreview(state, workExpanded: false)
+        await settle(1.2)
+        check(c.model.pinnedReviews.count == 1 && c.model.pinnedReviews.first?.images.count == 3,
+              "design review: finished images pinned in the call panel without opening the task")
+        let win = c.panel.window; let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        record("design review: panel \(Int(win.frame.height))pt tall, screen \(Int(visible.height))pt")
+        check(visible.contains(win.frame), "design review: card stays on screen")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/design-review.png")); record("snapshot \(dir)/design-review.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.model.reviewIndex["run_preview"] = 1
+        await settle(0.8)
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/design-review-next.png")); record("snapshot \(dir)/design-review-next.png") }
+        catch { fail("snapshot failed: \(error)") }
+        // Three waiting reviews (the cap) on a laptop-height screen: every card's buttons stay on screen.
+        var many = state
+        many.tasks = (1...4).map { i in
+            var info = state.workInfo!
+            info.runID = "run_design_\(i)"; info.title = "Design option \(i)"; info.reviewSettledAt = Date() - Double(10 - i)
+            return TaskItem(id: "design_\(i)", info: info)
+        }
+        c.showPreview(many, workExpanded: false)
+        await settle(1.2)
+        check(c.model.pinnedReviews.map(\.runID) == ["run_design_2", "run_design_3", "run_design_4"],
+              "design review: only the three most recent reviews are pinned")
+        record("design review x3: panel \(Int(win.frame.height))pt tall, inside=\(visible.contains(win.frame))")
+        check(visible.contains(win.frame), "design review: three cards stay on screen")
+        check(win.frame.height < visible.height - 40, "design review: three cards fit without running off the screen")
+        check(ImageReviewLayout.focused(c.model.pinnedReviews, picked: c.model.focusedReviewID) == "run_design_4",
+              "design review: the newest review is open, older ones are compact rows")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/design-review-three.png")); record("snapshot \(dir)/design-review-three.png") }
+        catch { fail("snapshot failed: \(error)") }
+        // Dismiss hides the card right away (the api is told outside preview mode).
+        c.showPreview(state, workExpanded: false)
+        await settle(0.5)
+        c.model.onDismissReview("run_preview")
+        await settle(0.6)
+        check(c.model.pinnedReviews.isEmpty, "design review: Dismiss hides the card")
+        check(c.model.state.tasks.first?.info.images.count == 3, "design review: images stay in the task after Dismiss")
     }
 
     // MARK: Long header and task strings stay readable

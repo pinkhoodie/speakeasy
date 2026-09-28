@@ -360,7 +360,9 @@ struct VoicePanelView: View {
                         .padding(.horizontal, 12).padding(.bottom, 10)
                         .transition(.opacity)
                 }
-                if let task = model.state.tasks.last(where: { !$0.info.products.isEmpty || !$0.info.cards.isEmpty || !$0.info.images.isEmpty }) {
+                let reviewing = Set(model.pinnedReviews.map(\.taskID))
+                if let task = model.state.tasks.last(where: { !reviewing.contains($0.id) &&
+                    (!$0.info.products.isEmpty || !$0.info.cards.isEmpty || !$0.info.images.isEmpty) }) {
                     Button {
                         model.onSelectTask(task.id)
                     } label: {
@@ -390,6 +392,14 @@ struct VoicePanelView: View {
                     EmailDraftCard(draft: draft, model: model)
                         .padding(.horizontal, 12).padding(.bottom, 12)
                 }
+                // Finished images pop up for review without opening the task; they stay until dismissed.
+                let reviews = model.pinnedReviews
+                let open = ImageReviewLayout.focused(reviews, picked: model.focusedReviewID)
+                ForEach(reviews) { review in
+                    ImageReviewCard(review: review, shownCount: reviews.count + model.pinnedDrafts.count,
+                                    compact: review.runID != open, model: model)
+                        .padding(.horizontal, 12).padding(.bottom, review.runID == reviews.last?.runID ? 12 : 6)
+                }
             }
         }
         .frame(width: model.panelWidth, alignment: .top)
@@ -410,6 +420,7 @@ struct VoicePanelView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.captionExpanded)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.state.approval)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.state.tasks.count)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.pinnedReviews.map(\.id))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.slim)
     }
 

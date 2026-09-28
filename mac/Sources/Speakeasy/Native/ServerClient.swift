@@ -107,6 +107,11 @@ final class ServerClient: @unchecked Sendable {
         }
     }
 
+    /// Dismiss a finished task's image review card (all its images, or the listed card numbers).
+    func dismissReview(runID: String, cards: [Int]? = nil) async throws {
+        _ = try await data("/voice/reviews/\(escape(runID))/dismiss", method: "POST", body: try reviewDismissBody(cards: cards))
+    }
+
     /// `POST /voice/pair` (no auth): trade a one-time code for a device token.
     static func pair(server: URL, code: String, deviceName: String) async throws -> PairResponse {
         guard let base = trustedServerBaseURL(server.absoluteString) else {

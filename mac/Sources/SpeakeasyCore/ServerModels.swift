@@ -84,6 +84,9 @@ public struct WorkInfo: Equatable, Sendable {
     public var summary: String?
     /// Emails this task drafted; pending ones need the user's decision.
     public var emailDrafts: [EmailDraft] = []
+    /// Image card numbers still waiting on the call panel's review card (finished tasks only).
+    public var reviewImages: [Int] = []
+    public var reviewSettledAt: Date?
 
     public init(runID: String?, status: String, stale: Bool = false, updated: Date? = nil,
                 shortStatus: String? = nil, detail: String? = nil, updatedAt: Date? = nil,
@@ -138,6 +141,10 @@ public struct WorkInfo: Equatable, Sendable {
         title = nonEmpty(object["title"])
         summary = nonEmpty(object["summary"])
         emailDrafts = EmailDraft.list(json: object["email_drafts"])
+        if let review = object["review"] as? [String: Any] {
+            reviewImages = (review["images"] as? [Any] ?? []).compactMap { ($0 as? NSNumber)?.intValue }.filter { (1...8).contains($0) }
+            reviewSettledAt = decodeDate(review["settled_at"])
+        }
         if let raw = object["result"] as? [String: Any] {
             // Numbers are positions in the api's card list, so they address the image route.
             let cards = Array((raw["cards"] as? [Any] ?? []).prefix(8)).enumerated()

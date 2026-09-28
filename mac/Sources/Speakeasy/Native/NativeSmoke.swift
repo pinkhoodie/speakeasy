@@ -71,7 +71,37 @@ enum PreviewFixtures {
         return rep.representation(using: .png, properties: [:])
     }
 
-    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "email-draft", "ended"]
+    /// A drawn stand-in for a finished landing-page design (the design review card).
+    static func sampleDesign(variant: Int = 0) -> Data? {
+        let image = NSImage(size: NSSize(width: 1200, height: 800), flipped: true) { rect in
+            let accents: [NSColor] = [.systemOrange, .systemTeal, .systemPink]
+            let accent = accents[abs(variant) % accents.count]
+            NSColor(calibratedWhite: 0.98, alpha: 1).setFill(); rect.fill()
+            NSColor(calibratedWhite: 0.12, alpha: 1).setFill(); NSRect(x: 0, y: 0, width: 1200, height: 70).fill()
+            let nav: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 26, weight: .semibold), .foregroundColor: NSColor.white]
+            ("Crumb & Co." as NSString).draw(at: NSPoint(x: 48, y: 20), withAttributes: nav)
+            accent.withAlphaComponent(0.18).setFill(); NSRect(x: 0, y: 70, width: 1200, height: 380).fill()
+            let h1: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 64, weight: .bold), .foregroundColor: NSColor(calibratedWhite: 0.1, alpha: 1)]
+            ("Fresh bread, every morning." as NSString).draw(at: NSPoint(x: 72, y: 150), withAttributes: h1)
+            let sub: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 28), .foregroundColor: NSColor.darkGray]
+            ("Order by 8 pm, pick up at 7 am." as NSString).draw(at: NSPoint(x: 76, y: 250), withAttributes: sub)
+            accent.setFill(); NSBezierPath(roundedRect: NSRect(x: 76, y: 320, width: 240, height: 64), xRadius: 32, yRadius: 32).fill()
+            let btn: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 26, weight: .semibold), .foregroundColor: NSColor.white]
+            ("Order now" as NSString).draw(at: NSPoint(x: 134, y: 336), withAttributes: btn)
+            for i in 0..<3 {
+                let box = NSRect(x: 72 + i * 360, y: 500, width: 330, height: 250)
+                NSColor(calibratedWhite: 0.92, alpha: 1).setFill(); NSBezierPath(roundedRect: box, xRadius: 18, yRadius: 18).fill()
+                accent.withAlphaComponent(0.55).setFill(); NSBezierPath(ovalIn: NSRect(x: box.minX + 115, y: box.minY + 40, width: 100, height: 100)).fill()
+                let t: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 24, weight: .medium), .foregroundColor: NSColor.darkGray]
+                (["Sourdough", "Baguettes", "Croissants"][i] as NSString).draw(at: NSPoint(x: box.minX + 100, y: box.minY + 170), withAttributes: t)
+            }
+            return true
+        }
+        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "email-draft", "ended"]
 
     static func state(_ name: String) -> (VoiceState, workExpanded: Bool)? {
         let now = Date()
@@ -173,6 +203,17 @@ enum PreviewFixtures {
                                   title: "Restock snack cart")
             s.tasks = [TaskItem(id: "detail", info: s.workInfo!)]
             s.runID = "run_detail"; s.delegationAt = now - 70
+        case "design-review":
+            let images = (1...3).map { ImageCard(number: $0, name: "bakery-landing-v\($0).png") }
+            s.workInfo = work("completed", short: "Design done", age: 3,
+                              result: WorkResult(spoken: "The landing page is ready.", full: "Three takes on the bakery landing page.",
+                                                 label: "Design done", images: images))
+            s.workInfo?.title = "Bakery landing page"
+            s.workInfo?.reviewImages = [1, 2, 3]
+            s.workInfo?.reviewSettledAt = now - 3
+            s.tasks = [TaskItem(id: "design", info: s.workInfo!)]
+            s.runID = "run_preview"
+            s.exchange = Exchange(you: "Design a landing page for the bakery.", assistant: "It's ready — have a look.", replyStarted: true)
         case "email-draft":
             let draft = EmailDraft(draftID: "draft_preview", sha256: "0f3a9c", from: "you@example.com",
                                    to: ["dana@example.com"], cc: ["sam@example.com"],

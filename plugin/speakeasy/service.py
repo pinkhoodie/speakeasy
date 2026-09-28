@@ -518,6 +518,27 @@ class VoiceService:
                 publish_state(self.store, interaction, name)
         return {"dismissed": dismissed}
 
+    def dismiss_review(self, run_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Dismiss a finished task's image review card (all its images, or the listed card numbers).
+        Stored per run and card, so it stays dismissed across calls; the images stay in the task."""
+        cards = body.get("cards")
+        if not ID_RE.fullmatch(run_id) or not set(body) <= {"cards"} or (cards is not None and (
+                not isinstance(cards, list) or not cards or len(cards) > MAX_CARDS
+                or not all(isinstance(c, int) and not isinstance(c, bool) and 1 <= c <= MAX_CARDS for c in cards))):
+            raise ServiceError(400, "cards must be a list of card numbers")
+        if self.store.key_for_run(run_id) is None:
+            raise ServiceError(404, "task not found")
+        dismissed = self.store.dismiss_review(run_id, cards)
+        self._republish_all()
+        return {"run_id": run_id, "dismissed": dismissed}
+
+    def _republish_all(self) -> None:
+        with self.lock:
+            live = list(self.interactions.values())
+        name = self.settings.get()["assistant_name"]
+        for interaction in live:
+            publish_state(self.store, interaction, name)
+
     def work_latest(self) -> dict[str, Any]:
         name = self.settings.get()["assistant_name"]
         return {"work": self.store.work(assistant_name=name), "away": self.store.away(),

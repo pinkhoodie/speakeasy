@@ -198,6 +198,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/voice/onboarding":
                 self._reply(200, self.service.save_onboarding(self._body()))
                 return
+            review = re.fullmatch(rf"/voice/reviews/{_ID}/dismiss", path)
+            if review:
+                self._reply(200, self.service.dismiss_review(review.group(1), self._body()))
+                return
             draft = re.fullmatch(rf"/voice/drafts/{_ID}", path)
             if draft:
                 self._reply(200, self.service.decide_draft(draft.group(1), self._body()))

@@ -80,6 +80,16 @@ final class VoicePanelModel: ObservableObject {
         state.pendingDrafts.filter { displayedStatus(of: $0) == .pending || draftBusy.contains($0.draftID) }
     }
 
+    // MARK: Image review cards
+    /// Dismiss a review card (run id); its images stay inside the task.
+    var onDismissReview: (String) -> Void = { _ in }
+    /// Which image each review card shows (run id -> index into its images).
+    @Published var reviewIndex: [String: Int] = [:]
+    /// The review card shown large (run id); nil = the newest. The others are compact rows.
+    @Published var focusedReviewID: String?
+    /// Review cards to pin in the call panel (like drafts): most recent three.
+    var pinnedReviews: [ImageReview] { state.pendingReviews }
+
     // MARK: Panel visibility
     /// The close (x) button: hide the panel (ends nothing).
     var onClosePanel: () -> Void = {}

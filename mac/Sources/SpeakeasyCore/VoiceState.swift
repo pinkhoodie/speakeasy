@@ -89,6 +89,8 @@ public struct VoiceState: Equatable, Sendable {
     public var tasks: [TaskItem] = []
     /// Finished tasks the user cleared; kept out of later task snapshots.
     public var dismissedRunIDs: Set<String> = []
+    /// Review cards the user dismissed ("run|card"); hidden right away, the api confirms.
+    public var dismissedReviews: Set<String> = []
     /// Closing the session to pause (not end) the call.
     public var pausing = false
     /// The paused call the current connection is resuming.
@@ -171,6 +173,8 @@ public enum VoiceEvent: Equatable, Sendable {
     case tasks([TaskItem])
     /// the user cleared finished tasks (the x); hidden right away, api confirms.
     case tasksDismissed([String])
+    /// the user dismissed a review card (run id, card numbers); hidden right away, api confirms.
+    case reviewDismissed(String, [Int])
     case pauseRequested
     /// The api refused to hold the call: stay live.
     case pauseFailed(String)
@@ -226,6 +230,9 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
         let cleared = s.tasks.filter { $0.isSettled && ids.contains($0.info.runID ?? "") }
         s.dismissedRunIDs.formUnion(cleared.compactMap(\.info.runID))
         s.tasks.removeAll { task in cleared.contains(task) }
+
+    case .reviewDismissed(let runID, let cards):
+        s.dismissedReviews.formUnion(cards.map { "\(runID)|\($0)" })
 
     case .sessionStarted:
         if s.connection == .connecting { s.connection = .live }
