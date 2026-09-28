@@ -64,6 +64,9 @@ def setup_parser(parser) -> None:
     set_.add_argument("key")
     set_.add_argument("value")
     sub.add_parser("status", help="Show voice provider, Hermes API and brief status")
+    reload_ = sub.add_parser("reload", help="Load a newly installed Speakeasy now, without restarting Hermes "
+                                            "(ends a live call; running tasks keep going in Hermes)")
+    reload_.add_argument("--timeout", type=float, default=30, help=argparse.SUPPRESS)
 
 
 # -- helpers --------------------------------------------------------------------------------------
@@ -386,6 +389,35 @@ def cmd_status(home: Path) -> int:
     return 0
 
 
+def cmd_reload(home: Path, timeout: float = 30) -> int:
+    """Ask the running gateway's Speakeasy to load the installed files now."""
+    import json as _json
+    from .reloader import REQUEST_FILE, RESULT_FILE
+    state = home / "speakeasy"
+    state.mkdir(parents=True, exist_ok=True)
+    result = state / RESULT_FILE
+    before = result.stat().st_mtime if result.exists() else 0
+    (state / REQUEST_FILE).write_text(str(time.time()))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if result.exists() and result.stat().st_mtime > before:
+            try:
+                answer = _json.loads(result.read_text())
+            except ValueError:
+                time.sleep(.2)
+                continue
+            if answer.get("ok"):
+                print(f"Speakeasy {answer.get('version')} loaded. No gateway restart needed.")
+                return 0
+            print(f"The new Speakeasy didn't load, so {answer.get('version')} is still running: {answer.get('error')}")
+            return 1
+        time.sleep(.3)
+    (state / REQUEST_FILE).unlink(missing_ok=True)
+    print("No answer from Speakeasy. Is the Hermes gateway running with Speakeasy 0.2.17 or newer? "
+          "If it's older, restart the gateway once: `hermes gateway restart`.")
+    return 1
+
+
 def handle(args) -> int:
     command = getattr(args, "voice_command", None)
     home = _home()
@@ -397,6 +429,8 @@ def handle(args) -> int:
         return cmd_config(args, home)
     if command == "status":
         return cmd_status(home)
+    if command == "reload":
+        return cmd_reload(home, getattr(args, "timeout", 30))
     store = _store(home)
     if command == "devices":
         devices = store.devices()
@@ -412,5 +446,5 @@ def handle(args) -> int:
             return 0
         print(f"No device {args.device_id}.")
         return 1
-    print("Usage: hermes voice {setup|pair|devices|revoke <id>|config get|set|status}")
+    print("Usage: hermes voice {setup|pair|devices|revoke <id>|config get|set|status|reload}")
     return 2

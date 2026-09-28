@@ -121,6 +121,17 @@ class VoiceService:
         self.hermes.last_error = ""
         return self.hermes.run_to_completion(prompt, idem, "speakeasy_brief")
 
+    def busy(self) -> bool:
+        """A call is live or a task is still running: an automatic reload would cut it off."""
+        with self.lock:
+            live = list(self.interactions.values())
+        for interaction in live:
+            if not interaction.call_closed or interaction.paused:
+                return True
+            if any(r.status in ACTIVE_RUN_STATES for r in interaction.runs.values()):
+                return True
+        return False
+
     def close(self) -> None:
         self._stop.set()
         self.brief.stop()

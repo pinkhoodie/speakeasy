@@ -31,7 +31,11 @@ class VoiceAdapter(BasePlatformAdapter):
         self.hermes_home = get_hermes_home()
         from . import router
         router.bind_home(self.hermes_home)
-        self._server: Any = None
+        self._reloader: Any = None
+
+    @property
+    def _server(self) -> Any:
+        return self._reloader.server if self._reloader is not None else None
 
     @property
     def name(self) -> str:
@@ -54,14 +58,16 @@ class VoiceAdapter(BasePlatformAdapter):
 
     # -- lifecycle ---------------------------------------------------------------------
     async def connect(self, **_kwargs) -> bool:
-        from .service import VoiceService
-        from .server import SpeakeasyServer
+        from pathlib import Path
+        from .reloader import LiveReloader
+        # The reloader owns the server so a reinstalled plugin loads without a gateway restart.
+        self._reloader = LiveReloader(__package__, Path(__file__).parent, self.hermes_home, self.host, self.port)
         try:
-            self._server = SpeakeasyServer(VoiceService(self.hermes_home), self.host, self.port)
+            self._reloader.start()
         except OSError as e:
+            self._reloader = None
             self._set_fatal_error("bind_failed", f"voice: could not bind {self.host}:{self.port}: {e}", retryable=True)
             return False
-        self._server.start()
         self._mark_connected(listener_base=self._server.base_url)
         self._send_pending_link()
         logger.info("Speakeasy voice platform listening on %s", self._server.base_url)
@@ -79,11 +85,11 @@ class VoiceAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         self._mark_disconnected()
-        if self._server is not None:
+        if self._reloader is not None:
             try:
-                self._server.stop()
+                self._reloader.stop()
             finally:
-                self._server = None
+                self._reloader = None
 
     # -- gateway messaging (unused: voice results are spoken on the live call) ---------------
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,

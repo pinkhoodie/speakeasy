@@ -73,6 +73,20 @@ Routing (follow-up or new task, splitting "do X and Y", picking a channel) uses 
 your Hermes auxiliary model `speakeasy_router`; pick its model with `hermes model` → auxiliary
 tasks. If it's slow or fails, simple built-in rules take over.
 
+## Updating
+
+On the machine that runs Hermes:
+
+```bash
+hermes plugins install rungmc357/speakeasy/plugin/speakeasy --enable
+```
+
+No gateway restart needed (Speakeasy 0.2.17 and later). The new version loads by itself within a
+few seconds once no call is live and no voice task is running. To load it right away, even
+mid-call, run `hermes voice reload`: a live call ends and you redial; tasks already running keep
+going in Hermes. If the new version fails to load, the previous one keeps running and the command
+says why. Updating from 0.2.16 or earlier needs one last `hermes gateway restart`.
+
 ## Contributing
 
 Building from source, running the tests and releasing: see [CONTRIBUTING.md](CONTRIBUTING.md).
