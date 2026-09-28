@@ -86,9 +86,9 @@ def test_progress_is_spoken_once_for_a_long_quiet_task(service, monkeypatch):
     from fakes import FakeLiveWorker
     worker = FakeLiveWorker(service.rt, Interaction("int_x", "sess_x"))
     backend = BackendRun("t1", 1, "idem_1", status="running")
-    backend.started -= 25  # running for 25 s
+    backend.started -= calls.PROGRESS_AFTER_S + 5  # long enough to earn one update
     asyncio.run(worker.maybe_speak_progress(backend, "Pulling this week's events"))
-    asyncio.run(worker.maybe_speak_progress(backend, "Verifying the injury report"))  # within 30 s: quiet
+    asyncio.run(worker.maybe_speak_progress(backend, "Verifying the injury report"))  # within PROGRESS_EVERY_S: quiet
     lines = spoken(worker)
     assert len(lines) == 1 and "Pulling this week's events" in lines[0]
     backend.spoken_at -= calls.PROGRESS_EVERY_S + 1
@@ -96,8 +96,36 @@ def test_progress_is_spoken_once_for_a_long_quiet_task(service, monkeypatch):
     asyncio.run(worker.maybe_speak_progress(backend, "Almost there"))  # user spoke: stay quiet
     assert len(spoken(worker)) == 1
     fresh = BackendRun("t2", 1, "idem_2", status="running")
-    asyncio.run(worker.maybe_speak_progress(fresh, "Just started"))  # under 20 s: quiet
+    asyncio.run(worker.maybe_speak_progress(fresh, "Just started"))  # too new: quiet
     assert len(spoken(worker)) == 1
+
+
+def test_a_chatty_task_does_not_make_the_voice_check_in_every_few_seconds(service):
+    """Live report: 'Still on it' every ~10 s. Hermes posts a status line often; every one went to
+    the voice model, which answered each out loud. Over two minutes of updates every 5 s, the call
+    gets at most one spoken update per PROGRESS_EVERY_S plus a rare silent note."""
+    import asyncio
+    from speakeasy import calls
+    from speakeasy.calls import BackendRun, Interaction
+    from fakes import FakeLiveWorker
+    worker = FakeLiveWorker(service.rt, Interaction("int_y", "sess_y"))
+    backend = BackendRun("t1", 1, "idem_chatty", status="running")
+    start = backend.started
+    clock = [start]
+    real = time.monotonic
+    calls.time.monotonic = lambda: clock[0]
+    try:
+        for step in range(0, 121, 5):
+            clock[0] = start + step
+            event = {"event": "message.interim", "text": f"STATUS: Checking source {step}\nDETAIL: Reading source {step}"}
+            asyncio.run(worker._handle_hermes_event(backend, event))
+    finally:
+        calls.time.monotonic = real
+    said = [c for k, _, c in worker.sent if k == "session.commentary.append"]
+    notes = [c for k, _, c in worker.sent if k == "session.thinking.append"]
+    assert len(said) <= 120 // calls.PROGRESS_EVERY_S + 1
+    assert len(notes) <= 120 // calls.STATUS_NOTE_EVERY_S + 1
+    assert all("do not say anything" in n for n in notes)
 
 
 # -- routing model ---------------------------------------------------------------------------------

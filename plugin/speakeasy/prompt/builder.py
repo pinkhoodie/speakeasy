@@ -437,6 +437,12 @@ def ack_channel_post(label: str) -> str:
     return f"That'll go to {short_place(label)}."
 
 
+def status_note(detail: str) -> str:
+    """A silent status note for the voice model: context for "how's it going?", never a cue to talk."""
+    return ("Background status, do not say anything now; only use it if asked how the task is going: "
+            + re.sub(r"\s+", " ", detail or "").strip()[:300])
+
+
 def progress_line(seed: str, milestone: str) -> str:
     """A brief spoken progress update for a long task (the milestone is Hermes' own short line)."""
     text = re.sub(r"\s+", " ", milestone or "").strip().rstrip(".")

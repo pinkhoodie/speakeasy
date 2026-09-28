@@ -38,8 +38,12 @@ THREAD_OPEN_WAIT_S = 20
 CONTINUITY_POLL_S = 5
 # Spoken progress: only for tasks running this long, at most once per task per PROGRESS_EVERY_S,
 # and only when the user hasn't spoken since the last update.
-PROGRESS_AFTER_S = 20.0
-PROGRESS_EVERY_S = 30.0
+PROGRESS_AFTER_S = 45.0
+PROGRESS_EVERY_S = 90.0
+# Silent status notes to the voice model (so it can answer "how's it going?"): at most this often.
+# Every note used to go straight in, and the voice answered each one out loud ("Still on it")
+# every few seconds on a long task.
+STATUS_NOTE_EVERY_S = 60.0
 
 
 class ServiceError(Exception):
@@ -164,6 +168,7 @@ class BackendRun:
     deliver_to: str | None = None
     started: float = dataclasses.field(default_factory=time.monotonic)
     spoken_at: float = 0.0          # last spoken progress line for this task (monotonic)
+    noted_at: float = 0.0           # last silent status note to the voice model (monotonic)
 
     @property
     def say_id(self) -> str:
@@ -594,23 +599,35 @@ class SidebandWorker:
         if ms is not None:
             self.store.set_timing(idem, "routing_ms", ms)
 
-    async def maybe_speak_progress(self, backend: BackendRun, milestone: str) -> None:
+    async def maybe_note_status(self, backend: BackendRun, detail: str) -> None:
+        """Keep the voice model's picture of a running task current without prompting it to talk."""
+        now = time.monotonic()
+        with self.interaction.lock:
+            last = backend.noted_at
+            if last and now - last < STATUS_NOTE_EVERY_S:
+                return
+            backend.noted_at = now
+        await self.append("session.thinking.append", backend.say_id, P.status_note(detail))
+
+    async def maybe_speak_progress(self, backend: BackendRun, milestone: str) -> bool:
         """A long task with a new milestone gets one brief spoken update, at most once per 30 s, and
         only while the user is quiet (never talk over them or chain updates)."""
         if not self.rt.settings()["speech"]["progress"]:
-            return
+            return False
         now = time.monotonic()
         with self.interaction.lock:
             last = backend.spoken_at or backend.started
             if (now - backend.started < PROGRESS_AFTER_S or (backend.spoken_at and now - backend.spoken_at < PROGRESS_EVERY_S)
                     or backend.status not in {"running", "working"}):
-                return
+                return False
             if self.user_spoke_since(last):
                 backend.spoken_at = now  # they talked meanwhile: restart the quiet window
-                return
+                return False
             backend.spoken_at = now
         if self.call_connected():
             await self.append("session.commentary.append", backend.say_id, P.progress_line(backend.idem_key, milestone))
+            return True
+        return False
 
     # -- dispatch ---------------------------------------------------------------------------
     def _idem(self, key: str, revision: int) -> str:
@@ -1227,8 +1244,8 @@ class SidebandWorker:
                 if progress:
                     self.store.user_progress(idem, *progress)
                     self.store.progress(idem, "milestone", progress[1])
-                    await self.append("session.thinking.append", delegation_id, progress[1])
-                    await self.maybe_speak_progress(backend, progress[0])
+                    if not await self.maybe_speak_progress(backend, progress[0]):
+                        await self.maybe_note_status(backend, progress[1])
             elif backend.status != "ambiguous":
                 derived = derive_tool_status(event.get("tool"), event.get("preview"))
                 if derived:
