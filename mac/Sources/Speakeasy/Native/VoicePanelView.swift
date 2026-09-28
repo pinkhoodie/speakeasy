@@ -873,6 +873,19 @@ struct WorkDetailView: View {
     @ViewBuilder private var detail: some View {
         let s = model.state
                 VStack(alignment: .leading, spacing: 12) {
+                    // "Now" first: with a picture above it, the 280 pt view cut it off at the bottom.
+                    section("Now") {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Self.nowStatus(nowLine, tone: nowTone)
+                            if let detail = nowDetail {
+                                Text(detail).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                            }
+                            if let fresh = freshness {
+                                Text(fresh).font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
                     if let info, !info.isTerminal, let live = info.liveImage, let runID = info.runID {
                         section(live.label) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -890,18 +903,6 @@ struct WorkDetailView: View {
                     } else if info != nil {
                         section("Your request") {
                             Text("This job predates work history.").font(.system(size: 11.5)).foregroundStyle(.secondary)
-                        }
-                    }
-                    section("Now") {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Self.nowStatus(nowLine, tone: nowTone)
-                            if let detail = nowDetail {
-                                Text(detail).font(.system(size: 11.5)).foregroundStyle(.secondary)
-                                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                            }
-                            if let fresh = freshness {
-                                Text(fresh).font(.system(size: 10.5)).foregroundStyle(.tertiary)
-                            }
                         }
                     }
                     if let milestones = info?.milestones, !milestones.isEmpty {
@@ -1021,6 +1022,7 @@ struct WorkDetailView: View {
         switch model.state.work {
         case .active(_, let detail, _, _): return detail
         case .stale: return model.state.workInfo?.detail ?? "No verified update has arrived recently."
+        case .notReceived: return "The request never reached \(model.state.assistantName). Say it again; if it keeps happening, restart Hermes."
         default: return nil
         }
     }

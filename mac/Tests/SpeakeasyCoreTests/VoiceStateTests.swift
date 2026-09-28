@@ -162,9 +162,28 @@ final class VoiceStateTests: XCTestCase {
     func testDelegationShowsHonestWaiting() {
         var s = reduce(live(), .delegationCreated, now: t0)
         guard case .waiting = s.work else { return XCTFail("expected waiting") }
-        s = reduce(s, .tick, now: t0 + 92)
-        XCTAssertEqual(present(s).secondary, "Waiting for Hermes · 1m 32s")
+        s = reduce(s, .tick, now: t0 + 32)
+        XCTAssertEqual(present(s).secondary, "Waiting for Hermes · 32s")
         XCTAssertEqual(present(s).tone, .plain)
+    }
+
+    /// Live report: "Waiting for Claire" sat there for minutes because the task never started.
+    func testAHandoffThatNeverBecomesATaskSaysSoInsteadOfWaitingForever() {
+        var s = reduce(live(), .delegationCreated, now: t0)
+        s = reduce(s, .tick, now: t0 + VoiceState.notReceivedAfter + 1)
+        guard case .notReceived = s.work else { return XCTFail("expected notReceived, got \(s.work)") }
+        XCTAssertEqual(present(s).secondary, "Hermes didn't get that")
+        XCTAssertEqual(present(s).tone, .warning)
+        // a task that shows up late still takes over
+        s = reduce(s, .work(work(at: t0 + 50)), now: t0 + 50)
+        guard case .active = s.work else { return XCTFail("expected active once the task appears") }
+    }
+
+    func testARunningTaskWaitingOnApprovalNeverTimesOut() {
+        var s = reduce(live(), .delegationCreated, now: t0)
+        s = reduce(s, .work(work("waiting_for_approval", at: t0 + 2)), now: t0 + 2)
+        s = reduce(s, .tick, now: t0 + 600)
+        if case .notReceived = s.work { XCTFail("a real task must never read as not received") }
     }
 
     func testFreshActiveWorkGlimmersThenGoesPlainThenStale() {

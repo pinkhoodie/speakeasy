@@ -99,6 +99,7 @@ public func workStatusLine(_ work: WorkPhase, now: Date,
         let fresh = now.timeIntervalSince(at) <= VoiceState.freshFor
         return (short, fresh ? .glimmer : .plain)
     case .stale: return ("Status unconfirmed", .warning)
+    case .notReceived: return ("\(assistantName) didn't get that", .warning)
     case .approval: return ("Needs your approval", .attention)
     case .done(let status, let result):
         switch status {

@@ -36,6 +36,8 @@ public enum SpeechState: Equatable, Sendable {
 public enum WorkPhase: Equatable, Sendable {
     case none
     case waiting(since: Date)
+    /// The voice handed a request off but no task ever appeared: it never reached the agent.
+    case notReceived(since: Date)
     case active(short: String, detail: String?, source: String?, updatedAt: Date)
     case stale
     case approval(ApprovalInfo)
@@ -133,6 +135,9 @@ public struct VoiceState: Equatable, Sendable {
     /// of the same sentence, even if the assistant has already started replying.
     public static let lateInputGrace: TimeInterval = 2.5
     public static let staleAfter: TimeInterval = 90
+    /// A handoff with no task after this long never reached the agent (routing and opening a
+    /// thread take well under this; a crash or a broken install never produces a task).
+    public static let notReceivedAfter: TimeInterval = 45
     public static let freshFor: TimeInterval = 45
 
     /// Remote audio should play unless the user quieted the assistant.
@@ -409,7 +414,10 @@ private func isEnded(_ phase: ConnectionPhase) -> Bool {
 public func deriveWork(_ s: VoiceState, now: Date) -> WorkPhase {
     if let approval = s.approval { return .approval(approval) }
     guard let info = s.workInfo else {
-        if let since = s.delegationAt { return .waiting(since: since) }
+        if let since = s.delegationAt {
+            return now.timeIntervalSince(since) > VoiceState.notReceivedAfter ? .notReceived(since: since)
+                                                                               : .waiting(since: since)
+        }
         return .none
     }
     if info.isTerminal { return .done(status: info.status, result: info.result) }
