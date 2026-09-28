@@ -952,7 +952,7 @@ class SidebandWorker:
         if state != "created":
             self.publish()
             return
-        where = f"a new {channel.label} thread"
+        where = P.new_thread_in(channel.label)
         self.record_timing(task_id, idem)
         self.store.progress(idem, "request", request)
         self.name_task(idem, request)
@@ -965,7 +965,7 @@ class SidebandWorker:
 
         def on_session(session_id: str) -> None:
             # Follow-ups to this task continue inside the thread (thread continuity).
-            self.store.set_continued(idem, session_id, f"{channel.label} thread")
+            self.store.set_continued(idem, session_id, f"a thread in {channel.label}")
 
         def on_title(title: str) -> None:
             # Hermes names the thread after its first turn; show the same name in the panel.

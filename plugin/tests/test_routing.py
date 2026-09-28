@@ -256,10 +256,22 @@ def test_new_thread_channel_runs_the_task_in_a_thread(server, service, hermes):
     worker.delegate("call_t", "Put this in work: move my 3pm meeting to Thursday")
     done = wait_for(lambda: [t for t in tasks(server) if t["status"] == "completed"])[0]
     assert runner.opened and runner.opened[0][0] == "discord:111" and hermes.calls == []
-    assert "Started that in a new #work thread." in spoken(worker)
+    assert "Started that in a new thread in #work." in spoken(worker)
     assert "dark mode" in done["result"]["full"] and not done["result"]["full"].startswith("Voice:")
     key = next(iter(worker.interaction.runs.values())).idem_key
     assert service.store.continued_for(key)["session_id"] == "thread_session_1"  # follow-ups go there
+    milestones = [p["text"] for p in done.get("progress", []) if p.get("kind") == "milestone"]
+    assert not milestones or "Started in a new thread in #work" in milestones
+
+
+def test_thread_destination_wording_reads_as_a_place():
+    """Labels are places ("your Discord", "#voice on Discord"), never adjectives: the old template
+    produced "Started in a new your Discord thread" and spoke "a new your thread"."""
+    from speakeasy.prompt import builder as P
+    for label, spoken_as in (("your Discord", "your Discord"), ("#voice on Discord", "#voice")):
+        assert P.new_thread_in(label) == f"a new thread in {label}"
+        assert P.ack_channel_thread(label) == f"Started that in a new thread in {spoken_as}."
+    assert P.ack_channel_post("your Telegram") == "That'll go to your Telegram."
 
 
 def test_thread_failure_falls_back_to_posting(server, service, hermes):

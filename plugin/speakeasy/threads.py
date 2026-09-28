@@ -148,7 +148,7 @@ def route_for(target: str, label: str, owner: tuple[str, str, str], key: str) ->
     chat_id = chat.split(":", 1)[0] if platform == "telegram" else chat
     user_id, user_name, chat_type = owner
     return {
-        "description": f"Speakeasy: voice tasks in a new {label} thread",
+        "description": f"Speakeasy: voice tasks in new threads in {label}",
         "enabled": True, "events": [EVENT], "secret": key, "prompt": "{message}", "deliver": "log",
         "source_platform": platform, "source_chat_id": chat_id, "source_chat_name": label,
         "source_chat_type": chat_type if chat_type != "thread" else "group",

@@ -398,12 +398,25 @@ def short_task_name(name: str | None, words: int = 2) -> str:
     return " ".join(picked) or "that"
 
 
+def short_place(label: str | None) -> str:
+    """A destination label cut short enough to speak, without breaking possessive labels:
+    "#voice on Discord" -> "#voice", "your Discord" -> "your Discord" (never a bare "your")."""
+    words = 2 if (label or "").lower().startswith("your ") else 1
+    return short_task_name(label, words)
+
+
+def new_thread_in(label: str) -> str:
+    """ "a new thread in #voice on Discord" / "a new thread in your Discord". The label is a
+    place, not an adjective, so it can't go between "new" and "thread" ("a new your Discord thread")."""
+    return f"a new thread in {label}"
+
+
 def ack_channel_thread(label: str) -> str:
-    return f"Started that in a new {short_task_name(label, 1)} thread."
+    return f"Started that in {new_thread_in(short_place(label))}."
 
 
 def ack_channel_post(label: str) -> str:
-    return f"That'll go to {short_task_name(label, 1)}."
+    return f"That'll go to {short_place(label)}."
 
 
 def progress_line(seed: str, milestone: str) -> str:
