@@ -107,6 +107,11 @@ final class ServerClient: @unchecked Sendable {
         }
     }
 
+    /// Dismiss a finished task's image review card (all its images, or the listed card numbers).
+    func dismissReview(runID: String, cards: [Int]? = nil) async throws {
+        _ = try await data("/voice/reviews/\(escape(runID))/dismiss", method: "POST", body: try reviewDismissBody(cards: cards))
+    }
+
     /// `POST /voice/pair` (no auth): trade a one-time code for a device token.
     static func pair(server: URL, code: String, deviceName: String) async throws -> PairResponse {
         guard let base = trustedServerBaseURL(server.absoluteString) else {
@@ -171,6 +176,16 @@ final class ServerClient: @unchecked Sendable {
     func image(runID: String, index: Int) async throws -> Data {
         guard (1...8).contains(index) else { throw HTTPError(status: 400, message: "Invalid card") }
         let (data, response) = try await session.data(for: request("/voice/card-image/\(escape(runID))/\(index)"))
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              http.mimeType?.hasPrefix("image/") == true, !data.isEmpty, data.count <= 8_000_000 else {
+            throw HTTPError(status: (response as? HTTPURLResponse)?.statusCode ?? 502, message: "Image unavailable")
+        }
+        return data
+    }
+
+    /// The latest image a running task produced or is looking at (authenticated, vetted server-side).
+    func liveImage(runID: String) async throws -> Data {
+        let (data, response) = try await session.data(for: request("/voice/live-image/\(escape(runID))"))
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               http.mimeType?.hasPrefix("image/") == true, !data.isEmpty, data.count <= 8_000_000 else {
             throw HTTPError(status: (response as? HTTPURLResponse)?.statusCode ?? 502, message: "Image unavailable")

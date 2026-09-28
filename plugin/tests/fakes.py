@@ -109,6 +109,8 @@ class FakeHermes(BaseHTTPRequestHandler):
             if self.state.approval_first:
                 run["pre_events"] = [{"event": "approval.request", "request_id": "apr_" + run_id,
                                       "description": "Delete an old file"}]
+            if self.state.live_events:
+                run["pre_events"] = run.get("pre_events", []) + list(self.state.live_events)
             if self.state.hold or self.state.approval_first:
                 run["status"] = "running"
             else:
@@ -127,6 +129,7 @@ class FakeHermes(BaseHTTPRequestHandler):
                 run["done"].set()
                 self._json(200, {"status": "stopping"})
             elif parts[3] == "steer":
+                self.state.steers.append((parts[2], body.get("input", "")))
                 self._json(200, {"accepted": run["status"] == "running"})
             elif parts[3] == "approval":
                 self.state.approvals.append(body)
@@ -149,6 +152,8 @@ class FakeHermesServer:
         self.counter = 0
         self.hold = False
         self.approval_first = False
+        self.live_events: list[dict[str, Any]] = []  # streamed while a held run is still working
+        self.steers: list[tuple[str, str]] = []
         self.responder = responder or (lambda prompt, sid: "Done.\nDONE: Finished\nSPOKEN: All done.")
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeHermes)
         self.httpd.daemon_threads = True

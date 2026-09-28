@@ -84,6 +84,11 @@ public struct WorkInfo: Equatable, Sendable {
     public var summary: String?
     /// Emails this task drafted; pending ones need the user's decision.
     public var emailDrafts: [EmailDraft] = []
+    /// Image card numbers still waiting on the call panel's review card (finished tasks only).
+    public var reviewImages: [Int] = []
+    public var reviewSettledAt: Date?
+    /// The latest image the task produced or is looking at (live view); bytes via `/voice/live-image/<run>`.
+    public var liveImage: LiveImage?
 
     public init(runID: String?, status: String, stale: Bool = false, updated: Date? = nil,
                 shortStatus: String? = nil, detail: String? = nil, updatedAt: Date? = nil,
@@ -138,6 +143,11 @@ public struct WorkInfo: Equatable, Sendable {
         title = nonEmpty(object["title"])
         summary = nonEmpty(object["summary"])
         emailDrafts = EmailDraft.list(json: object["email_drafts"])
+        liveImage = LiveImage(json: object["live_image"])
+        if let review = object["review"] as? [String: Any] {
+            reviewImages = (review["images"] as? [Any] ?? []).compactMap { ($0 as? NSNumber)?.intValue }.filter { (1...8).contains($0) }
+            reviewSettledAt = decodeDate(review["settled_at"])
+        }
         if let raw = object["result"] as? [String: Any] {
             // Numbers are positions in the api's card list, so they address the image route.
             let cards = Array((raw["cards"] as? [Any] ?? []).prefix(8)).enumerated()
@@ -152,6 +162,26 @@ public struct WorkInfo: Equatable, Sendable {
             result = nil
         }
     }
+}
+
+/// What a running task is looking at right now. Only a name and a sequence number reach the app;
+/// the bytes come from the authenticated `/voice/live-image/<run>` route and `seq` says when to refetch.
+public struct LiveImage: Equatable, Sendable {
+    public var name: String
+    public var source: String
+    public var seq: Int
+    public var at: Date?
+    public init(name: String, source: String = "viewed", seq: Int, at: Date? = nil) {
+        self.name = name; self.source = source; self.seq = seq; self.at = at
+    }
+    public init?(json: Any?) {
+        guard let o = json as? [String: Any], let seq = (o["seq"] as? NSNumber)?.intValue, seq > 0 else { return nil }
+        let name = (o["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.init(name: name.isEmpty ? "Image" : String(name.prefix(120)), source: o["source"] as? String ?? "viewed",
+                  seq: seq, at: decodeDate(o["at"]))
+    }
+    /// Section title in the task detail.
+    public var label: String { source == "generated" ? "Latest image" : "Looking at" }
 }
 
 /// One voice task of the call. Several can run in parallel; `id` is the

@@ -106,9 +106,14 @@ final class NativeVoiceClient: VoiceCallClient {
         model.onStopTask = { [weak self] runID in self?.stopWork(runID: runID) }
         model.onSelectTask = { [weak self] id in self?.selectTask(id) }
         model.onDismissTasks = { [weak self] runIDs in self?.dismissTasks(runIDs) }
+        model.onDismissReview = { [weak self] runID in self?.dismissReview(runID) }
         model.loadProductImage = { [weak self] runID, index in
             guard let self, let api = self.api else { return nil }
             return try? await api.image(runID: runID, index: index)
+        }
+        model.loadLiveImage = { [weak self] runID in
+            guard let self, let api = self.api else { return nil }
+            return try? await api.liveImage(runID: runID)
         }
     }
 
@@ -131,6 +136,7 @@ final class NativeVoiceClient: VoiceCallClient {
             engine?.setRemoteAudioEnabled(new.remoteAudioEnabled)
         }
         refreshStatusLine()
+        if let show = new.showRequest, show != old.showRequest { act(on: show) }
         if old.exchange.isEmpty != new.exchange.isEmpty || old.approval != new.approval ||
             old.connection != new.connection || old.workInfo != new.workInfo || old.tasks != new.tasks {
             panel.setNeedsResize()
@@ -716,6 +722,21 @@ final class NativeVoiceClient: VoiceCallClient {
         }
     }
 
+    /// "Show me": open the task's live image (detail view) or bring its review card forward.
+    private func act(on show: ShowRequest) {
+        if model.showsSlim { model.slim = false }
+        if show.opensDetail {
+            if model.state.tasks.contains(where: { $0.id == show.taskID }) { selectTask(show.taskID) }
+        } else {
+            model.workExpanded = false
+            model.selectedTaskID = nil
+            if let run = show.runID { model.focusedReviewID = run }
+            model.objectWillChange.send()
+            panel.setNeedsResize()
+        }
+        if !panel.isVisible { showPanel() }
+    }
+
     private func selectTask(_ id: String?) {
         model.selectedTaskID = id
         model.workExpanded = true
@@ -783,6 +804,20 @@ final class NativeVoiceClient: VoiceCallClient {
         Task { [weak self] in
             do { try await api.dismissTasks(runIDs: runIDs) }
             catch { self?.dispatch(.error("Couldn't clear tasks: \(error.localizedDescription)")) }
+        }
+    }
+
+    /// Dismiss on a review card: hide now, then tell the api so it stays gone on the next call.
+    private func dismissReview(_ runID: String) {
+        guard let review = model.state.pendingReviews.first(where: { $0.runID == runID }) else { return }
+        let cards = review.images.map(\.number)
+        dispatch(.reviewDismissed(runID, cards))
+        model.reviewIndex[runID] = nil
+        panel.setNeedsResize()
+        guard let api, !previewMode else { return }
+        Task { [weak self] in
+            do { try await api.dismissReview(runID: runID, cards: cards) }
+            catch { self?.dispatch(.error("Couldn't dismiss: \(error.localizedDescription)")) }
         }
     }
 

@@ -360,7 +360,9 @@ struct VoicePanelView: View {
                         .padding(.horizontal, 12).padding(.bottom, 10)
                         .transition(.opacity)
                 }
-                if let task = model.state.tasks.last(where: { !$0.info.products.isEmpty || !$0.info.cards.isEmpty || !$0.info.images.isEmpty }) {
+                let reviewing = Set(model.pinnedReviews.map(\.taskID))
+                if let task = model.state.tasks.last(where: { !reviewing.contains($0.id) &&
+                    (!$0.info.products.isEmpty || !$0.info.cards.isEmpty || !$0.info.images.isEmpty) }) {
                     Button {
                         model.onSelectTask(task.id)
                     } label: {
@@ -390,6 +392,14 @@ struct VoicePanelView: View {
                     EmailDraftCard(draft: draft, model: model)
                         .padding(.horizontal, 12).padding(.bottom, 12)
                 }
+                // Finished images pop up for review without opening the task; they stay until dismissed.
+                let reviews = model.pinnedReviews
+                let open = ImageReviewLayout.focused(reviews, picked: model.focusedReviewID)
+                ForEach(reviews) { review in
+                    ImageReviewCard(review: review, shownCount: reviews.count + model.pinnedDrafts.count,
+                                    compact: review.runID != open, model: model)
+                        .padding(.horizontal, 12).padding(.bottom, review.runID == reviews.last?.runID ? 12 : 6)
+                }
             }
         }
         .frame(width: model.panelWidth, alignment: .top)
@@ -410,6 +420,7 @@ struct VoicePanelView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.captionExpanded)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.state.approval)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.state.tasks.count)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.pinnedReviews.map(\.id))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.slim)
     }
 
@@ -674,7 +685,8 @@ struct TaskListView: View {
                         canStop: task.canStop && model.state.connection.isOpen,
                         onOpen: { model.onSelectTask(task.id) },
                         onStop: { if let run = task.info.runID { model.onStopTask(run) } },
-                        onDismiss: { if let run = task.info.runID { model.onDismissTasks([run]) } })
+                        onDismiss: { if let run = task.info.runID { model.onDismissTasks([run]) } },
+                        loadLive: model.loadLiveImage)
             }
         }
         .accessibilityElement(children: .contain)
@@ -715,6 +727,8 @@ struct TaskRow: View {
     var onOpen: () -> Void
     var onStop: () -> Void
     var onDismiss: () -> Void = {}
+    /// Loads the live "looking at" thumbnail for a running task.
+    var loadLive: ((String) async -> Data?)? = nil
     @State private var hover = false
 
     var body: some View {
@@ -729,6 +743,9 @@ struct TaskRow: View {
                     .help(status)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            if task.isActive, let live = task.info.liveImage, let run = task.info.runID, let loadLive {
+                LiveImageView(runID: run, live: live, height: compact ? 26 : 34, load: loadLive)
+            }
             if canStop && (hover || !compact) {
                 Button(action: onStop) {
                     Image(systemName: "stop.fill").font(.system(size: 8.5, weight: .bold))
@@ -856,6 +873,15 @@ struct WorkDetailView: View {
     @ViewBuilder private var detail: some View {
         let s = model.state
                 VStack(alignment: .leading, spacing: 12) {
+                    if let info, !info.isTerminal, let live = info.liveImage, let runID = info.runID {
+                        section(live.label) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                LiveImageView(runID: runID, live: live, height: 170, load: model.loadLiveImage)
+                                Text(live.name).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
+                        }
+                    }
                     if let request = info?.askedFor {
                         section("Your request") {
                             Text(request).font(.system(size: 12)).textSelection(.enabled)

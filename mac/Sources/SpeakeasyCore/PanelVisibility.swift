@@ -21,10 +21,11 @@ public func hotkeyAction(connection: ConnectionPhase, panelVisible: Bool) -> Hot
     return panelVisible ? .hidePanel : .startCall
 }
 
-/// Something on the panel still needs the user: an approval, or a task waiting on one.
+/// Something on the panel still needs the user: an approval, a task waiting on one, an email
+/// draft, or finished images waiting on a review card.
 public func panelNeedsAttention(_ state: VoiceState) -> Bool {
     state.approval != nil || state.tasks.contains { $0.info.status == "waiting_for_approval" }
-        || !state.pendingDrafts.isEmpty
+        || !state.pendingDrafts.isEmpty || !state.pendingReviews.isEmpty
 }
 
 /// After a call ends the panel shows the finished state briefly, then hides itself.

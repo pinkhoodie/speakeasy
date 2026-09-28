@@ -23,7 +23,8 @@ from . import channels, continuity, router
 from .settings import valid_delivery_target
 from .prompt import builder as P
 from .text import (ID_RE, MAX_TRANSCRIPT, TERMINAL, clean_transcript, delivery_text, derive_tool_status,
-                   interim_progress, notice_text, safe_user_text, short_title, split_result)
+                   interim_progress, live_images_in, notice_text, safe_user_text, short_title, split_result,
+                   vetted_live_ref)
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +351,8 @@ class SidebandWorker:
         self.notices = rt.notices
         self.fragments: deque[dict[str, Any]] = deque(maxlen=512)
         self.handoff_at: dict[str, float] = {}   # delegation id -> when the handoff arrived (monotonic)
+        self.show_pending: set[str] = set()      # task keys asked for a screenshot by "show me"
+        self.show_seq = 0
         self.route_timings: dict[str, int] = {}  # task id -> routing latency (ms), stored with the task
         self.delegations: set[str] = set()
         self.dispatch_tasks: set[asyncio.Task[Any]] = set()
@@ -642,6 +645,8 @@ class SidebandWorker:
             return
         last_request = next((line[6:].strip() for line in reversed(context.splitlines())
                              if line.startswith("User: ")), "")
+        if router.is_show_me(last_request) and await self.show_me(delegation_id, last_request):
+            return
         candidates = await self.conversation_candidates(last_request)
         now = time.time()
         chats = [router.Chat(f"c{i + 1}", c.conv.where, c.snippets, c.voice_request,
@@ -668,6 +673,60 @@ class SidebandWorker:
             await self.start_parts(delegation_id, revision, context, [p.request for p in decision.parts], choice)
             return
         await self.start_routed(delegation_id, revision, context, last_request, choice)
+
+    async def show_me(self, delegation_id: str, request: str) -> bool:
+        """'Show me' / 'what are you looking at' about existing work: open that task's image in the
+        panel instead of starting new work. Returns False when there is nothing to point at (the
+        request is then handled as ordinary work).
+
+        The panel action carries only the task and run ids; the app fetches the bytes through the
+        authenticated image routes. The voice says it's on screen only after the action went out."""
+        tasks = self.open_tasks()
+        with self.interaction.lock:
+            runs = {t.task_id: self.interaction.runs.get(t.task_id) for t in tasks}
+        keys = {task_id: run.idem_key for task_id, run in runs.items() if run is not None}
+        has_image = {task_id for task_id, key in keys.items()
+                     if self.store.live_image(key) or (self.store.work(idem_key=key) or {}).get("review")
+                     or (((self.store.work(idem_key=key) or {}).get("result") or {}).get("cards"))}
+        target = router.show_me_target(request, tasks, has_image)
+        self.handoff_at.pop(delegation_id, None)
+        if target is None:
+            # Nothing in this call: an earlier call's finished images still waiting on a review card.
+            carried = self.store.keys_with_pending_reviews()
+            if not carried:
+                return False
+            work = self.store.work(idem_key=carried[-1]) or {}
+            self.show_action(work.get("run_id"), self.store.task_id_for(carried[-1]), "review")
+            await self.append("session.commentary.append", delegation_id, P.SHOW_ME_ON_SCREEN)
+            return True
+        run = runs.get(target.task_id)
+        key = keys.get(target.task_id)
+        if run is None or key is None:
+            return False
+        running = run.status in {"admitting", "working", "running", "waiting_for_approval"}
+        if target.task_id in has_image:
+            kind = "live" if running and self.store.live_image(key) else "review"
+            self.show_action(run.run_id, target.task_id, kind)
+            await self.append("session.commentary.append", delegation_id, P.SHOW_ME_ON_SCREEN)
+            return True
+        if running and run.run_id:
+            accepted = await asyncio.to_thread(self.hermes.steer, run.run_id, P.SCREENSHOT_STEER)
+            if accepted:
+                with self.interaction.lock:
+                    self.show_pending.add(key)
+                self.store.progress(key, "milestone", "You asked to see what it's looking at")
+                self.show_action(run.run_id, target.task_id, "detail")
+                await self.append("session.commentary.append", delegation_id, P.SHOW_ME_REQUESTED)
+                return True
+        await self.append("session.commentary.append", delegation_id, P.SHOW_ME_NOTHING)
+        return True
+
+    def show_action(self, run_id: str | None, task_id: str, kind: str) -> None:
+        """Ask the app to open a task's image: kind is live | review | detail (no image yet)."""
+        self.show_seq += 1
+        self.publish()  # the task list first, so the app already has the task it is told to open
+        self.interaction.feed.publish("show", {"task_id": task_id, "run_id": run_id, "image": kind,
+                                               "seq": self.show_seq})
 
     async def start_parts(self, delegation_id: str, revision: int, context: str, parts: list[str],
                           choice: channels.Choice) -> None:
@@ -1048,9 +1107,43 @@ class SidebandWorker:
         finally:
             self.publish()
 
+    def _see_images(self, backend: BackendRun, event: dict[str, Any]) -> None:
+        """Live view: remember the latest image the task produced or is looking at. Sources are the
+        backend-neutral ``media.seen`` event and, for Hermes, ``MEDIA:`` tags (or a browser
+        ``screenshot_path``) in interim text and tool result previews. Everything is vetted against the
+        image roots / public HTTPS before it is stored; clients only get it through /voice/live-image."""
+        if backend.status in TERMINAL or backend.status == "ambiguous":
+            return
+        kind = event.get("event")
+        roots = self.rt.image_roots()
+        seen: list[tuple[str, str, str]] = []
+        source = "viewed"
+        if kind == "media.seen":
+            ref = vetted_live_ref(event.get("path") if event.get("path") is not None else event.get("url"), roots)
+            seen = [ref] if ref else []
+            source = event.get("source") if event.get("source") in {"screenshot", "viewed", "generated"} else "viewed"
+            name = safe_user_text(event.get("name"), 120)
+            if seen and name:
+                seen = [(seen[0][0], seen[0][1], name)]
+        elif kind == "message.interim":
+            seen, source = live_images_in(event.get("text"), roots), "generated"
+        elif kind in {"tool.completed", "tool.complete"}:
+            seen = live_images_in(event.get("preview"), roots)
+            source = "screenshot" if "screenshot" in str(event.get("tool") or "") or "vision" in str(event.get("tool") or "") else "viewed"
+        if seen:
+            ref_kind, ref, name = seen[-1]
+            self.store.set_live_image(backend.idem_key, ref_kind, ref, name, source)
+            with self.interaction.lock:
+                asked = backend.idem_key in self.show_pending
+                self.show_pending.discard(backend.idem_key)
+            if asked:  # "show me" asked for this screenshot: open it as soon as it arrives
+                self.show_action(backend.run_id, backend.delegation_id, "live")
+
     async def _handle_hermes_event(self, backend: BackendRun, event: dict[str, Any]) -> None:
         idem, delegation_id = backend.idem_key, backend.say_id
         kind = event.get("event")
+        if kind in {"media.seen", "message.interim", "tool.completed", "tool.complete"}:
+            self._see_images(backend, event)
         if kind in {"tool.started", "tool.start", "message.interim"}:
             with self.interaction.lock:
                 if backend.status != "ambiguous":

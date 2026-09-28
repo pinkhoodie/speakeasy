@@ -55,6 +55,8 @@ final class VoicePanelModel: ObservableObject {
     var onDismissTasks: ([String]) -> Void = { _ in }
     /// Exact-run, authenticated image load through the api; no retailer request from the app.
     var loadProductImage: (String, Int) async -> Data? = { _, _ in nil }
+    /// The live "what it's looking at" image for a run (authenticated route; nil when none yet).
+    var loadLiveImage: (String) async -> Data? = { _ in nil }
     /// Task opened from the list (Work view), nil = list / current task.
     @Published var selectedTaskID: String?
     /// e.g. "⌃⌥P". Empty when no shortcut.
@@ -79,6 +81,16 @@ final class VoicePanelModel: ObservableObject {
     var pinnedDrafts: [EmailDraft] {
         state.pendingDrafts.filter { displayedStatus(of: $0) == .pending || draftBusy.contains($0.draftID) }
     }
+
+    // MARK: Image review cards
+    /// Dismiss a review card (run id); its images stay inside the task.
+    var onDismissReview: (String) -> Void = { _ in }
+    /// Which image each review card shows (run id -> index into its images).
+    @Published var reviewIndex: [String: Int] = [:]
+    /// The review card shown large (run id); nil = the newest. The others are compact rows.
+    @Published var focusedReviewID: String?
+    /// Review cards to pin in the call panel (like drafts): most recent three.
+    var pinnedReviews: [ImageReview] { state.pendingReviews }
 
     // MARK: Panel visibility
     /// The close (x) button: hide the panel (ends nothing).

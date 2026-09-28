@@ -327,6 +327,8 @@ enum PanelSmoke {
             do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/site-\(name).png")); record("snapshot \(dir)/site-\(name).png") }
             catch { fail("snapshot failed: \(error)") }
         }
+        await designReview(c, dir: dir)
+        await lookingAt(c, dir: dir)
         if let (draft, _) = PreviewFixtures.state("email-draft") {
             c.showPreview(draft, workExpanded: false)
             await settle()
@@ -349,6 +351,91 @@ enum PanelSmoke {
                 do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/email-draft-expanded.png")) } catch { fail("snapshot failed: \(error)") }
             }
         }
+    }
+
+    // MARK: A finished design pops up for review, pages through, and dismisses
+
+    static func designReview(_ c: NativeVoiceClient, dir: String) async {
+        guard let (state, _) = PreviewFixtures.state("design-review") else { fail("design review: fixture missing"); return }
+        let savedLoader = c.model.loadProductImage
+        c.model.loadProductImage = { _, n in PreviewFixtures.sampleDesign(variant: n - 1) }
+        defer { c.model.loadProductImage = savedLoader }
+        c.showPreview(state, workExpanded: false)
+        await settle(1.2)
+        check(c.model.pinnedReviews.count == 1 && c.model.pinnedReviews.first?.images.count == 3,
+              "design review: finished images pinned in the call panel without opening the task")
+        let win = c.panel.window; let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        record("design review: panel \(Int(win.frame.height))pt tall, screen \(Int(visible.height))pt")
+        check(visible.contains(win.frame), "design review: card stays on screen")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/design-review.png")); record("snapshot \(dir)/design-review.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.model.reviewIndex["run_preview"] = 1
+        await settle(0.8)
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/design-review-next.png")); record("snapshot \(dir)/design-review-next.png") }
+        catch { fail("snapshot failed: \(error)") }
+        // Three waiting reviews (the cap) on a laptop-height screen: every card's buttons stay on screen.
+        var many = state
+        many.tasks = (1...4).map { i in
+            var info = state.workInfo!
+            info.runID = "run_design_\(i)"; info.title = "Design option \(i)"; info.reviewSettledAt = Date() - Double(10 - i)
+            return TaskItem(id: "design_\(i)", info: info)
+        }
+        c.showPreview(many, workExpanded: false)
+        await settle(1.2)
+        check(c.model.pinnedReviews.map(\.runID) == ["run_design_2", "run_design_3", "run_design_4"],
+              "design review: only the three most recent reviews are pinned")
+        record("design review x3: panel \(Int(win.frame.height))pt tall, inside=\(visible.contains(win.frame))")
+        check(visible.contains(win.frame), "design review: three cards stay on screen")
+        check(win.frame.height < visible.height - 40, "design review: three cards fit without running off the screen")
+        check(ImageReviewLayout.focused(c.model.pinnedReviews, picked: c.model.focusedReviewID) == "run_design_4",
+              "design review: the newest review is open, older ones are compact rows")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/design-review-three.png")); record("snapshot \(dir)/design-review-three.png") }
+        catch { fail("snapshot failed: \(error)") }
+        // Dismiss hides the card right away (the api is told outside preview mode).
+        c.showPreview(state, workExpanded: false)
+        await settle(0.5)
+        c.model.onDismissReview("run_preview")
+        await settle(0.6)
+        check(c.model.pinnedReviews.isEmpty, "design review: Dismiss hides the card")
+        check(c.model.state.tasks.first?.info.images.count == 3, "design review: images stay in the task after Dismiss")
+    }
+
+    // MARK: A running task shows what it's looking at (list thumbnail + detail)
+
+    static func lookingAt(_ c: NativeVoiceClient, dir: String) async {
+        guard let (state, _) = PreviewFixtures.state("looking") else { fail("looking: fixture missing"); return }
+        let saved = c.model.loadLiveImage
+        var asked: [String] = []
+        c.model.loadLiveImage = { run in asked.append(run); return PreviewFixtures.sampleDesign(variant: 1) }
+        defer { c.model.loadLiveImage = saved }
+        c.showPreview(state, workExpanded: false)
+        await settle(1.0)
+        check(asked.contains("run_looking"), "looking: task list loads the live thumbnail for the running task")
+        check(!asked.contains("run_other"), "looking: no thumbnail for a task with nothing to show")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/looking-list.png")); record("snapshot \(dir)/looking-list.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.showPreview(state, workExpanded: true)
+        c.model.selectedTaskID = "looking"
+        await settle(1.0)
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/looking-detail.png")); record("snapshot \(dir)/looking-detail.png") }
+        catch { fail("snapshot failed: \(error)") }
+        // A new frame (seq moves) is fetched again.
+        let before = asked.count
+        var next = state
+        next.tasks[1].info.liveImage?.seq = 4
+        c.model.state = next; c.panel.setNeedsResize()
+        await settle(0.8)
+        check(asked.count > before, "looking: a new seq refetches the live image")
+        // Spoken "show me": the server's show action opens that task's detail with its live image.
+        c.showPreview(state, workExpanded: false)
+        c.model.selectedTaskID = nil
+        await settle(0.4)
+        c.dispatch(.show(ShowRequest(taskID: "looking", runID: "run_looking", image: .live, seq: 1)))
+        await settle(0.8)
+        check(c.model.workExpanded && c.model.selectedTaskID == "looking", "show me: opens the task's live image")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/show-me.png")); record("snapshot \(dir)/show-me.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.model.selectedTaskID = nil
     }
 
     // MARK: Long header and task strings stay readable

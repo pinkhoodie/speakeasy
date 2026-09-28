@@ -118,6 +118,56 @@ def route(request: str, tasks: list[OpenTask], marked_task_id: Any = None) -> li
     return [Part(NEW, request)]
 
 
+# -- "show me" --------------------------------------------------------------------------------
+
+# A short request to SEE a task's work, not new work: "show me", "what are you looking at?",
+# "let me see it", "can I see the design?", "pull it up". Anything naming a new thing to find
+# ("show me flights to Paris") is ordinary work and does not match.
+_SHOW_ME = re.compile(
+    r"(?i)^(?:(?:hey|ok|okay|so|and|oh|yeah|um|uh|can you|could you|would you|please|just|go ahead and|"
+    r"now)[,\s]+)*(?:"
+    r"(?:show|let) me(?: (?:see|look at|have a look at))?(?: (?:it|that|this|them|what you(?:'re| are)? "
+    r"(?:looking at|seeing|see|doing|working on|made|have|got|found)|what it looks like|the (?:design|screenshot|"
+    r"image|picture|page|mockup|draft|result|screen|preview)s?|the (?:[a-z]+ ){1,2}(?:design|screenshot|image|picture|page|"
+    r"mockup|preview)s?|your screen))?|"
+    r"what (?:are|r) you (?:looking at|seeing|working on)|what(?:'s| is) on (?:your|the) screen|"
+    r"what does it look like(?: so far| now)?|"
+    r"(?:can|could|may) i (?:see|look at|have a look at)(?: (?:it|that|this|them|the (?:design|screenshot|image|"
+    r"picture|page|mockup|result|preview)s?|the (?:[a-z]+ ){1,2}(?:design|screenshot|image|picture|page|mockup|preview)s?|"
+    r"what you(?:'re| are)? (?:looking at|seeing|doing|made)))?|"
+    r"(?:pull|bring) (?:it|that|them) up|put (?:it|that) on (?:my|the) screen"
+    r")(?:[,\s]+(?:please|now|then|so far|for me))*[\s.!?]*$")
+
+
+def is_show_me(request: str) -> bool:
+    """True for a short 'show me what you're looking at' ask about existing work."""
+    text = (request or "").strip()
+    return bool(text) and len(text) <= 80 and bool(_SHOW_ME.match(text))
+
+
+def show_me_target(request: str, tasks: list[OpenTask], has_image: set[str]) -> OpenTask | None:
+    """Which task 'show me' is about: one the words name, else the newest task with something to
+    show, else the newest running task (it will be asked for a screenshot)."""
+    tasks = tasks[-MAX_OPEN_TASKS:]
+    if not tasks:
+        return None
+    asked = _words(request) - {"show", "see", "look", "looking", "screen", "image", "picture", "screenshot",
+                               "design", "page", "preview", "result", "pull", "bring", "seeing", "doing",
+                               "working", "made", "got", "found", "mockup", "draft"}
+    if asked:
+        scored = sorted(((len(asked & _words(t.request)), i, t) for i, t in enumerate(tasks)), key=lambda x: x[:2])
+        if scored[-1][0] > 0:
+            return scored[-1][2]
+    running = [t for t in tasks if t.status in {"admitting", "working", "running", "waiting_for_approval"}]
+    for task in reversed(running):
+        if task.task_id in has_image:
+            return task
+    for task in reversed(tasks):
+        if task.task_id in has_image:
+            return task
+    return running[-1] if running else None
+
+
 # -- the routing model ------------------------------------------------------------------------
 
 @dataclasses.dataclass(frozen=True)

@@ -549,6 +549,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let preview = NativeVoiceClient(config: app.config)
         native = preview
         if name == "image" { preview.model.loadProductImage = { _, _ in PreviewFixtures.sampleImage() } }
+        if name == "looking" { preview.model.loadLiveImage = { _ in PreviewFixtures.sampleDesign(variant: 1) } }
+        if name == "design-review" { preview.model.loadProductImage = { _, n in PreviewFixtures.sampleDesign(variant: n - 1) } }
         preview.showPreview(fixture.0, workExpanded: fixture.workExpanded)
         print("ui-preview \(name) window=\(preview.panel.windowNumber)")
         if let appearance = args.firstIndex(of: "--appearance").flatMap({ $0 + 1 < args.count ? args[$0 + 1] : nil }) {

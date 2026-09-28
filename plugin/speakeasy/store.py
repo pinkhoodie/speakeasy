@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from .emails import canonical_json, draft_sha256
-from .text import (AUTHORED_PRECEDENCE_S, SETTLED, TERMINAL, notice_text, public_result, safe_user_text,
+from .text import (MAX_CARDS, AUTHORED_PRECEDENCE_S, SETTLED, TERMINAL, notice_text, public_result, safe_user_text,
                    valid_short_status)
 
 STALE_AFTER_S = 90
+MAX_REVIEWS = 3  # finished-image review cards carried onto the call panel
 
 
 class StateStore:
@@ -51,6 +52,15 @@ class StateStore:
                 draft_json TEXT NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL,
                 created REAL NOT NULL, updated REAL NOT NULL, action_run_id TEXT, error TEXT)""")
             self._db.execute("CREATE INDEX IF NOT EXISTS email_drafts_key ON email_drafts(idem_key, created)")
+            # Images a finished task returned wait on a review card until dismissed (per run and card),
+            # across hang-ups, like email drafts.
+            self._db.execute("""CREATE TABLE IF NOT EXISTS review_dismissals (
+                run_id TEXT NOT NULL, card INTEGER NOT NULL, dismissed REAL NOT NULL, PRIMARY KEY (run_id, card))""")
+            # The latest image a task produced or is looking at, updated during the run (the live view).
+            # ``ref`` is a vetted absolute path under the image roots or a vetted HTTPS URL; never sent to clients.
+            self._db.execute("""CREATE TABLE IF NOT EXISTS live_images (
+                idem_key TEXT PRIMARY KEY, kind TEXT NOT NULL, ref TEXT NOT NULL, name TEXT NOT NULL,
+                source TEXT NOT NULL, seq INTEGER NOT NULL, updated REAL NOT NULL)""")
             columns = {row[1] for row in self._db.execute("PRAGMA table_info(runs)")}
             if "timings" not in columns:  # added after the first release
                 self._db.execute("ALTER TABLE runs ADD COLUMN timings TEXT")
@@ -363,25 +373,122 @@ class StateStore:
         return tasks + self.carried_draft_tasks({t["task_id"] for t in tasks} | {k for k, _ in rows})
 
     def carried_draft_tasks(self, exclude: set[str]) -> list[dict[str, Any]]:
-        """Earlier calls' tasks that still hold a draft waiting for the user."""
+        """Earlier calls' tasks that still hold something waiting for the user: an email draft
+        (Send / Deny / Revise) or finished images on a review card (until dismissed)."""
         with self._lock:
             ids = dict(self._db.execute("SELECT idem_key, delegation_id FROM runs").fetchall())
         out = []
-        for key in self.keys_with_pending_drafts():
+        seen: set[str] = set()
+        for key in self.keys_with_pending_drafts() + self.keys_with_pending_reviews():
             task_id = ids.get(key) or key
-            if key in exclude or task_id in exclude:
+            if key in exclude or task_id in exclude or key in seen:
                 continue
+            seen.add(key)
             work = self.work(idem_key=key)
             if work is not None:
                 work["task_id"] = task_id
                 out.append(work)
         return out
 
+    def task_id_for(self, key: str) -> str:
+        """The task id the app knows this row by (its delegation id, as on carried rows)."""
+        with self._lock:
+            row = self._db.execute("SELECT delegation_id FROM runs WHERE idem_key=?", (key,)).fetchone()
+        return (row[0] if row and row[0] else key)
+
+    # -- live view ("what it's looking at") -------------------------------------------------
+    def set_live_image(self, key: str, kind: str, ref: str, name: str, source: str) -> bool:
+        """Record the task's latest image (already vetted by the caller). False when unchanged."""
+        if kind not in {"path", "url"}:
+            raise ValueError("kind must be path or url")
+        now = time.time()
+        with self._lock, self._db:
+            row = self._db.execute("SELECT kind,ref,seq FROM live_images WHERE idem_key=?", (key,)).fetchone()
+            if row is not None and row[0] == kind and row[1] == ref:
+                return False
+            seq = (row[2] if row else 0) + 1
+            self._db.execute("INSERT OR REPLACE INTO live_images VALUES (?,?,?,?,?,?,?)",
+                             (key, kind, ref, name[:120] or "Image", source, seq, now))
+        return True
+
+    def live_image(self, key: str) -> dict[str, Any] | None:
+        """Server-side view, including the ref. Use ``public_live_image`` for clients."""
+        with self._lock:
+            row = self._db.execute("SELECT kind,ref,name,source,seq,updated FROM live_images WHERE idem_key=?",
+                                   (key,)).fetchone()
+        if row is None:
+            return None
+        kind, ref, name, source, seq, updated = row
+        return {"kind": kind, "ref": ref, "name": name, "source": source, "seq": seq, "at": updated}
+
+    def public_live_image(self, key: str) -> dict[str, Any] | None:
+        live = self.live_image(key)
+        return None if live is None else {k: live[k] for k in ("name", "source", "seq", "at")}
+
+    # -- image review cards --------------------------------------------------------------
+    @staticmethod
+    def _image_numbers(result_json: str | None) -> list[int]:
+        """Card numbers (1-based positions in the stored card list) that are images."""
+        try:
+            cards = (json.loads(result_json or "null") or {}).get("cards")
+        except (ValueError, AttributeError):
+            return []
+        if not isinstance(cards, list):
+            return []
+        return [i + 1 for i, card in enumerate(cards[:MAX_CARDS]) if isinstance(card, dict) and card.get("kind") == "image"]
+
+    def _dismissed_cards(self, run_id: str) -> set[int]:
+        rows = self._db.execute("SELECT card FROM review_dismissals WHERE run_id=?", (run_id,)).fetchall()
+        return {int(r[0]) for r in rows}
+
+    def review_images(self, run_id: str | None, status: str | None, result_json: str | None) -> list[int]:
+        """Image cards of a finished run the user hasn't dismissed from its review card yet."""
+        if not run_id or status != "completed":
+            return []
+        numbers = self._image_numbers(result_json)
+        if not numbers:
+            return []
+        with self._lock:
+            dismissed = self._dismissed_cards(run_id)
+        return [n for n in numbers if n not in dismissed]
+
+    def dismiss_review(self, run_id: str, cards: list[int] | None = None) -> list[int]:
+        """Dismiss review cards of one finished run (all its images when ``cards`` is None).
+        Returns the card numbers now dismissed; unknown cards are ignored."""
+        with self._lock:
+            row = self._db.execute("SELECT status,result_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        if row is None or row[0] != "completed":
+            return []
+        numbers = self._image_numbers(row[1])
+        chosen = [n for n in numbers if cards is None or n in cards]
+        now = time.time()
+        with self._lock, self._db:
+            for n in chosen:
+                self._db.execute("INSERT OR IGNORE INTO review_dismissals VALUES (?,?,?)", (run_id, n, now))
+        return chosen
+
+    def keys_with_pending_reviews(self, limit: int = MAX_REVIEWS, max_age_s: float = 7 * 86400) -> list[str]:
+        """The most recent finished tasks (any call) whose images still wait on a review card,
+        oldest first; at most ``limit``. Older ones stay inside their tasks."""
+        cutoff = time.time() - max_age_s
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT idem_key, run_id, result_json FROM runs WHERE status='completed' AND run_id IS NOT NULL
+                   AND settled_at >= ? AND (dismissed IS NULL OR dismissed=0) AND result_json LIKE '%"image"%'
+                   ORDER BY settled_at DESC LIMIT 40""", (cutoff,)).fetchall()
+        keys = []
+        for key, run_id, result_json in rows:
+            if self.review_images(run_id, "completed", result_json):
+                keys.append(key)
+            if len(keys) >= limit:
+                break
+        return list(reversed(keys))
+
     def work(self, run_id: str | None = None, idem_key: str | None = None,
              assistant_name: str = "Hermes") -> dict[str, Any] | None:
         """The latest admitted job or one exact server-owned run, including past calls."""
         cols = """idem_key,run_id,status,updated,short_status,detail,progress_updated,
-                  status_source,result_json,title,dismissed,summary,continued"""
+                  status_source,result_json,title,dismissed,summary,continued,settled_at"""
         with self._lock:
             if idem_key:
                 row = self._db.execute(f"SELECT {cols} FROM runs WHERE idem_key=?", (idem_key,)).fetchone()
@@ -392,7 +499,7 @@ class StateStore:
             if row is None:
                 return None
             (key, actual_run_id, status, updated, short_status, detail, progress_updated,
-             status_source, result_json, title, dismissed, summary, continued) = row
+             status_source, result_json, title, dismissed, summary, continued, settled_at) = row
             events = self._db.execute(
                 "SELECT kind,text,created FROM work_events WHERE idem_key=? ORDER BY seq DESC LIMIT 30", (key,)).fetchall()
         stale = status not in TERMINAL | {"waiting_for_approval"} and time.time() - updated > STALE_AFTER_S
@@ -421,6 +528,14 @@ class StateStore:
             "title": title, "summary": summary, "dismissed": bool(dismissed),
             "email_drafts": self.drafts_for(key),
         }
+        live = self.public_live_image(key)
+        if live is not None:
+            # Addressed by /voice/live-image/<run_id>; the path or URL stays on the server.
+            work["live_image"] = live
+        review = self.review_images(actual_run_id, status, result_json)
+        if review:
+            # Image cards still waiting on the call panel's review card (numbers address /voice/card-image).
+            work["review"] = {"images": review, "settled_at": settled_at}
         if continued:
             try:
                 work["continued_in"] = json.loads(continued).get("label")

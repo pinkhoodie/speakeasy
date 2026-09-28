@@ -54,6 +54,53 @@ struct ImageResultCard: View {
     }
 }
 
+// MARK: - Live view
+
+/// What a running task is looking at right now. Refetched whenever the server's `seq` moves;
+/// clicking opens it full size. `height` 34 makes the task-list thumbnail.
+struct LiveImageView: View {
+    let runID: String
+    let live: LiveImage
+    var height: CGFloat = 170
+    var load: (String) async -> Data?
+    @State private var image: NSImage?
+
+    var body: some View {
+        let small = height < 60
+        Button {
+            if let image { ImagePreviewWindow.shared.show(image, title: live.name) }
+        } label: {
+            ZStack {
+                Color.primary.opacity(0.05)
+                if let image {
+                    Image(nsImage: image).resizable().interpolation(.high)
+                        .aspectRatio(contentMode: small ? .fill : .fit)
+                } else {
+                    Image(systemName: "eye").font(.system(size: small ? 11 : 20)).foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: small ? height * 1.45 : .infinity).frame(height: height)
+            .overlay(alignment: .bottomTrailing) {
+                if !small && image != nil {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
+                        .padding(5).background(Circle().fill(Color.black.opacity(0.45))).padding(6)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: small ? 5 : 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(image == nil)
+        .help(image == nil ? "Loading what it's looking at" : "\(live.label): \(live.name). Open full size")
+        .accessibilityLabel("\(live.label): \(live.name)")
+        .task(id: "\(runID)/\(live.seq)") {
+            // Keep the previous frame on screen until the new one arrives.
+            if let data = await load(runID), let loaded = NSImage(data: data) { image = loaded }
+        }
+    }
+}
+
 // MARK: - Full-size preview
 
 /// One reusable floating window showing a result image at full size (scaled to fit the screen).
