@@ -96,9 +96,10 @@ class Runtime:
         found = next((c for c in channels.opted_in(self.routable()) if c.target == target), None)
         return found.label if found else self.delivery_label()
 
-    def route(self, request: str, tasks: list[router.OpenTask], marked: Any) -> router.Decision:
+    def route(self, request: str, tasks: list[router.OpenTask], marked: Any,
+              chats: list[router.Chat] | None = None, call_so_far: str = "") -> router.Decision:
         topics = [router.Topic(c.label, c.topic) for c in channels.opted_in(self.routable())]
-        return router.decide(request, tasks, marked, topics, self.route_call)
+        return router.decide(request, tasks, marked, topics, self.route_call, chats=chats, call_so_far=call_so_far)
 
     def explicit_channel(self, request: str) -> channels.Choice | None:
         return channels.explicit(request, self.routable(), P.clarify_channel)
@@ -641,7 +642,14 @@ class SidebandWorker:
             return
         last_request = next((line[6:].strip() for line in reversed(context.splitlines())
                              if line.startswith("User: ")), "")
-        decision = await asyncio.to_thread(self.rt.route, last_request, self.open_tasks(), marked)
+        candidates = await self.conversation_candidates(last_request)
+        now = time.time()
+        chats = [router.Chat(f"c{i + 1}", c.conv.where, c.snippets, c.voice_request,
+                             max(0.0, now - c.conv.last_active) if c.conv.last_active else None)
+                 for i, c in enumerate(candidates)]
+        earlier = "\n".join(line for line in context.splitlines()[:-1] if line.startswith(("User: ", "Assistant: ")))
+        decision = await asyncio.to_thread(self.rt.route, last_request, self.open_tasks(), marked, chats,
+                                           earlier[-1200:])
         self.route_timings[delegation_id] = decision.latency_ms
         part = decision.parts[0]
         if part.kind == "follow_up" and part.task_id:
@@ -649,7 +657,9 @@ class SidebandWorker:
             return
         named = self.rt.explicit_channel(last_request)
         if named is None and len(decision.parts) == 1:
-            conv = await self.match_conversation(last_request)
+            conv = self.pick_conversation(last_request, decision, candidates, chats)
+            if conv is None and decision.source != "model":
+                conv = await self.match_conversation(last_request)
             if conv is not None:
                 await self.start_continuity_task(delegation_id, revision, context, last_request, conv)
                 return
@@ -693,6 +703,30 @@ class SidebandWorker:
                                   ack=P.ack_channel_post(channel.label))
             return
         await self.start_task(delegation_id, revision, context, request)
+
+    async def conversation_candidates(self, request: str) -> list[continuity.Candidate]:
+        """Existing chats this request might continue: the ones voice work was last sent to, the
+        most recently active, and the ones whose recent messages mention what was asked."""
+        if not request or not self.rt.settings()["continuity"]["enabled"]:
+            return []
+        try:
+            found = await asyncio.to_thread(continuity.conversations_with_context, self.rt.state_db, request)
+            placements = self.store.recent_placements()
+            return await asyncio.to_thread(continuity.with_placements, self.rt.state_db, found, placements)
+        except Exception as exc:  # never let matching break a request
+            logger.warning("speakeasy: conversation candidates failed: %s", type(exc).__name__)
+            return []
+
+    @staticmethod
+    def pick_conversation(request: str, decision: router.Decision, candidates: list[continuity.Candidate],
+                          chats: list[router.Chat]) -> continuity.Conversation | None:
+        """The model's pick when it made one; without the model, only a clear content match."""
+        if decision.conversation:
+            index = next((i for i, c in enumerate(chats) if c.ref == decision.conversation), None)
+            return candidates[index].conv if index is not None else None
+        if decision.source == "model":
+            return None
+        return continuity.best_by_content(request, candidates)
 
     async def match_conversation(self, request: str) -> continuity.Conversation | None:
         if not request or not self.rt.settings()["continuity"]["enabled"]:
