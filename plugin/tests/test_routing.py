@@ -340,6 +340,25 @@ def test_thread_capability_needs_the_webhook_platform(tmp_path):
     assert threads.capability(tmp_path, False)["supported"] is False
 
 
+def test_ensure_alias_keeps_unrelated_hermes_configuration(tmp_path, monkeypatch):
+    import hermes_cli.config as config
+    import yaml
+
+    path = tmp_path / "config.yaml"
+    original = {"model": {"default": "claude-opus-5-5", "provider": "anthropic"},
+                "display": {"runtime_footer": {"enabled": True, "fields": ["model", "context_pct"]}},
+                "plugins": {"enabled": ["speakeasy", "wiki"]},
+                "session_key_aliases": {"existing": {"platform": "discord", "chat_id": "123"}}}
+    path.write_text(yaml.safe_dump(original))
+    monkeypatch.setattr(config, "get_config_path", lambda: path)
+    conv = continuity.Conversation("s", "discord", "999", "thread", "999", "42", "111", "work", "Task", time.time())
+    assert continuity.ensure_alias(conv)
+    saved = yaml.safe_load(path.read_text())
+    assert saved == {**original, "session_key_aliases": {**original["session_key_aliases"], conv.session_key: conv.alias()}}
+    assert continuity.ensure_alias(conv)  # idempotent
+    assert yaml.safe_load(path.read_text()) == saved
+
+
 # -- (C) continuity ---------------------------------------------------------------------------------
 
 def test_thread_sessions_opened_for_voice_are_continuation_candidates(tmp_path):

@@ -207,7 +207,8 @@ def ensure_alias(conv: Conversation) -> bool:
         if aliases.get(conv.session_key) == conv.alias():
             return True
         aliases[conv.session_key] = conv.alias()
-        atomic_config_write(path, {"session_key_aliases": aliases})
+        raw["session_key_aliases"] = aliases
+        atomic_config_write(path, raw)  # this writer replaces absent sections; pass the entire config
         return True
     except Exception:
         return False
