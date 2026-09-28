@@ -28,6 +28,14 @@ engine ignores unknown ones.
                                                       the run's cumulative working-tree change so
                                                       far (coding backends only). ``diff`` is a
                                                       unified diff capped at 64 KB.
+- ``media.seen``             {path | url, name, source}
+                                                      an image the agent produced or is looking at
+                                                      right now (a browser screenshot, an image it
+                                                      opened, a rendered design, a generated image).
+                                                      ``source`` is ``screenshot`` | ``viewed`` |
+                                                      ``generated``. Local ``path`` must be absolute;
+                                                      the server only serves it from allowed roots.
+                                                      Drives the live "what it's looking at" view.
 - ``run.completed`` | ``run.failed`` | ``run.cancelled`` | ``run.stopped``
                              {output, error}          terminal. ``output`` is the final answer text.
 
