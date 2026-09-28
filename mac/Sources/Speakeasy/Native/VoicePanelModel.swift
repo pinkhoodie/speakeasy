@@ -55,6 +55,8 @@ final class VoicePanelModel: ObservableObject {
     var onDismissTasks: ([String]) -> Void = { _ in }
     /// Exact-run, authenticated image load through the api; no retailer request from the app.
     var loadProductImage: (String, Int) async -> Data? = { _, _ in nil }
+    /// The live "what it's looking at" image for a run (authenticated route; nil when none yet).
+    var loadLiveImage: (String) async -> Data? = { _ in nil }
     /// Task opened from the list (Work view), nil = list / current task.
     @Published var selectedTaskID: String?
     /// e.g. "⌃⌥P". Empty when no shortcut.

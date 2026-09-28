@@ -58,4 +58,13 @@ final class ImageReviewTests: XCTestCase {
         XCTAssertEqual(ImageReviewLayout.focused(reviews, picked: "run_a"), "run_a")
         XCTAssertEqual(ImageReviewLayout.focused(reviews, picked: "run_gone"), "run_c")
     }
+
+    func testLiveImageDecodesWithoutAnyPath() {
+        let info = WorkInfo(json: ["run_id": "r", "status": "working",
+                                   "live_image": ["name": "shot.png", "source": "screenshot", "seq": 3, "at": 100.0]])
+        XCTAssertEqual(info?.liveImage, LiveImage(name: "shot.png", source: "screenshot", seq: 3, at: Date(timeIntervalSince1970: 100)))
+        XCTAssertEqual(info?.liveImage?.label, "Looking at")
+        XCTAssertNil(LiveImage(json: ["name": "x", "seq": 0]))
+        XCTAssertNil(WorkInfo(json: ["status": "working"])?.liveImage)
+    }
 }

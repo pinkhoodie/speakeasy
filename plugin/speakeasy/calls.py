@@ -23,7 +23,8 @@ from . import channels, continuity, router
 from .settings import valid_delivery_target
 from .prompt import builder as P
 from .text import (ID_RE, MAX_TRANSCRIPT, TERMINAL, clean_transcript, delivery_text, derive_tool_status,
-                   interim_progress, notice_text, safe_user_text, short_title, split_result)
+                   interim_progress, live_images_in, notice_text, safe_user_text, short_title, split_result,
+                   vetted_live_ref)
 
 logger = logging.getLogger(__name__)
 
@@ -1014,9 +1015,38 @@ class SidebandWorker:
         finally:
             self.publish()
 
+    def _see_images(self, backend: BackendRun, event: dict[str, Any]) -> None:
+        """Live view: remember the latest image the task produced or is looking at. Sources are the
+        backend-neutral ``media.seen`` event and, for Hermes, ``MEDIA:`` tags (or a browser
+        ``screenshot_path``) in interim text and tool result previews. Everything is vetted against the
+        image roots / public HTTPS before it is stored; clients only get it through /voice/live-image."""
+        if backend.status in TERMINAL or backend.status == "ambiguous":
+            return
+        kind = event.get("event")
+        roots = self.rt.image_roots()
+        seen: list[tuple[str, str, str]] = []
+        source = "viewed"
+        if kind == "media.seen":
+            ref = vetted_live_ref(event.get("path") if event.get("path") is not None else event.get("url"), roots)
+            seen = [ref] if ref else []
+            source = event.get("source") if event.get("source") in {"screenshot", "viewed", "generated"} else "viewed"
+            name = safe_user_text(event.get("name"), 120)
+            if seen and name:
+                seen = [(seen[0][0], seen[0][1], name)]
+        elif kind == "message.interim":
+            seen, source = live_images_in(event.get("text"), roots), "generated"
+        elif kind in {"tool.completed", "tool.complete"}:
+            seen = live_images_in(event.get("preview"), roots)
+            source = "screenshot" if "screenshot" in str(event.get("tool") or "") or "vision" in str(event.get("tool") or "") else "viewed"
+        if seen:
+            ref_kind, ref, name = seen[-1]
+            self.store.set_live_image(backend.idem_key, ref_kind, ref, name, source)
+
     async def _handle_hermes_event(self, backend: BackendRun, event: dict[str, Any]) -> None:
         idem, delegation_id = backend.idem_key, backend.say_id
         kind = event.get("event")
+        if kind in {"media.seen", "message.interim", "tool.completed", "tool.complete"}:
+            self._see_images(backend, event)
         if kind in {"tool.started", "tool.start", "message.interim"}:
             with self.interaction.lock:
                 if backend.status != "ambiguous":

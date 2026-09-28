@@ -276,6 +276,46 @@ def media_images(output: str, roots: tuple[Path, ...]) -> tuple[str, list[dict[s
     return output, cards, tags
 
 
+LIVE_MEDIA_RE = re.compile(r"""MEDIA:[ \t]*[`"']?(?P<ref>(?:/|~/|https://)[^\s`"'<>]+)""")
+SCREENSHOT_PATH_RE = re.compile(r'"screenshot_path"\s*:\s*"(?P<ref>/[^"\n]{1,1000})"')
+
+
+def vetted_live_ref(raw: Any, roots: tuple[Path, ...]) -> tuple[str, str, str] | None:
+    """One image a running task produced or is looking at -> (kind, ref, name), vetted exactly like
+    result cards: local paths only under the image roots, HTTPS only to public hosts."""
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip().rstrip(".,;)")
+    is_url = raw.startswith("https://")
+    if Path(urllib.parse.urlsplit(raw).path if is_url else raw).suffix.lower() not in LOCAL_IMAGE_EXTS:
+        return None
+    try:
+        if is_url:
+            vetted_image_url(raw)
+            return "url", raw, Path(urllib.parse.urlsplit(raw).path).name[:120] or "Image"
+        path = vetted_local_image(raw, roots)
+    except ImageRejected:
+        return None
+    return "path", str(path), path.name[:120]
+
+
+def live_images_in(text: Any, roots: tuple[Path, ...]) -> list[tuple[str, str, str]]:
+    """Vetted images named in interim text or a tool result preview: ``MEDIA:<path>`` tags (also
+    inside JSON, where the line-anchored tag pattern misses them) and a browser ``screenshot_path``."""
+    if not isinstance(text, str) or not text:
+        return []
+    found: list[tuple[int, str]] = [(m.start(), m.group("tick") or m.group("quote") or m.group("bare") or "")
+                                    for m in MEDIA_TAG_RE.finditer(text)]
+    found += [(m.start(), m.group("ref")) for m in LIVE_MEDIA_RE.finditer(text)]
+    found += [(m.start(), m.group("ref")) for m in SCREENSHOT_PATH_RE.finditer(text)]
+    out: list[tuple[str, str, str]] = []
+    for _, raw in sorted(found):
+        vetted = vetted_live_ref(raw, roots)
+        if vetted and vetted not in out:
+            out.append(vetted)
+    return out
+
+
 def public_result(result: Any) -> Any:
     """Client view of a stored result: no server-side paths or internal delivery fields."""
     if not isinstance(result, dict):

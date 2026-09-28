@@ -571,6 +571,19 @@ class VoiceService:
         except (ImageRejected, OSError, TimeoutError):
             raise ServiceError(404, "image unavailable") from None
 
+    def live_image(self, run_id: str) -> tuple[bytes, str]:
+        """The latest image a task produced or is looking at, re-vetted on every read."""
+        key = self.store.key_for_run(run_id) if ID_RE.fullmatch(run_id) else None
+        live = self.store.live_image(key) if key else None
+        if live is None:
+            raise ServiceError(404, "no image yet")
+        try:
+            if live["kind"] == "path":
+                return read_local_image(live["ref"], self.image_roots())
+            return fetch_image(live["ref"])
+        except (ImageRejected, OSError, TimeoutError):
+            raise ServiceError(404, "image unavailable") from None
+
     # -- email drafts ------------------------------------------------------------------------
     def decide_draft(self, draft_id: str, body: dict[str, Any]) -> dict[str, Any]:
         """approve | deny | revise one draft, bound to the exact hash the user saw."""

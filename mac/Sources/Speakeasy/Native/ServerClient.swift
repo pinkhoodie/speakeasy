@@ -183,6 +183,16 @@ final class ServerClient: @unchecked Sendable {
         return data
     }
 
+    /// The latest image a running task produced or is looking at (authenticated, vetted server-side).
+    func liveImage(runID: String) async throws -> Data {
+        let (data, response) = try await session.data(for: request("/voice/live-image/\(escape(runID))"))
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              http.mimeType?.hasPrefix("image/") == true, !data.isEmpty, data.count <= 8_000_000 else {
+            throw HTTPError(status: (response as? HTTPURLResponse)?.statusCode ?? 502, message: "Image unavailable")
+        }
+        return data
+    }
+
     /// Latest work plus every task of the most recent call (after-call Work view).
     func latestWork() async throws -> (WorkInfo?, [TaskItem]) {
         let object = try await json("/voice/work/latest")

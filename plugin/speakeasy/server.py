@@ -138,11 +138,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._auth()
             image = re.fullmatch(rf"/voice/card-image/{_ID}/([1-8])", path)
-            if image:
-                data, mime = self.service.card_image(image.group(1), int(image.group(2)))
+            live = re.fullmatch(rf"/voice/live-image/{_ID}", path)
+            if image or live:
+                data, mime = (self.service.card_image(image.group(1), int(image.group(2))) if image
+                              else self.service.live_image(live.group(1)))
                 self.send_response(200)
                 self.send_header("Content-Type", mime)
-                self.send_header("Cache-Control", "private, max-age=300")
+                # The live image changes during the run; the client asks again when its seq moves.
+                self.send_header("Cache-Control", "private, max-age=300" if image else "no-store")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)

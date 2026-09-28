@@ -101,7 +101,7 @@ enum PreviewFixtures {
         return rep.representation(using: .png, properties: [:])
     }
 
-    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "email-draft", "ended"]
+    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "looking", "email-draft", "ended"]
 
     static func state(_ name: String) -> (VoiceState, workExpanded: Bool)? {
         let now = Date()
@@ -214,6 +214,21 @@ enum PreviewFixtures {
             s.tasks = [TaskItem(id: "design", info: s.workInfo!)]
             s.runID = "run_preview"
             s.exchange = Exchange(you: "Design a landing page for the bakery.", assistant: "It's ready — have a look.", replyStarted: true)
+        case "looking":
+            s.runID = "run_looking"; s.delegationAt = now - 50
+            s.workInfo = WorkInfo(runID: "run_looking", status: "working", updated: now - 3,
+                                  shortStatus: "Checking the new hero on mobile", updatedAt: now - 3, statusSource: "authored",
+                                  events: [WorkEventItem(kind: "request", text: "Tighten the bakery landing page hero", at: now - 50),
+                                           WorkEventItem(kind: "milestone", text: "Opened the page in the browser", at: now - 30)],
+                                  title: "Bakery hero tweaks")
+            s.workInfo?.liveImage = LiveImage(name: "browser_screenshot_3f2a.png", source: "screenshot", seq: 3, at: now - 3)
+            var other = WorkInfo(runID: "run_other", status: "working", updated: now - 8, shortStatus: "Comparing flour suppliers",
+                                 updatedAt: now - 8, statusSource: "authored",
+                                 events: [WorkEventItem(kind: "request", text: "Find a cheaper flour supplier", at: now - 70)],
+                                 title: "Flour suppliers")
+            other.liveImage = nil
+            s.tasks = [TaskItem(id: "other", info: other), TaskItem(id: "looking", info: s.workInfo!)]
+            s.exchange = Exchange(you: "What are you looking at?", assistant: "It's on your screen.", replyStarted: true)
         case "email-draft":
             let draft = EmailDraft(draftID: "draft_preview", sha256: "0f3a9c", from: "you@example.com",
                                    to: ["dana@example.com"], cc: ["sam@example.com"],

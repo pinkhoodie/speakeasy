@@ -328,6 +328,7 @@ enum PanelSmoke {
             catch { fail("snapshot failed: \(error)") }
         }
         await designReview(c, dir: dir)
+        await lookingAt(c, dir: dir)
         if let (draft, _) = PreviewFixtures.state("email-draft") {
             c.showPreview(draft, workExpanded: false)
             await settle()
@@ -397,6 +398,35 @@ enum PanelSmoke {
         await settle(0.6)
         check(c.model.pinnedReviews.isEmpty, "design review: Dismiss hides the card")
         check(c.model.state.tasks.first?.info.images.count == 3, "design review: images stay in the task after Dismiss")
+    }
+
+    // MARK: A running task shows what it's looking at (list thumbnail + detail)
+
+    static func lookingAt(_ c: NativeVoiceClient, dir: String) async {
+        guard let (state, _) = PreviewFixtures.state("looking") else { fail("looking: fixture missing"); return }
+        let saved = c.model.loadLiveImage
+        var asked: [String] = []
+        c.model.loadLiveImage = { run in asked.append(run); return PreviewFixtures.sampleDesign(variant: 1) }
+        defer { c.model.loadLiveImage = saved }
+        c.showPreview(state, workExpanded: false)
+        await settle(1.0)
+        check(asked.contains("run_looking"), "looking: task list loads the live thumbnail for the running task")
+        check(!asked.contains("run_other"), "looking: no thumbnail for a task with nothing to show")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/looking-list.png")); record("snapshot \(dir)/looking-list.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.showPreview(state, workExpanded: true)
+        c.model.selectedTaskID = "looking"
+        await settle(1.0)
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/looking-detail.png")); record("snapshot \(dir)/looking-detail.png") }
+        catch { fail("snapshot failed: \(error)") }
+        // A new frame (seq moves) is fetched again.
+        let before = asked.count
+        var next = state
+        next.tasks[1].info.liveImage?.seq = 4
+        c.model.state = next; c.panel.setNeedsResize()
+        await settle(0.8)
+        check(asked.count > before, "looking: a new seq refetches the live image")
+        c.model.selectedTaskID = nil
     }
 
     // MARK: Long header and task strings stay readable

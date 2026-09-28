@@ -56,6 +56,11 @@ class StateStore:
             # across hang-ups, like email drafts.
             self._db.execute("""CREATE TABLE IF NOT EXISTS review_dismissals (
                 run_id TEXT NOT NULL, card INTEGER NOT NULL, dismissed REAL NOT NULL, PRIMARY KEY (run_id, card))""")
+            # The latest image a task produced or is looking at, updated during the run (the live view).
+            # ``ref`` is a vetted absolute path under the image roots or a vetted HTTPS URL; never sent to clients.
+            self._db.execute("""CREATE TABLE IF NOT EXISTS live_images (
+                idem_key TEXT PRIMARY KEY, kind TEXT NOT NULL, ref TEXT NOT NULL, name TEXT NOT NULL,
+                source TEXT NOT NULL, seq INTEGER NOT NULL, updated REAL NOT NULL)""")
             columns = {row[1] for row in self._db.execute("PRAGMA table_info(runs)")}
             if "timings" not in columns:  # added after the first release
                 self._db.execute("ALTER TABLE runs ADD COLUMN timings TEXT")
@@ -367,6 +372,35 @@ class StateStore:
                 out.append(work)
         return out
 
+    # -- live view ("what it's looking at") -------------------------------------------------
+    def set_live_image(self, key: str, kind: str, ref: str, name: str, source: str) -> bool:
+        """Record the task's latest image (already vetted by the caller). False when unchanged."""
+        if kind not in {"path", "url"}:
+            raise ValueError("kind must be path or url")
+        now = time.time()
+        with self._lock, self._db:
+            row = self._db.execute("SELECT kind,ref,seq FROM live_images WHERE idem_key=?", (key,)).fetchone()
+            if row is not None and row[0] == kind and row[1] == ref:
+                return False
+            seq = (row[2] if row else 0) + 1
+            self._db.execute("INSERT OR REPLACE INTO live_images VALUES (?,?,?,?,?,?,?)",
+                             (key, kind, ref, name[:120] or "Image", source, seq, now))
+        return True
+
+    def live_image(self, key: str) -> dict[str, Any] | None:
+        """Server-side view, including the ref. Use ``public_live_image`` for clients."""
+        with self._lock:
+            row = self._db.execute("SELECT kind,ref,name,source,seq,updated FROM live_images WHERE idem_key=?",
+                                   (key,)).fetchone()
+        if row is None:
+            return None
+        kind, ref, name, source, seq, updated = row
+        return {"kind": kind, "ref": ref, "name": name, "source": source, "seq": seq, "at": updated}
+
+    def public_live_image(self, key: str) -> dict[str, Any] | None:
+        live = self.live_image(key)
+        return None if live is None else {k: live[k] for k in ("name", "source", "seq", "at")}
+
     # -- image review cards --------------------------------------------------------------
     @staticmethod
     def _image_numbers(result_json: str | None) -> list[int]:
@@ -470,6 +504,10 @@ class StateStore:
             "title": title, "summary": summary, "dismissed": bool(dismissed),
             "email_drafts": self.drafts_for(key),
         }
+        live = self.public_live_image(key)
+        if live is not None:
+            # Addressed by /voice/live-image/<run_id>; the path or URL stays on the server.
+            work["live_image"] = live
         review = self.review_images(actual_run_id, status, result_json)
         if review:
             # Image cards still waiting on the call panel's review card (numbers address /voice/card-image).

@@ -109,3 +109,75 @@ def test_finished_design_pops_a_review_card_end_to_end(server, service, hermes, 
     assert status == 200 and data == PNG
     http(server.base_url, "POST", f"/voice/reviews/{task['run_id']}/dismiss", {}, server.token)
     wait_for(lambda: not any(t.get("review") for t in service.interaction(session["interaction_id"]).feed.last["tasks"]))
+
+
+# -- live view: what the running task is looking at -------------------------------------------------
+
+def test_live_refs_are_vetted_against_roots(tmp_path):
+    from speakeasy.cards import default_image_roots
+    from speakeasy.text import live_images_in
+    root = tmp_path / "home"
+    shot = _image(root, "browser_screenshot_1.png")
+    outside = tmp_path / "secret.png"
+    outside.write_bytes(PNG)
+    roots = default_image_roots(root)
+    preview = json.dumps({"success": True, "analysis": "A login page", "screenshot_path": str(shot)})
+    assert live_images_in(preview, roots) == [("path", str(shot.resolve()), shot.name)]
+    assert live_images_in(f"Looking now.\nMEDIA:{shot}\n", roots)[0][1] == str(shot.resolve())
+    assert live_images_in(json.dumps({"note": f"share via MEDIA:{shot}"}), roots)[0][1] == str(shot.resolve())
+    assert live_images_in(f"MEDIA:{outside}", roots) == []
+    assert live_images_in(json.dumps({"screenshot_path": str(outside)}), roots) == []
+    assert live_images_in("MEDIA:/etc/passwd", roots) == []
+    assert live_images_in("MEDIA:https://127.0.0.1/a.png", roots) == []
+
+
+def _held_run_with(server, service, hermes, events, key="req_live_1"):
+    hermes.hold = True
+    hermes.live_events = events
+    status, session = http(server.base_url, "POST", "/voice/sessions", {"sdp": SDP}, server.token,
+                           {"Idempotency-Key": key})
+    assert status == 201, session
+    worker = service.workers[-1]
+    worker.delegate("call_live_1", "Redesign the bakery landing page")
+    return session, worker
+
+
+def test_live_image_from_tool_preview_and_media_seen(server, service, hermes, home):
+    shot = _image(home, "browser_screenshot_live.png")
+    design = _image(home, "draft-hero.png")
+    outside = home.parent / (home.name + "-outside.png")
+    outside.write_bytes(PNG)
+    session, _ = _held_run_with(server, service, hermes, [
+        {"event": "tool.completed", "tool": "browser_vision",
+         "preview": json.dumps({"success": True, "screenshot_path": str(shot)})},
+        {"event": "media.seen", "path": str(outside), "name": "nope", "source": "viewed"},  # ignored
+        {"event": "media.seen", "path": str(design), "name": "Hero draft", "source": "generated"},
+    ])
+    feed = service.interaction(session["interaction_id"]).feed
+    task = wait_for(lambda: next((t for t in feed.last["tasks"] or [] if (t.get("live_image") or {}).get("name") == "Hero draft"), None))
+    live = task["live_image"]
+    assert live["source"] == "generated" and live["seq"] == 2 and set(live) == {"name", "source", "seq", "at"}
+    assert str(design) not in json.dumps(feed.last["tasks"]) and str(shot) not in json.dumps(feed.last["tasks"])
+    run_id = task["run_id"]
+    assert http(server.base_url, "GET", f"/voice/live-image/{run_id}")[0] == 401
+    status, data = http(server.base_url, "GET", f"/voice/live-image/{run_id}", token=server.token)
+    assert status == 200 and data == PNG
+    assert http(server.base_url, "GET", "/voice/live-image/run_nope", token=server.token)[0] == 404
+    # a file swapped for a symlink after it was seen is refused on read
+    design.unlink()
+    design.symlink_to(outside)
+    assert http(server.base_url, "GET", f"/voice/live-image/{run_id}", token=server.token)[0] == 404
+    hermes.hold = False
+    for run in hermes.runs.values():
+        run["done"].set()
+
+
+def test_live_image_from_interim_media_tag(server, service, hermes, home):
+    shot = _image(home, "page.png")
+    session, _ = _held_run_with(server, service, hermes, [
+        {"event": "message.interim", "text": f"STATUS: Checking the page\nDETAIL: Here it is\nMEDIA:{shot}"}])
+    feed = service.interaction(session["interaction_id"]).feed
+    task = wait_for(lambda: next((t for t in feed.last["tasks"] or [] if t.get("live_image")), None))
+    assert task["live_image"]["name"] == "page.png"
+    for run in hermes.runs.values():
+        run["done"].set()

@@ -111,6 +111,10 @@ final class NativeVoiceClient: VoiceCallClient {
             guard let self, let api = self.api else { return nil }
             return try? await api.image(runID: runID, index: index)
         }
+        model.loadLiveImage = { [weak self] runID in
+            guard let self, let api = self.api else { return nil }
+            return try? await api.liveImage(runID: runID)
+        }
     }
 
     // MARK: Reducer plumbing
