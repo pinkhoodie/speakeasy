@@ -325,3 +325,58 @@ def test_here_without_the_app_opens_the_download_page(home, monkeypatch):
     rc, opened = run_setup(fake, app_installed=False, yes=True, here=True)
     assert rc == 0 and opened and opened[0].startswith("https://speakeasyvoice.ai/pair#server=http%3A%2F%2F127.0.0.1")
     assert any("download page" in line for line in fake.lines)
+
+
+# -- config safety: Speakeasy only ever adds to a user's config.yaml ------------------------------
+
+def _rich_config():
+    return {"model": {"default": "some-model", "provider": "some-provider"},
+            "display": {"runtime_footer": {"enabled": True, "fields": ["model", "context_pct"]}},
+            "plugins": {"enabled": ["other-plugin"], "disabled": ["x"]},
+            "gateway": {"strict": True, "platforms": {"api_server": {"enabled": True}}},
+            "mcp_servers": {"a": {"command": "a"}}, "custom_section": [1, 2, 3]}
+
+
+def test_setup_keeps_every_existing_setting(home):
+    import yaml
+    (home / "config.yaml").write_text(yaml.safe_dump(_rich_config()))
+    assert run_setup(Fake(), yes=True)[0] == 0
+    saved = yaml.safe_load((home / "config.yaml").read_text())
+    from speakeasy.hermes_config import _lost_paths
+    assert _lost_paths(_rich_config(), saved) == []
+    assert saved["model"] == _rich_config()["model"] and saved["display"] == _rich_config()["display"]
+    assert saved["plugins"]["enabled"] == ["other-plugin", "speakeasy"]
+    assert saved["gateway"]["platforms"]["voice"]["enabled"] is True
+
+
+def test_setup_never_overwrites_an_unreadable_config(home):
+    broken = "model: {default: x\n  this is: [not yaml\n"
+    (home / "config.yaml").write_text(broken)
+    fake = Fake()
+    rc, _ = run_setup(fake, yes=True)
+    assert rc == 1
+    assert (home / "config.yaml").read_text() == broken
+    assert any("untouched" in line for line in fake.lines)
+
+
+def test_update_refuses_a_change_that_removes_settings(tmp_path):
+    import yaml
+    from speakeasy import hermes_config
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(_rich_config()))
+    before = path.read_text()
+    with pytest.raises(hermes_config.ConfigWriteRefused):
+        hermes_config.update(path, lambda cfg: cfg.pop("model") is not None)
+    with pytest.raises(hermes_config.ConfigWriteRefused):
+        hermes_config.update(path, lambda cfg: cfg["display"]["runtime_footer"].pop("fields") is not None)
+    assert path.read_text() == before
+
+
+def test_update_without_a_change_does_not_write(tmp_path):
+    import yaml
+    from speakeasy import hermes_config
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(_rich_config()))
+    mtime = path.stat().st_mtime_ns
+    assert hermes_config.update(path, lambda cfg: False) is False
+    assert path.stat().st_mtime_ns == mtime

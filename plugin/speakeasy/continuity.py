@@ -193,22 +193,28 @@ def match(request: str, conversations: list[Conversation]) -> Conversation | Non
 
 
 def ensure_alias(conv: Conversation) -> bool:
-    """Add a `session_key_aliases` entry for this conversation via Hermes' own config writer, so
-    the reply fans out to the native chat. Returns False when not possible (then the turn still runs,
-    it only is not mirrored)."""
+    """Add a `session_key_aliases` entry for this conversation to Hermes' config, so the reply
+    fans out to the native chat. Returns False when not possible (then the turn still runs,
+    it only is not mirrored). Never removes or rewrites any other setting."""
     try:
-        from hermes_cli.config import atomic_config_write, get_config_path, read_user_config_raw  # type: ignore
+        from hermes_cli.config import get_config_path  # type: ignore
     except Exception:
         return False
-    try:
-        path = get_config_path()
-        raw = read_user_config_raw(path)
-        aliases = dict(raw.get("session_key_aliases") or {})
+    from . import hermes_config
+
+    def add_alias(cfg: dict) -> bool:
+        aliases = cfg.get("session_key_aliases")
+        if not isinstance(aliases, dict):
+            if aliases is not None:
+                return False  # unexpected shape: leave the user's value alone
+            aliases = cfg["session_key_aliases"] = {}
         if aliases.get(conv.session_key) == conv.alias():
-            return True
+            return False
         aliases[conv.session_key] = conv.alias()
-        raw["session_key_aliases"] = aliases
-        atomic_config_write(path, raw)  # this writer replaces absent sections; pass the entire config
+        return True
+
+    try:
+        hermes_config.update(get_config_path(), add_alias)
         return True
     except Exception:
         return False

@@ -73,17 +73,8 @@ def _read_yaml(path: Path) -> dict[str, Any]:
         import yaml  # type: ignore
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
-    except FileNotFoundError:
+    except (FileNotFoundError, yaml.YAMLError):  # read-only helper; writes go through hermes_config
         return {}
-
-
-def _write_yaml(path: Path, data: dict[str, Any]) -> None:
-    import yaml  # type: ignore
-    tmp = path.with_suffix(".yaml.speakeasy.tmp")
-    tmp.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
-    if path.exists():
-        os.chmod(tmp, path.stat().st_mode & 0o777)
-    os.replace(tmp, path)
 
 
 def append_env_if_missing(env_path: Path, values: dict[str, str]) -> list[str]:
@@ -105,28 +96,35 @@ def append_env_if_missing(env_path: Path, values: dict[str, str]) -> list[str]:
 
 
 def enable_voice_platform(home: Path, port: int) -> bool:
-    """Turn on gateway.platforms.voice in this profile's config.yaml. Returns True if changed."""
-    path = home / "config.yaml"
-    data = _read_yaml(path)
-    gateway = data.setdefault("gateway", {}) if isinstance(data.get("gateway", {}), dict) else None
-    if gateway is None:
-        return False
-    platforms = gateway.setdefault("platforms", {})
-    voice = platforms.setdefault("voice", {})
-    changed = not voice.get("enabled")
-    voice["enabled"] = True
-    extra = voice.setdefault("extra", {})
-    if "port" not in extra:
-        extra["port"] = port
-        changed = True
-    plugins = data.setdefault("plugins", {})
-    enabled = plugins.setdefault("enabled", [])
-    if isinstance(enabled, list) and "speakeasy" not in enabled:
-        enabled.append("speakeasy")
-        changed = True
-    if changed:
-        _write_yaml(path, data)
-    return changed
+    """Turn on gateway.platforms.voice in this profile's config.yaml. Returns True if changed.
+    Only adds settings; refuses (config untouched) if the file can't be read."""
+    from . import hermes_config
+
+    def turn_on(data: dict) -> bool:
+        gateway = data.setdefault("gateway", {})
+        if not isinstance(gateway, dict):
+            return False
+        platforms = gateway.setdefault("platforms", {})
+        if not isinstance(platforms, dict):
+            return False
+        voice = platforms.setdefault("voice", {})
+        if not isinstance(voice, dict):
+            return False
+        changed = not voice.get("enabled")
+        voice["enabled"] = True
+        extra = voice.setdefault("extra", {})
+        if isinstance(extra, dict) and "port" not in extra:
+            extra["port"] = port
+            changed = True
+        plugins = data.setdefault("plugins", {})
+        if isinstance(plugins, dict):
+            enabled = plugins.setdefault("enabled", [])
+            if isinstance(enabled, list) and "speakeasy" not in enabled:
+                enabled.append("speakeasy")
+                changed = True
+        return changed
+
+    return hermes_config.update(home / "config.yaml", turn_on)
 
 
 def voice_port(home: Path) -> int:
@@ -183,7 +181,13 @@ def cmd_setup(args, home: Path, env=None) -> int:
     port = voice_port(home)
     local = f"http://127.0.0.1:{port}"
     out("Setting up Speakeasy…")
-    _prepare_profile(home, port, out)
+    from .hermes_config import ConfigWriteRefused
+    try:
+        _prepare_profile(home, port, out)
+    except ConfigWriteRefused as exc:
+        out(f"✗ Left your Hermes config.yaml untouched: {exc}")
+        out("  Fix or restore config.yaml (hermes config check), then run setup again.")
+        return 1
 
     settings = Settings(home)
     voice_ok = F.voice_sign_in(env, home, settings, api_key=getattr(args, "api_key", False), assume=assume)

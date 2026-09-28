@@ -359,6 +359,18 @@ def test_ensure_alias_keeps_unrelated_hermes_configuration(tmp_path, monkeypatch
     assert yaml.safe_load(path.read_text()) == saved
 
 
+def test_ensure_alias_never_touches_an_unreadable_or_odd_config(tmp_path, monkeypatch):
+    import hermes_cli.config as config
+    path = tmp_path / "config.yaml"
+    monkeypatch.setattr(config, "get_config_path", lambda: path)
+    conv = continuity.Conversation("s", "discord", "999", "thread", "999", "42", "111", "work", "Task", time.time())
+    for text in ("model: {default: x\n  broken: [yaml\n",                    # unreadable
+                 "model:\n  default: x\nsession_key_aliases: [not, a, map]\n"):  # unexpected shape
+        path.write_text(text)
+        continuity.ensure_alias(conv)
+        assert path.read_text() == text
+
+
 # -- (C) continuity ---------------------------------------------------------------------------------
 
 def test_thread_sessions_opened_for_voice_are_continuation_candidates(tmp_path):
