@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from fakes import SDP, http, wait_for
+from speakeasy.prompt import builder as P
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
 
@@ -181,3 +184,115 @@ def test_live_image_from_interim_media_tag(server, service, hermes, home):
     assert task["live_image"]["name"] == "page.png"
     for run in hermes.runs.values():
         run["done"].set()
+
+
+# -- "show me" --------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("said", ["Show me", "show me.", "What are you looking at?", "Let me see it", "let me see",
+                                  "Can I see the design?", "can you show me what you're looking at",
+                                  "Pull it up", "show me the landing page design", "OK, show me what you got"])
+def test_show_me_intent(said):
+    from speakeasy import router
+    assert router.is_show_me(said), said
+
+
+@pytest.mark.parametrize("said", ["Show me flights to Paris next Friday", "show me how to cook rice",
+                                  "Design a landing page for the bakery", "what are you doing tonight with the kids",
+                                  "Let me see if Pat is free on Tuesday"])
+def test_show_me_leaves_real_work_alone(said):
+    from speakeasy import router
+    assert not router.is_show_me(said), said
+
+
+def test_show_me_target_prefers_named_then_imaged_then_running():
+    from speakeasy.router import OpenTask, show_me_target
+    tasks = [OpenTask("t1", "Design the bakery landing page", "completed"),
+             OpenTask("t2", "Compare flour suppliers", "running"),
+             OpenTask("t3", "Book a dentist", "running")]
+    assert show_me_target("show me the bakery page", tasks, set()).task_id == "t1"
+    assert show_me_target("show me", tasks, {"t1"}).task_id == "t1"
+    assert show_me_target("show me", tasks, {"t1", "t2"}).task_id == "t2"
+    assert show_me_target("show me", tasks, set()).task_id == "t3"
+    assert show_me_target("show me", [OpenTask("t1", "x", "completed")], set()) is None
+
+
+def _spoken(worker):
+    return [c for k, _, c in worker.sent if k == "session.commentary.append"]
+
+
+def _shows(feed):
+    return [p for _, kind, p in list(feed.ring) if kind == "show"]
+
+
+def test_show_me_opens_live_image_without_new_work(server, service, hermes, home):
+    shot = _image(home, "browser_screenshot_9.png")
+    session, worker = _held_run_with(server, service, hermes, [
+        {"event": "tool.completed", "tool": "browser_vision", "preview": json.dumps({"screenshot_path": str(shot)})}])
+    feed = service.interaction(session["interaction_id"]).feed
+    wait_for(lambda: any(t.get("live_image") for t in feed.last["tasks"] or []))
+    runs_before = len(hermes.runs)
+    worker.feed({"type": "session.output_transcript.delta", "delta": "On it.", "start_ms": 3, "end_ms": 4})
+    worker.delegate("call_show_1", "What are you looking at?")
+    show = wait_for(lambda: _shows(feed))[-1]
+    assert show["image"] == "live" and show["task_id"] == "call_live_1" and set(show) == {"task_id", "run_id", "image", "seq"}
+    assert str(shot) not in json.dumps(show)
+    wait_for(lambda: P.SHOW_ME_ON_SCREEN in _spoken(worker))
+    assert len(hermes.runs) == runs_before, "show me must not start new work"
+    for run in hermes.runs.values():
+        run["done"].set()
+
+
+def test_show_me_without_image_steers_for_a_screenshot(server, service, hermes, home):
+    session, worker = _held_run_with(server, service, hermes, [])
+    feed = service.interaction(session["interaction_id"]).feed
+    wait_for(lambda: any(t.get("run_id") for t in feed.last["tasks"] or []))
+    runs_before = len(hermes.runs)
+    worker.feed({"type": "session.output_transcript.delta", "delta": "On it.", "start_ms": 3, "end_ms": 4})
+    worker.delegate("call_show_2", "show me")
+    wait_for(lambda: hermes.steers)
+    run_id, text = hermes.steers[-1]
+    assert "MEDIA:" in text and "screenshot" in text
+    wait_for(lambda: P.SHOW_ME_REQUESTED in _spoken(worker))
+    assert P.SHOW_ME_ON_SCREEN not in _spoken(worker), "never claim it's on screen before the image exists"
+    assert _shows(feed)[-1]["image"] == "detail"
+    assert len(hermes.runs) == runs_before
+    # the screenshot arrives: the panel is told to open it
+    shot = _image(home, "asked.png")
+    backend = next(r for r in service.interaction(session["interaction_id"]).runs.values() if r.run_id == run_id)
+    import asyncio
+    asyncio.run(worker.handle_hermes_event(backend, {"event": "message.interim", "text": f"Here it is\nMEDIA:{shot}"}))
+    assert _shows(feed)[-1]["image"] == "live"
+    for run in hermes.runs.values():
+        run["done"].set()
+
+
+def test_show_me_after_the_call_opens_the_waiting_review(server, service, hermes):
+    _finished_with_images(service.store, "se_earlier", "run_earlier", n=1)
+    status, session = http(server.base_url, "POST", "/voice/sessions", {"sdp": SDP}, server.token,
+                           {"Idempotency-Key": "req_show_b"})
+    assert status == 201, session
+    worker = service.workers[-1]
+    feed = service.interaction(session["interaction_id"]).feed
+    runs_before = len(hermes.runs)
+    worker.delegate("call_show_3", "Can I see the design?")
+    show = wait_for(lambda: _shows(feed))[-1]
+    assert show["image"] == "review" and show["run_id"] == "run_earlier"
+    carried = wait_for(lambda: [t for t in feed.last["tasks"] or [] if t.get("run_id") == "run_earlier"])
+    assert carried and carried[0]["task_id"] == show["task_id"], "the app can find the task it's told to show"
+    wait_for(lambda: P.SHOW_ME_ON_SCREEN in _spoken(worker))
+    assert len(hermes.runs) == runs_before
+
+
+def test_show_me_with_nothing_to_show_is_ordinary_work(server, service, hermes):
+    status, session = http(server.base_url, "POST", "/voice/sessions", {"sdp": SDP}, server.token,
+                           {"Idempotency-Key": "req_show_c"})
+    worker = service.workers[-1]
+    worker.delegate("call_show_4", "show me")
+    wait_for(lambda: len(hermes.runs) == 1)
+    assert not _shows(service.interaction(session["interaction_id"]).feed)
+
+
+def test_show_me_rule_never_teaches_a_premature_claim():
+    rules = (P.PROMPT_DIR / "rules.md").read_text()
+    assert "on your screen" not in rules.lower(), "the voice would parrot it before the image exists"
+    assert "Images" in rules and "hand the request off" in rules

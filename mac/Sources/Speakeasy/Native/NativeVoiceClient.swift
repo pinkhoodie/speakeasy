@@ -136,6 +136,7 @@ final class NativeVoiceClient: VoiceCallClient {
             engine?.setRemoteAudioEnabled(new.remoteAudioEnabled)
         }
         refreshStatusLine()
+        if let show = new.showRequest, show != old.showRequest { act(on: show) }
         if old.exchange.isEmpty != new.exchange.isEmpty || old.approval != new.approval ||
             old.connection != new.connection || old.workInfo != new.workInfo || old.tasks != new.tasks {
             panel.setNeedsResize()
@@ -719,6 +720,21 @@ final class NativeVoiceClient: VoiceCallClient {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
+    }
+
+    /// "Show me": open the task's live image (detail view) or bring its review card forward.
+    private func act(on show: ShowRequest) {
+        if model.showsSlim { model.slim = false }
+        if show.opensDetail {
+            if model.state.tasks.contains(where: { $0.id == show.taskID }) { selectTask(show.taskID) }
+        } else {
+            model.workExpanded = false
+            model.selectedTaskID = nil
+            if let run = show.runID { model.focusedReviewID = run }
+            model.objectWillChange.send()
+            panel.setNeedsResize()
+        }
+        if !panel.isVisible { showPanel() }
     }
 
     private func selectTask(_ id: String?) {

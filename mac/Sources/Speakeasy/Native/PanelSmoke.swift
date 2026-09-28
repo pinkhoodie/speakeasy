@@ -426,6 +426,15 @@ enum PanelSmoke {
         c.model.state = next; c.panel.setNeedsResize()
         await settle(0.8)
         check(asked.count > before, "looking: a new seq refetches the live image")
+        // Spoken "show me": the server's show action opens that task's detail with its live image.
+        c.showPreview(state, workExpanded: false)
+        c.model.selectedTaskID = nil
+        await settle(0.4)
+        c.dispatch(.show(ShowRequest(taskID: "looking", runID: "run_looking", image: .live, seq: 1)))
+        await settle(0.8)
+        check(c.model.workExpanded && c.model.selectedTaskID == "looking", "show me: opens the task's live image")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/show-me.png")); record("snapshot \(dir)/show-me.png") }
+        catch { fail("snapshot failed: \(error)") }
         c.model.selectedTaskID = nil
     }
 

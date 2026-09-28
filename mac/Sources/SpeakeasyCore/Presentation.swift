@@ -46,6 +46,8 @@ public func parseServerStreamEvent(_ event: SSEEvent) -> [VoiceEvent] {
         return [.approval(ApprovalInfo(json: json))]
     case "tasks":
         return TaskItem.list(json: json).map { [.tasks($0)] } ?? []
+    case "show":
+        return ShowRequest(json: json).map { [.show($0)] } ?? []
     case "closed":
         let object = json as? [String: Any]
         let fin: Finalization = (object?["finalization"] as? String) == "complete" ? .complete : .incomplete

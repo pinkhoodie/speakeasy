@@ -264,6 +264,16 @@ EMAIL_DRAFT_RULE = (
 )
 
 
+# "Show me": the server opens the image in the app, then (and only then) the voice says so.
+SHOW_ME_ON_SCREEN = "It's on your screen."
+SHOW_ME_REQUESTED = ("There's no picture yet. I've asked for a screenshot of what it's looking at; "
+                     "it will open in the app when it arrives.")
+SHOW_ME_NOTHING = "That task has no picture to show. The details are in the app."
+SCREENSHOT_STEER = ("The user wants to see what you are looking at. Take a screenshot of what you are working on "
+                    "right now (or render your current result) and share it by including MEDIA:<absolute path> "
+                    "in your next message, then carry on with the task.")
+
+
 def status_rule(names: Names) -> str:
     return render(
         "{user_name_cap} watches a one-line live status while you work. Before your first tool call, write interim commentary "

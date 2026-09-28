@@ -67,4 +67,15 @@ final class ImageReviewTests: XCTestCase {
         XCTAssertNil(LiveImage(json: ["name": "x", "seq": 0]))
         XCTAssertNil(WorkInfo(json: ["status": "working"])?.liveImage)
     }
+
+    func testShowEventParsesIdsOnly() {
+        let event = SSEEvent(name: "show", data: #"{"task_id":"call_1","run_id":"run_1","image":"live","seq":2}"#)
+        XCTAssertEqual(parseServerStreamEvent(event), [.show(ShowRequest(taskID: "call_1", runID: "run_1", image: .live, seq: 2))])
+        XCTAssertEqual(parseServerStreamEvent(SSEEvent(name: "show", data: #"{"task_id":"x","image":"path"}"#)), [])
+        var state = VoiceState()
+        state = reduce(state, .show(ShowRequest(taskID: "call_1", runID: nil, image: .detail, seq: 1)), now: Date())
+        XCTAssertEqual(state.showRequest?.image, .detail)
+        XCTAssertTrue(state.showRequest!.opensDetail)
+        XCTAssertFalse(ShowRequest(taskID: "t", runID: "r", image: .review, seq: 3).opensDetail)
+    }
 }

@@ -82,3 +82,27 @@ public enum ImageReviewLayout {
         return ((index + delta) % count + count) % count
     }
 }
+
+
+/// The server's "open this task's image" panel action (spoken "show me"). Carries only ids:
+/// the bytes come from the authenticated image routes.
+public struct ShowRequest: Equatable, Sendable {
+    public enum Image: String, Sendable { case live, review, detail }
+    public var taskID: String
+    public var runID: String?
+    public var image: Image
+    public var seq: Int
+    public init(taskID: String, runID: String?, image: Image, seq: Int) {
+        self.taskID = taskID; self.runID = runID; self.image = image; self.seq = seq
+    }
+    public init?(json: Any?) {
+        guard let o = json as? [String: Any], let task = o["task_id"] as? String, !task.isEmpty,
+              let image = (o["image"] as? String).flatMap(Image.init(rawValue:)) else { return nil }
+        self.init(taskID: task, runID: (o["run_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }, image: image,
+                  seq: (o["seq"] as? NSNumber)?.intValue ?? 0)
+    }
+
+    /// What the panel does: open the task's detail (live image / screenshot on its way), or bring its
+    /// review card back and page to it.
+    public var opensDetail: Bool { image != .review }
+}

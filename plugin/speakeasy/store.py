@@ -372,6 +372,12 @@ class StateStore:
                 out.append(work)
         return out
 
+    def task_id_for(self, key: str) -> str:
+        """The task id the app knows this row by (its delegation id, as on carried rows)."""
+        with self._lock:
+            row = self._db.execute("SELECT delegation_id FROM runs WHERE idem_key=?", (key,)).fetchone()
+        return (row[0] if row and row[0] else key)
+
     # -- live view ("what it's looking at") -------------------------------------------------
     def set_live_image(self, key: str, kind: str, ref: str, name: str, source: str) -> bool:
         """Record the task's latest image (already vetted by the caller). False when unchanged."""

@@ -350,6 +350,8 @@ class SidebandWorker:
         self.notices = rt.notices
         self.fragments: deque[dict[str, Any]] = deque(maxlen=512)
         self.handoff_at: dict[str, float] = {}   # delegation id -> when the handoff arrived (monotonic)
+        self.show_pending: set[str] = set()      # task keys asked for a screenshot by "show me"
+        self.show_seq = 0
         self.route_timings: dict[str, int] = {}  # task id -> routing latency (ms), stored with the task
         self.delegations: set[str] = set()
         self.dispatch_tasks: set[asyncio.Task[Any]] = set()
@@ -642,6 +644,8 @@ class SidebandWorker:
             return
         last_request = next((line[6:].strip() for line in reversed(context.splitlines())
                              if line.startswith("User: ")), "")
+        if router.is_show_me(last_request) and await self.show_me(delegation_id, last_request):
+            return
         decision = await asyncio.to_thread(self.rt.route, last_request, self.open_tasks(), marked)
         self.route_timings[delegation_id] = decision.latency_ms
         part = decision.parts[0]
@@ -659,6 +663,60 @@ class SidebandWorker:
             await self.start_parts(delegation_id, revision, context, [p.request for p in decision.parts], choice)
             return
         await self.start_routed(delegation_id, revision, context, last_request, choice)
+
+    async def show_me(self, delegation_id: str, request: str) -> bool:
+        """'Show me' / 'what are you looking at' about existing work: open that task's image in the
+        panel instead of starting new work. Returns False when there is nothing to point at (the
+        request is then handled as ordinary work).
+
+        The panel action carries only the task and run ids; the app fetches the bytes through the
+        authenticated image routes. The voice says it's on screen only after the action went out."""
+        tasks = self.open_tasks()
+        with self.interaction.lock:
+            runs = {t.task_id: self.interaction.runs.get(t.task_id) for t in tasks}
+        keys = {task_id: run.idem_key for task_id, run in runs.items() if run is not None}
+        has_image = {task_id for task_id, key in keys.items()
+                     if self.store.live_image(key) or (self.store.work(idem_key=key) or {}).get("review")
+                     or (((self.store.work(idem_key=key) or {}).get("result") or {}).get("cards"))}
+        target = router.show_me_target(request, tasks, has_image)
+        self.handoff_at.pop(delegation_id, None)
+        if target is None:
+            # Nothing in this call: an earlier call's finished images still waiting on a review card.
+            carried = self.store.keys_with_pending_reviews()
+            if not carried:
+                return False
+            work = self.store.work(idem_key=carried[-1]) or {}
+            self.show_action(work.get("run_id"), self.store.task_id_for(carried[-1]), "review")
+            await self.append("session.commentary.append", delegation_id, P.SHOW_ME_ON_SCREEN)
+            return True
+        run = runs.get(target.task_id)
+        key = keys.get(target.task_id)
+        if run is None or key is None:
+            return False
+        running = run.status in {"admitting", "working", "running", "waiting_for_approval"}
+        if target.task_id in has_image:
+            kind = "live" if running and self.store.live_image(key) else "review"
+            self.show_action(run.run_id, target.task_id, kind)
+            await self.append("session.commentary.append", delegation_id, P.SHOW_ME_ON_SCREEN)
+            return True
+        if running and run.run_id:
+            accepted = await asyncio.to_thread(self.hermes.steer, run.run_id, P.SCREENSHOT_STEER)
+            if accepted:
+                with self.interaction.lock:
+                    self.show_pending.add(key)
+                self.store.progress(key, "milestone", "You asked to see what it's looking at")
+                self.show_action(run.run_id, target.task_id, "detail")
+                await self.append("session.commentary.append", delegation_id, P.SHOW_ME_REQUESTED)
+                return True
+        await self.append("session.commentary.append", delegation_id, P.SHOW_ME_NOTHING)
+        return True
+
+    def show_action(self, run_id: str | None, task_id: str, kind: str) -> None:
+        """Ask the app to open a task's image: kind is live | review | detail (no image yet)."""
+        self.show_seq += 1
+        self.publish()  # the task list first, so the app already has the task it is told to open
+        self.interaction.feed.publish("show", {"task_id": task_id, "run_id": run_id, "image": kind,
+                                               "seq": self.show_seq})
 
     async def start_parts(self, delegation_id: str, revision: int, context: str, parts: list[str],
                           choice: channels.Choice) -> None:
@@ -1041,6 +1099,11 @@ class SidebandWorker:
         if seen:
             ref_kind, ref, name = seen[-1]
             self.store.set_live_image(backend.idem_key, ref_kind, ref, name, source)
+            with self.interaction.lock:
+                asked = backend.idem_key in self.show_pending
+                self.show_pending.discard(backend.idem_key)
+            if asked:  # "show me" asked for this screenshot: open it as soon as it arrives
+                self.show_action(backend.run_id, backend.delegation_id, "live")
 
     async def _handle_hermes_event(self, backend: BackendRun, event: dict[str, Any]) -> None:
         idem, delegation_id = backend.idem_key, backend.say_id
