@@ -405,6 +405,54 @@ def working_status(request: str, timeout: float = TITLE_TIMEOUT_S) -> str | None
     return clean_status(raw)
 
 
+_PROGRESS_PROMPT = (
+    "You write one short spoken progress update for a voice assistant whose background agent is working on "
+    "a task for the user. You get the user's request, the agent's recent steps (newest last) and updates "
+    "already spoken. Say what the agent is doing and what it has found so far, concretely: names, numbers, "
+    "sources, what is next. One or two short sentences, under 30 words, natural speech, first person "
+    "(\"I found...\", \"I'm now...\"). Never say \"still on it\", \"still working\" or \"still checking\" "
+    "on their own, never repeat an earlier update, never invent results the steps don't show, and never "
+    "give the final answer. Reply with JSON only: {\"say\": \"...\"}, or {\"say\": \"\"} when the steps "
+    "add nothing worth saying."
+)
+
+
+def progress_update(request: str, steps: list[str], told: list[str], timeout: float = 6.0) -> str | None:
+    """A spoken update that says what the task is actually doing and seeing. None when unavailable."""
+    if not steps:
+        return None
+    try:
+        from agent.auxiliary_client import call_llm  # type: ignore
+    except Exception:
+        return None
+    body = json.dumps({"request": " ".join(str(request).split())[:600], "recent_steps": steps[-8:],
+                       "already_said": told[-3:]})
+    try:
+        with _profile_scope():
+            response = call_llm(task="title_generation",
+                                messages=[{"role": "system", "content": _PROGRESS_PROMPT},
+                                          {"role": "user", "content": body}],
+                                max_tokens=120, temperature=None, timeout=timeout,
+                                reasoning_config={"enabled": False})
+        raw = (response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.info("speakeasy: progress update unavailable (%s)", type(exc).__name__)
+        return None
+    return clean_progress(raw)
+
+
+def clean_progress(raw: str) -> str | None:
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip())
+    try:
+        said = json.loads(raw).get("say") if raw.startswith("{") else raw
+    except (ValueError, AttributeError):
+        return None
+    said = " ".join(str(said or "").split())
+    if not said or len(said) > 240 or re.fullmatch(r"(?i)(still (on it|working|checking)[^.]*\.?)", said):
+        return None
+    return said
+
+
 def clean_status(raw: str) -> str | None:
     from .text import valid_short_status
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip())

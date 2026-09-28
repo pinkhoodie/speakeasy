@@ -280,7 +280,9 @@ def status_rule(names: Names) -> str:
     return render(
         "{user_name_cap} watches a one-line live status while you work. Before your first tool call, write interim commentary "
         "exactly as two lines: STATUS: <specific present-tense action of 2-6 words, e.g. Checking the weather forecast> "
-        "then DETAIL: <brief user-facing detail>. Write a new pair only when the step meaningfully changes. "
+        "then DETAIL: <one sentence on what you are doing and what you found so far, with specifics: names, "
+        "numbers, files, sites, e.g. Found three hotels under 200 euros near the port; checking reviews next>. "
+        "Write a new pair only when the step meaningfully changes. "
         "Never include reasoning, credentials, or raw tool arguments. "
         "End your final answer with two last lines: DONE: <past-tense label of 1-5 words, e.g. Weather checked> "
         "then SPOKEN: <one or two plain sentences to say aloud>; "
@@ -403,7 +405,6 @@ def work_started_note(parallel: list[str]) -> str:
 
 # The voice model acknowledges work itself. The server only speaks what it alone knows: where a
 # task went (a new thread or another channel), and a brief update on a long task.
-_PROGRESS_LEADS = ("Still on it:", "Quick update:", "Progress:")
 
 
 def _pick(options: tuple[str, ...], seed: str) -> str:
@@ -437,19 +438,21 @@ def ack_channel_post(label: str) -> str:
     return f"That'll go to {short_place(label)}."
 
 
+def progress_fallback(steps: list[str], milestone: str) -> str | None:
+    """Without the wording model: say the latest concrete step, never a bare "still on it"."""
+    latest = re.sub(r"\s+", " ", (steps[-1] if steps else milestone) or "").strip().rstrip(".")
+    words = latest.split(" ")
+    if len(words) < 3:
+        return None  # too thin to be worth interrupting the quiet for
+    if len(words) > 16:
+        latest = " ".join(words[:16]) + "…"
+    return f"Quick update: {latest[0].lower() + latest[1:] if latest[:2].istitle() else latest}."
+
+
 def status_note(detail: str) -> str:
     """A silent status note for the voice model: context for "how's it going?", never a cue to talk."""
     return ("Background status, do not say anything now; only use it if asked how the task is going: "
             + re.sub(r"\s+", " ", detail or "").strip()[:300])
-
-
-def progress_line(seed: str, milestone: str) -> str:
-    """A brief spoken progress update for a long task (the milestone is Hermes' own short line)."""
-    text = re.sub(r"\s+", " ", milestone or "").strip().rstrip(".")
-    words = text.split(" ")
-    if len(words) > 10:
-        text = " ".join(words[:10]) + "…"
-    return f"{_pick(_PROGRESS_LEADS, seed)} {text}."
 
 
 def clarify_channel(named: list[str], known: list[str]) -> str:
@@ -494,15 +497,26 @@ def earlier_task_finished(names: Names, request: str, spoken: str) -> str:
             f"or corrected that request, mention only briefly that the old one finished. Otherwise tell them: {spoken}")[:2000]
 
 
-def result_background(name: str | None, full: str | None, spoken: str | None) -> str | None:
-    """The full answer of a finished task, as notes the voice model can answer follow-ups
-    from (not read aloud). None when the full answer adds nothing to the spoken line."""
-    text = re.sub(r"\s+", " ", safe_user_text(full or "", 4000) or "").strip()
+def result_notes(name: str | None, full: str | None, spoken: str | None) -> list[str]:
+    """The finished task's whole answer as background notes the voice answers follow-ups from
+    (not read aloud), split to fit live-call appends. Code fences are unwrapped and only lines that
+    look like secrets are dropped: rejecting the whole answer (one code block or "token:" did it)
+    left the voice nothing to recall, so it re-ran the task for every question about the report."""
+    from ..text import MAX_RESULT_FULL, SENSITIVE_TEXT_RE
+    raw = (full or "").replace("```", "")
+    lines = [ln for ln in raw.splitlines() if not SENSITIVE_TEXT_RE.search(ln)]
+    text = re.sub(r"[ \t]+", " ", "\n".join(lines))
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()[:MAX_RESULT_FULL]
     if not text or text == (spoken or "").strip():
-        return None
-    head = f"Background notes, not to read aloud. Full answer for the task \"{notice_text(name, 80) or 'that task'}\": "
-    room = RESULT_BACKGROUND_CHARS - len(head)
-    return head + (text if len(text) <= room else text[:room - 1].rstrip() + "…")
+        return []
+    label = notice_text(name, 80) or "that task"
+    head = (f"Background notes, not to read aloud. Full report from the task \"{label}\"; answer questions "
+            f"about it from these notes without starting new work")
+    room = RESULT_BACKGROUND_CHARS - len(head) - 16
+    chunks = [text[i:i + room] for i in range(0, len(text), room)]
+    if len(chunks) == 1:
+        return [f"{head}: {chunks[0]}"]
+    return [f"{head} (part {i} of {len(chunks)}): {c}" for i, c in enumerate(chunks, 1)]
 
 
 def pictures_note(count: int) -> str:

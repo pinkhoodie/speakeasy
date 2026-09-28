@@ -12,6 +12,7 @@ import pytest
 
 from fakes import SDP, http, wait_for
 from speakeasy import channels, continuity, router, suggest, threads
+from speakeasy.prompt import builder as P
 from speakeasy import settings as S
 from speakeasy.prompt import builder as P
 
@@ -79,53 +80,98 @@ def test_both_transports_route_commentary_to_speech():
     assert '"type": kind' in live  # session.commentary.append goes out as-is: the live API speaks it
 
 
-def test_progress_is_spoken_once_for_a_long_quiet_task(service, monkeypatch):
-    import asyncio
-    from speakeasy import calls
-    from speakeasy.calls import BackendRun, Interaction
+def _progress_worker(service, writer=None):
+    from speakeasy.calls import Interaction
     from fakes import FakeLiveWorker
-    worker = FakeLiveWorker(service.rt, Interaction("int_x", "sess_x"))
-    backend = BackendRun("t1", 1, "idem_1", status="running")
-    backend.started -= calls.PROGRESS_AFTER_S + 5  # long enough to earn one update
-    asyncio.run(worker.maybe_speak_progress(backend, "Pulling this week's events"))
-    asyncio.run(worker.maybe_speak_progress(backend, "Verifying the injury report"))  # within PROGRESS_EVERY_S: quiet
-    lines = spoken(worker)
-    assert len(lines) == 1 and "Pulling this week's events" in lines[0]
-    backend.spoken_at -= calls.PROGRESS_EVERY_S + 1
-    worker.fragments.append({"speaker": "user", "text": "hmm what else", "at": time.monotonic(), "start_ms": 0, "end_ms": 0})
-    asyncio.run(worker.maybe_speak_progress(backend, "Almost there"))  # user spoke: stay quiet
-    assert len(spoken(worker)) == 1
-    fresh = BackendRun("t2", 1, "idem_2", status="running")
-    asyncio.run(worker.maybe_speak_progress(fresh, "Just started"))  # too new: quiet
-    assert len(spoken(worker)) == 1
+    if writer is not None:
+        service.rt.progress_call = writer
+    return FakeLiveWorker(service.rt, Interaction("int_x", "sess_x"))
 
 
-def test_a_chatty_task_does_not_make_the_voice_check_in_every_few_seconds(service):
-    """Live report: 'Still on it' every ~10 s. Hermes posts a status line often; every one went to
-    the voice model, which answered each out loud. Over two minutes of updates every 5 s, the call
-    gets at most one spoken update per PROGRESS_EVERY_S plus a rare silent note."""
+def _step(worker, backend, clock, at, detail):
     import asyncio
+    clock[0] = backend.started + at
+    event = {"event": "message.interim", "text": f"STATUS: Working step {int(at)}\nDETAIL: {detail}"}
+    asyncio.run(worker._handle_hermes_event(backend, event))
+
+
+def _run_with_clock(fn):
     from speakeasy import calls
-    from speakeasy.calls import BackendRun, Interaction
-    from fakes import FakeLiveWorker
-    worker = FakeLiveWorker(service.rt, Interaction("int_y", "sess_y"))
-    backend = BackendRun("t1", 1, "idem_chatty", status="running")
-    start = backend.started
-    clock = [start]
-    real = time.monotonic
+    clock = [0.0]
+    real = calls.time.monotonic
     calls.time.monotonic = lambda: clock[0]
     try:
-        for step in range(0, 121, 5):
-            clock[0] = start + step
-            event = {"event": "message.interim", "text": f"STATUS: Checking source {step}\nDETAIL: Reading source {step}"}
-            asyncio.run(worker._handle_hermes_event(backend, event))
+        fn(clock)
     finally:
         calls.time.monotonic = real
-    said = [c for k, _, c in worker.sent if k == "session.commentary.append"]
-    notes = [c for k, _, c in worker.sent if k == "session.thinking.append"]
-    assert len(said) <= 120 // calls.PROGRESS_EVERY_S + 1
-    assert len(notes) <= 120 // calls.STATUS_NOTE_EVERY_S + 1
-    assert all("do not say anything" in n for n in notes)
+
+
+def test_progress_says_what_the_task_is_actually_doing(service):
+    """Live report: updates were 'still on it, I'm checking the repo'. The spoken line is written from
+    the agent's recent concrete steps, and the writer is told what was already said."""
+    from speakeasy.calls import BackendRun
+    seen = []
+
+    def writer(request, steps, told):
+        seen.append((request, list(steps), list(told)))
+        return f"I found {steps[-1].lower()}"
+    worker = _progress_worker(service, writer)
+    backend = BackendRun("t1", 1, "idem_1", status="running")
+
+    def go(clock):
+        _step(worker, backend, clock, 10, "Cloned the speakeasy repo")
+        _step(worker, backend, clock, 50, "Three failing tests in test_routing.py")
+    _run_with_clock(go)
+    assert spoken(worker) == ["I found three failing tests in test_routing.py"]
+    assert seen[0][1] == ["Cloned the speakeasy repo", "Three failing tests in test_routing.py"]
+
+
+def test_updates_are_capped_across_the_call_and_need_new_work(service):
+    import asyncio
+    from speakeasy import calls
+    from speakeasy.calls import BackendRun
+    n = [0]
+
+    def writer(request, steps, told):
+        n[0] += 1
+        return f"Update {n[0]} about {steps[-1]}"
+    worker = _progress_worker(service, writer)
+    a = BackendRun("t1", 1, "idem_a", status="running")
+    b = BackendRun("t2", 1, "idem_b", status="running")
+    b.started = a.started
+
+    def go(clock):
+        for at in range(0, 181, 5):  # two chatty tasks, a status line every 5 s each, for 3 minutes
+            _step(worker, a, clock, at, f"Task A reading file number {at}")
+            _step(worker, b, clock, at, f"Task B checking source number {at}")
+    _run_with_clock(go)
+    said = spoken(worker)
+    assert 1 <= len(said) <= 180 // calls.PROGRESS_EVERY_S + 1
+    # nothing new since the last update: quiet even once the cap allows it
+    worker.sent.clear()
+    a.told_count = a.activity_count
+
+    def later(clock):
+        clock[0] = a.started + 999
+        asyncio.run(worker.maybe_speak_progress(a, "x"))
+    _run_with_clock(later)
+    assert spoken(worker) == []
+
+
+def test_without_the_wording_model_it_still_names_the_step(service):
+    from speakeasy.calls import BackendRun
+    worker = _progress_worker(service, lambda r, s, t: None)
+    backend = BackendRun("t1", 1, "idem_1", status="running")
+    _run_with_clock(lambda clock: _step(worker, backend, clock, 50, "Comparing prices on three hotel sites"))
+    assert spoken(worker) == ["Quick update: comparing prices on three hotel sites."]
+
+
+def test_the_wording_model_never_gets_away_with_still_on_it():
+    assert router.clean_progress('{"say": "Still on it."}') is None
+    assert router.clean_progress('{"say": "Still checking the repo."}') is None
+    assert router.clean_progress('{"say": "I found the bug in the router; fixing it now."}') == \
+        "I found the bug in the router; fixing it now."
+
 
 
 # -- routing model ---------------------------------------------------------------------------------
@@ -719,3 +765,20 @@ def test_working_status_output_is_validated():
     assert router.clean_status('{"status": "Drafting your Portugal trip email"}') == "Drafting your Portugal trip email"
     assert router.clean_status('{"status": "Your email is drafted and ready to go now"}') is None
     assert router.clean_status("not json at all, and no ing verb") is None
+
+
+# -- recall of finished reports ----------------------------------------------------------------
+
+def test_a_report_with_code_still_reaches_the_voice_in_full():
+    """Live report: asking about a finished report made the voice go check again. An engineering
+    report with a code block (or the word 'token:') used to be dropped from the voice entirely."""
+    report = ("Fixed the router crash.\n\n```python\ndef route(self, request, tasks, marked, chats=None):\n"
+              "    return decide(request)\n```\n\nRoot cause: Runtime.route took 4 arguments but got 6.\n"
+              "The refresh token: abc123 lives in .env\n" + "Details line about the fix. " * 150)
+    notes = P.result_notes("Fix router crash", report, "I fixed the router crash.")
+    joined = " ".join(notes)
+    assert notes and all(len(n) <= 2000 for n in notes)
+    assert "def route(self, request, tasks, marked" in joined
+    assert "Root cause: Runtime.route took 4 arguments but got 6." in joined
+    assert "abc123" not in joined            # the secret-looking line is dropped, not the report
+    assert len(notes) > 1 and "part 1 of" in notes[0]
