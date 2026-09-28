@@ -81,6 +81,14 @@ FAKE_APP_SERVER = textwrap.dedent('''\
                 note(m="item/agentMessage/delta", threadId=tid, turnId=turn, itemId="m2", delta="All ")
                 agent(tid, turn, "m2", "All done.", "final_answer")
                 done(tid, turn, "completed")
+            elif prompt == "images":
+                for item in ({"type": "imageView", "id": "iv1", "path": ws + "/design/home.png"},
+                             {"type": "imageView", "id": "iv2", "path": "relative.png"},
+                             {"type": "imageGeneration", "id": "ig1", "status": "completed", "result": "",
+                              "revisedPrompt": None, "savedPath": ws + "/out/logo.png"}):
+                    note(m="item/completed", threadId=tid, turnId=turn, completedAtMs=0, item=item)
+                agent(tid, turn, "m_final", "Shown.", "final_answer")
+                done(tid, turn, "completed")
             elif prompt == "legacy phase":
                 agent(tid, turn, "m1", "Looking around first.", None)
                 agent(tid, turn, "m2", "Here is the answer.", None)
@@ -242,6 +250,16 @@ def test_start_events_completed_with_output_tools_and_files(backend, h):
     # Replay: a second reader gets the same log from the start.
     again_terminal, again = collect(backend, run_id)
     assert again_terminal and [e["event"] for e in again] == kinds
+
+
+def test_images_codex_opened_or_generated_become_media_seen(backend, h):
+    run_id = backend.start_run("images", "idem-img")
+    _, seen = collect(backend, run_id)
+    media = [e for e in seen if e["event"] == "media.seen"]
+    ws = str(h.ws.resolve())
+    assert [(m["name"], m["source"]) for m in media] == [("home.png", "viewed"), ("logo.png", "generated")]
+    assert media[0]["path"].endswith("/design/home.png") and media[1]["path"].endswith("/out/logo.png")
+    assert all(m["path"].startswith(ws) or m["path"].startswith(str(h.ws)) for m in media)  # relative paths dropped
 
 
 def test_unknown_phase_uses_last_agent_message(backend):

@@ -428,11 +428,29 @@ class CodexBackend:
                 self._mark_started(run, None)
             self._emit(run, {"event": "tool.started", **event})
 
+    @staticmethod
+    def _media_event(item: dict[str, Any]) -> dict[str, Any] | None:
+        """``media.seen`` for an image Codex opened (imageView) or generated (imageGeneration).
+        Only absolute paths; the server vets them against its image roots before serving."""
+        kind = item.get("type")
+        if kind == "imageView":
+            path, source = item.get("path"), "viewed"
+        elif kind == "imageGeneration":
+            path, source = item.get("savedPath"), "generated"
+        else:
+            return None
+        if not isinstance(path, str) or not Path(path).is_absolute():
+            return None
+        return {"event": "media.seen", "path": path, "name": Path(path).name[:120] or "Image", "source": source}
+
     def _item_completed(self, run: _Run, item: Any) -> None:
         if not isinstance(item, dict):
             return
         if item.get("type") == "fileChange" and isinstance(item.get("id"), str):
             run.file_items.setdefault(item["id"], self._change_paths(item.get("changes")))
+        media = self._media_event(item)
+        if media is not None:
+            self._emit(run, media)
         if item.get("type") != "agentMessage":
             return
         item_id, text = item.get("id"), item.get("text")
