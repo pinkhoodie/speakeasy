@@ -234,3 +234,11 @@ def test_saved_voice_falls_back_when_provider_does_not_accept_it():
     for provider, default in S.DEFAULT_VOICES.items():
         assert default in S.PROVIDER_VOICES[provider]
     assert not set(S.PROVIDER_VOICES["codex"]) & set(S.PROVIDER_VOICES["openai"])
+
+
+def test_reported_version_matches_plugin_manifest():
+    import re
+    from pathlib import Path
+    import speakeasy
+    manifest = (Path(speakeasy.__file__).with_name("plugin.yaml")).read_text()
+    assert speakeasy.__version__ == re.search(r"^version:\s*(\S+)", manifest, re.M).group(1)

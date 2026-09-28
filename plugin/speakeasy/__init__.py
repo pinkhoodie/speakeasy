@@ -6,10 +6,23 @@ Registers the ``voice`` gateway platform and the ``hermes voice`` CLI command.
 from __future__ import annotations
 
 import logging
+import re
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-__version__ = "0.2.1"
+
+def _manifest_version() -> str:
+    """The version in plugin.yaml: the one number releases bump and the Mac app compares against."""
+    try:
+        text = (Path(__file__).with_name("plugin.yaml")).read_text(encoding="utf-8")
+    except OSError:
+        return "0.0.0"
+    match = re.search(r"^version:\s*['\"]?([0-9][0-9A-Za-z.+-]*)", text, re.MULTILINE)
+    return match.group(1) if match else "0.0.0"
+
+
+__version__ = _manifest_version()
 __all__ = ["register", "__version__"]
 
 _PLATFORM_HINT = (
