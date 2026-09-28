@@ -456,6 +456,11 @@ def _profile_scope():
     return _profile_runtime_scope(Path(_HOME))
 
 
+def fallback_decision(request: str) -> Decision:
+    """The request as new work, with nothing else decided: used when routing itself breaks."""
+    return Decision(parts=[Part("new", (request or "").strip(), None)])
+
+
 def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topics: list[Topic] | None = None,
            call: Callable[[list[dict[str, str]]], str | None] | None = None,
            timeout: float = ROUTE_TIMEOUT_S, chats: list[Chat] | None = None,

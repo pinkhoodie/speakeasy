@@ -633,6 +633,41 @@ class SidebandWorker:
         return tasks
 
     async def dispatch(self, delegation_id: str, revision: int, context: str, marked: Any = None) -> None:
+        """Every handoff ends visibly. The voice already said "on it", and the app shows "Waiting for
+        <name>" until a task row appears; an exception here used to vanish into the background task,
+        leaving that waiting line up forever."""
+        try:
+            await self._dispatch(delegation_id, revision, context, marked)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("speakeasy: handoff failed before the task started (%s: %s)",
+                           type(exc).__name__, str(exc)[:200])
+            await self._handoff_failed(delegation_id, revision, exc)
+
+    async def _handoff_failed(self, delegation_id: str, revision: int, exc: Exception) -> None:
+        with self.interaction.lock:
+            backend = self.interaction.runs.get(delegation_id)
+            started = backend is not None and backend.status not in {"pending", "queued"} and backend.run_id
+        if started:
+            return  # the task itself is running; its own error handling reports the outcome
+        idem = self._idem(delegation_id, revision)
+        with self.interaction.lock:
+            if backend is None:
+                backend = BackendRun(delegation_id, revision, idem)
+                self.interaction.runs[delegation_id] = backend
+                self.interaction.latest_delegation_id = delegation_id
+            backend.status, backend.error = "failed", f"Couldn't start: {type(exc).__name__}"
+        try:
+            self.store.reserve_run(idem, self.interaction.interaction_id, delegation_id, revision)
+            self.store.update_run(idem, None, "failed")
+            self.store.progress(idem, "result", "Couldn't start this task")
+        except Exception:
+            logger.warning("speakeasy: could not record the failed handoff")
+        self.publish()
+        await self.append("session.commentary.append", delegation_id, P.FAILED_SPOKEN)
+
+    async def _dispatch(self, delegation_id: str, revision: int, context: str, marked: Any = None) -> None:
         """One delegation from the live call: a new task (the usual case), a follow-up to an open
         task, or a request to continue one of the user's existing Hermes conversations."""
         if not context:
@@ -655,8 +690,12 @@ class SidebandWorker:
                              max(0.0, now - c.conv.last_active) if c.conv.last_active else None)
                  for i, c in enumerate(candidates)]
         earlier = "\n".join(line for line in context.splitlines()[:-1] if line.startswith(("User: ", "Assistant: ")))
-        decision = await asyncio.to_thread(self.rt.route, last_request, self.open_tasks(), marked, chats,
-                                           earlier[-1200:])
+        try:
+            decision = await asyncio.to_thread(self.rt.route, last_request, self.open_tasks(), marked, chats,
+                                               earlier[-1200:])
+        except Exception as exc:  # routing is a nicety: without it the request still becomes new work
+            logger.warning("speakeasy: routing failed, starting as new work (%s)", type(exc).__name__)
+            decision = router.fallback_decision(last_request)
         self.route_timings[delegation_id] = decision.latency_ms
         part = decision.parts[0]
         if decision.show:
