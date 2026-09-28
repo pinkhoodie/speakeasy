@@ -73,6 +73,11 @@ class HermesAPI:
         except ValueError:
             raise HermesError(502, "Hermes returned invalid JSON") from None
 
+    def capabilities(self):
+        from .backends.base import Capabilities
+        return Capabilities(kind="hermes", display_name="Hermes", chat_delivery=True, threads=True,
+                            conversation_continuity=True, email_drafts=True, daily_brief=True)
+
     def health(self, timeout: float = 2) -> bool:
         try:
             self._json("GET", "/health", timeout=timeout)
