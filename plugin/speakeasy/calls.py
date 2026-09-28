@@ -65,6 +65,7 @@ class Runtime:
     title_call: Callable[[str], str | None] | None = None
     # The spoken request as clean written text (None = the title model; returns None when unavailable).
     polish_call: Callable[[str], str | None] | None = None
+    status_call: Callable[[str], str | None] | None = None
 
     @property
     def names(self) -> P.Names:
@@ -203,6 +204,7 @@ class Interaction:
                 "status": latest.status if latest else self.status,
                 "run_id": latest.run_id if latest else None,
                 "backend_run_id": latest.run_id if latest else None,
+                "idem_key": latest.idem_key if latest else None,
                 "delegation_id": latest.delegation_id if latest else None,
                 "revision": self.revision,
                 "approval": approval,
@@ -237,7 +239,8 @@ def interaction_tasks(store: Any, interaction: Interaction, assistant_name: str 
                     "updated_at": None, "status_source": None, "result": None, "email_drafts": []}
         work["task_id"] = delegation_id
         tasks.append(work)
-    return tasks
+    # A draft from an earlier call still waiting for Send / Deny / Revise stays on screen.
+    return tasks + store.carried_draft_tasks({t["task_id"] for t in tasks} | {r[1] for r in runs})
 
 
 def publish_state(store: Any, interaction: Interaction, assistant_name: str = "Hermes") -> None:
@@ -252,7 +255,10 @@ def publish_state(store: Any, interaction: Interaction, assistant_name: str = "H
         snap = interaction.snapshot()
         with interaction.lock:
             active = any(run.status in ACTIVE_RUN_STATES for run in interaction.runs.values())
-        work = store.work(snap["run_id"], assistant_name=assistant_name) if snap["run_id"] else None
+        # Thread tasks have no Hermes run id; find the row by its own key so the call's status line
+        # shows the task's name and status instead of a bare wait.
+        work = (store.work(snap["run_id"], assistant_name=assistant_name) if snap["run_id"] else
+                store.work(idem_key=snap["idem_key"], assistant_name=assistant_name) if snap.get("idem_key") else None)
         pending = snap.get("approval")
         approval = None
         if pending:
@@ -364,11 +370,17 @@ class SidebandWorker:
             return
         titler = self.rt.title_call or router.smart_title
         polisher = self.rt.polish_call or router.polish_request
+        statuser = self.rt.status_call or router.working_status
 
         async def upgrade() -> None:
-            title, polished = await asyncio.gather(asyncio.to_thread(titler, request),
-                                                   asyncio.to_thread(polisher, request))
+            title, polished, status = await asyncio.gather(asyncio.to_thread(titler, request),
+                                                           asyncio.to_thread(polisher, request),
+                                                           asyncio.to_thread(statuser, request))
             changed = False
+            if status:
+                handed = polished or request
+                changed = self.store.handoff_status(
+                    idem, status, f"Handed to {self.names.assistant_name}: {handed}") or changed
             if title and title != provisional and self.store.title(idem) == provisional:
                 self.store.set_title(idem, title)
                 changed = True

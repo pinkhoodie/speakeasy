@@ -8,6 +8,9 @@ final class VoicePanelModel: ObservableObject {
     @Published var state = VoiceState()
     @Published var workExpanded = false
     @Published var captionExpanded = false
+    /// Drafts whose body is expanded ("Show all"). Lives here, not in the card, so the panel re-measures and
+    /// the card's Show less / Send row stays inside the window.
+    @Published var expandedDraftIDs: Set<String> = []
     /// Status line text after the minimum-dwell debounce.
     @Published var shownStatus = ""
     @Published var shownTone: StatusTone = .plain

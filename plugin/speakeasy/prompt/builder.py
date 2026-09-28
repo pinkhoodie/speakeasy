@@ -437,8 +437,8 @@ def approval_note(names: Names) -> str:
 def draft_waiting_note(names: Names, subject: str | None, to: list[str]) -> str:
     about = f" \"{subject}\"" if subject else ""
     who = f" to {', '.join(to[:3])}" if to else ""
-    return (f"An email draft{about}{who} is waiting on the card in the app. Say something like \"I drafted it — take a "
-            f"look and approve when ready.\" It is sent only when {names.user} presses Approve on the card; a spoken "
+    return (f"An email draft{about}{who} is waiting on the card in the app. Say something like \"The draft's ready — take a "
+            f"look and press Send when it looks right.\" It is sent only when {names.user} presses Send on the card; a spoken "
             "approval does not send it. If they want changes, delegate the change as a follow-up to this task.")[:2000]
 
 

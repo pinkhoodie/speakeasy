@@ -333,6 +333,21 @@ enum PanelSmoke {
             check(!c.model.pinnedDrafts.isEmpty, "email draft: pinned in the call panel")
             do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/email-draft.png")); record("snapshot \(dir)/email-draft.png") }
             catch { fail("snapshot failed: \(error)") }
+            // "Show all": the body grows, but the card's Show less / Send row must stay inside the screen.
+            if let first = c.model.pinnedDrafts.first {
+                var long = draft
+                let longBody = Array(repeating: "- Booked via Amex Travel, trip details, flights and hotels", count: 40).joined(separator: "\n")
+                long.tasks = long.tasks.map { t in
+                    var t = t; t.info.emailDrafts = t.info.emailDrafts.map { d in var d = d; d.body = longBody; return d }; return t }
+                if var w = long.workInfo { w.emailDrafts = w.emailDrafts.map { d in var d = d; d.body = longBody; return d }; long.workInfo = w }
+                c.showPreview(long, workExpanded: false)
+                c.model.expandedDraftIDs.insert(first.id)
+                await settle()
+                let win = c.panel.window; let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+                record("email draft expanded: panel \(Int(win.frame.height))pt tall, screen \(Int(visible.height))pt, inside=\(visible.contains(win.frame))")
+                check(visible.contains(win.frame), "email draft: expanded card stays on screen")
+                do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/email-draft-expanded.png")) } catch { fail("snapshot failed: \(error)") }
+            }
         }
     }
 

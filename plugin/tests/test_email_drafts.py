@@ -73,9 +73,9 @@ def test_task_prompt_requires_draft_block_and_forbids_sending():
 
 def test_voice_rules_say_spoken_approve_does_not_send():
     text = P.build_live_instructions(P.Names("Hermes", "Sam"))
-    assert "does NOT send an email" in text and "press Approve on the card" in text
+    assert "does NOT send an email" in text and "press Send on the card" in text
     note = P.draft_waiting_note(P.Names("Hermes", "Sam"), "Dinner", ["pat@example.org"])
-    assert "take a look and approve when ready" in note and "spoken approval does not send it" in note
+    assert "press Send when it looks right" in note and "spoken approval does not send it" in note
 
 
 # -- end to end over HTTP with a fake Hermes ------------------------------------------------------------
@@ -98,7 +98,7 @@ def test_draft_card_flow_approve_sends_once(server, service, hermes):
     assert set(draft) >= {"draft_id", "from", "to", "cc", "bcc", "subject", "body", "status", "sha256"}
     assert not any(k.startswith("_") for k in draft)
     # the live call was told a draft is waiting, and that spoken approval does not count
-    wait_for(lambda: any("take a look and approve when ready" in c for _, _, c in worker.sent))
+    wait_for(lambda: any("press Send when it looks right" in c for _, _, c in worker.sent))
     # SSE-visible state carries the draft
     interaction = service.interaction(session["interaction_id"])
     assert interaction.feed.last["email_drafts"][0]["draft_id"] == draft["draft_id"]
@@ -175,3 +175,19 @@ def test_draft_route_validation(server, service, hermes):
     assert http(server.base_url, "POST", url, {"action": "approve", "sha256": draft["sha256"]})[0] == 401
     assert http(server.base_url, "POST", "/voice/drafts/ed_" + "0" * 24,
                 {"action": "approve", "sha256": draft["sha256"]}, server.token)[0] == 404
+
+
+def test_a_waiting_draft_survives_ending_the_call(service):
+    store = service.store
+    store.reserve_run("se_old", "vi_old", "item_old", 1)
+    store.update_run("se_old", "run_old", "completed")
+    store.add_draft("se_old", "sess_old", {"from": "me@example.com", "to": ["me@example.com"], "cc": [], "bcc": [],
+                                          "subject": "Portugal trip details", "body": "Overview"})
+    store.reserve_run("se_new", "vi_new", "item_new", 1)
+    store.update_run("se_new", "run_new", "running")
+    listed = store.latest_tasks()
+    carried = [t for t in listed if t["task_id"] == "item_old"]
+    assert carried and carried[0]["email_drafts"][0]["subject"] == "Portugal trip details"
+    draft_id = carried[0]["email_drafts"][0]["draft_id"]
+    store.transition_draft(draft_id, {"pending"}, "denied")
+    assert not [t for t in store.latest_tasks() if t["task_id"] == "item_old"]

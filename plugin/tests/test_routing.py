@@ -651,3 +651,31 @@ def test_voice_rules_never_claim_a_draft_before_it_exists():
     text = P.rules_text(P.Names.from_settings(S.validate({})), "Telegram", [])
     email = text.split("# Email drafts", 1)[1]
     assert "I drafted it" not in email and "never that it is drafted" in email
+
+
+def test_new_task_shows_what_it_was_handed_instead_of_a_bare_wait(server, service, hermes):
+    service.rt.title_call = lambda request: "Draft Portugal trip email"
+    service.rt.polish_call = lambda request: "Draft an email to me with all my Portugal details."
+    service.rt.status_call = lambda request: "Drafting your Portugal trip email"
+    hermes.hold = True   # Hermes is still working and hasn't reported any progress of its own
+    _, worker = start_call(server, service)
+    worker.delegate("call_s", "can you draft an email to me with uh all of my Portugal details")
+    task = wait_for(lambda: [t for t in tasks(server) if t.get("short_status") == "Drafting your Portugal trip email"])[0]
+    assert task["title"] == "Draft Portugal trip email"
+    assert task["detail"] == "Handed to Hermes: Draft an email to me with all my Portugal details."
+
+
+def test_handoff_status_never_overrides_real_progress(service):
+    store = service.store
+    store.reserve_run("se_x", "vi_x", "item_x", 1)
+    store.update_run("se_x", "run_x", "running")
+    store.user_progress("se_x", "Searching your inbox", "Looking for the booking emails")
+    assert store.handoff_status("se_x", "Drafting your Portugal email", "Handed off") is False
+    assert store.work(idem_key="se_x")["short_status"] == "Searching your inbox"
+
+
+def test_working_status_output_is_validated():
+    from speakeasy import router
+    assert router.clean_status('{"status": "Drafting your Portugal trip email"}') == "Drafting your Portugal trip email"
+    assert router.clean_status('{"status": "Your email is drafted and ready to go now"}') is None
+    assert router.clean_status("not json at all, and no ing verb") is None

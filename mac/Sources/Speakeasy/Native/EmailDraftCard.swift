@@ -5,9 +5,16 @@ import SpeakeasyCore
 /// An email a task drafted: who it goes to, what it says, and Send / Deny / Revise.
 /// Every action carries the sha256 of the draft on screen; a 409 means it changed.
 struct EmailDraftCard: View {
+    /// "Show all" grows the body to scroll inside the card, but never so tall that the card's
+    /// Show less / Send / Deny / Revise row falls off a laptop screen and strands the user.
+    static func expandedBodyHeight(screen: NSScreen? = NSScreen.main) -> CGFloat {
+        let visible = screen?.visibleFrame.height ?? 800
+        return EmailDraftLayout.expandedBodyHeight(visibleScreenHeight: visible)
+    }
+
     var draft: EmailDraft
     @ObservedObject var model: VoicePanelModel
-    @State private var bodyExpanded = false
+    private var bodyExpanded: Bool { model.expandedDraftIDs.contains(draft.id) }
     @State private var revising = false
     @State private var instructions = ""
     @FocusState private var cardFocused: Bool
@@ -62,13 +69,15 @@ struct EmailDraftCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(8)
             }
-            .frame(maxHeight: bodyExpanded ? 420 : 130)
+            .frame(maxHeight: bodyExpanded ? Self.expandedBodyHeight() : 130)
             .fixedSize(horizontal: false, vertical: !bodyExpanded && draft.body.count < 240)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
             .accessibilityLabel("Email body")
             .accessibilityValue(draft.body)
             if draft.body.count >= 240 || draft.body.split(separator: "\n").count > 7 {
-                Button(bodyExpanded ? "Show less" : "Show all") { bodyExpanded.toggle() }
+                Button(bodyExpanded ? "Show less" : "Show all") {
+                    if bodyExpanded { model.expandedDraftIDs.remove(draft.id) } else { model.expandedDraftIDs.insert(draft.id) }
+                }
                     .buttonStyle(.link).font(.system(size: 10.5))
                     .accessibilityLabel(bodyExpanded ? "Collapse email body" : "Expand email body")
             }
@@ -85,7 +94,7 @@ struct EmailDraftCard: View {
                         .onSubmit(sendRevision)
                     HStack(spacing: 8) {
                         Spacer()
-                        PillButton(title: "Cancel", action: { revising = false; instructions = "" })
+                        PillButton(title: "Cancel", action: { revising = false; instructions = ""; model.objectWillChange.send() })
                         PillButton(title: "Send revision", prominent: true, action: sendRevision)
                             .disabled(instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
@@ -96,7 +105,7 @@ struct EmailDraftCard: View {
                     Spacer()
                     PillButton(title: "Deny", destructive: true, action: { model.onDraftAction(draft, .deny, nil) })
                         .accessibilityLabel("Deny: discard this email")
-                    PillButton(title: "Revise", action: { revising = true; fieldFocused = true })
+                    PillButton(title: "Revise", action: { revising = true; fieldFocused = true; model.objectWillChange.send() })
                         .accessibilityLabel("Revise this email")
                     PillButton(title: "Send", prominent: true, action: approve)
                         .accessibilityLabel("Approve and send this email")

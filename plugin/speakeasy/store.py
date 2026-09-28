@@ -279,6 +279,22 @@ class StateStore:
                    AND status_source IS 'authored')""",
                 (safe_status, safe_detail, now, now, now, key, safe_status, safe_detail))
 
+    def handoff_status(self, key: str, short_status: str, detail: str) -> bool:
+        """What the task was handed, shown until the run reports anything itself. Never overwrites
+        a status the run (or a tool) already set; real progress replaces it as usual."""
+        safe_status = valid_short_status(short_status)
+        safe_detail = safe_user_text(detail, 500)
+        if not safe_status or not safe_detail:
+            return False
+        now = time.time()
+        with self._lock, self._db:
+            cur = self._db.execute(
+                """UPDATE runs SET short_status=?,detail=?,progress_updated=?,updated=?,status_source='system'
+                   WHERE idem_key=? AND short_status IS NULL AND status NOT IN
+                   ('completed','failed','cancelled','interrupted','ambiguous','rejected')""",
+                (safe_status, safe_detail, now, now, key))
+        return cur.rowcount > 0
+
     def tool_progress(self, key: str, short_status: str, detail: str) -> bool:
         """Persist a tool-derived status unless an authored status is still fresh."""
         safe_status = valid_short_status(short_status)
@@ -326,7 +342,22 @@ class StateStore:
             if work is not None and not work.get("dismissed"):
                 work["task_id"] = delegation_id or key
                 tasks.append(work)
-        return tasks
+        return tasks + self.carried_draft_tasks({t["task_id"] for t in tasks} | {k for k, _ in rows})
+
+    def carried_draft_tasks(self, exclude: set[str]) -> list[dict[str, Any]]:
+        """Earlier calls' tasks that still hold a draft waiting for the user."""
+        with self._lock:
+            ids = dict(self._db.execute("SELECT idem_key, delegation_id FROM runs").fetchall())
+        out = []
+        for key in self.keys_with_pending_drafts():
+            task_id = ids.get(key) or key
+            if key in exclude or task_id in exclude:
+                continue
+            work = self.work(idem_key=key)
+            if work is not None:
+                work["task_id"] = task_id
+                out.append(work)
+        return out
 
     def work(self, run_id: str | None = None, idem_key: str | None = None,
              assistant_name: str = "Hermes") -> dict[str, Any] | None:
@@ -411,6 +442,16 @@ class StateStore:
             out["error"] = error
         out["_key"], out["_session_id"], out["_action_run_id"] = key, session_id, action_run_id
         return out
+
+    def keys_with_pending_drafts(self, max_age_s: float = 7 * 86400) -> list[str]:
+        """Tasks (any call) whose email draft still waits for Send / Deny / Revise, oldest first.
+        A draft outlives the call that made it: ending the call must not lose the card."""
+        cutoff = time.time() - max_age_s
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT idem_key, MIN(created) FROM email_drafts WHERE status IN ('pending','revising')
+                   AND created >= ? GROUP BY idem_key ORDER BY MIN(created)""", (cutoff,)).fetchall()
+        return [r[0] for r in rows]
 
     def drafts_for(self, key: str) -> list[dict[str, Any]]:
         with self._lock:

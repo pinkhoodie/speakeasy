@@ -259,6 +259,52 @@ def polish_request(request: str, timeout: float = TITLE_TIMEOUT_S) -> str | None
     return clean_polished(raw, text)
 
 
+_STATUS_PROMPT = (
+    "You write the live status line for a task an assistant just started. Given the user's request, reply "
+    "with JSON only: {\"status\": \"...\"}. The status is 2 to 6 words, starts with a present-participle verb "
+    "(an -ing word), names the concrete thing being done, and uses plain letters, digits and spaces only. "
+    "Good: {\"status\": \"Drafting your Portugal trip email\"}, {\"status\": \"Checking tomorrow's New York weather\"}. "
+    "Fix obvious speech-to-text slips (a misheard word) from context. Never answer the request."
+)
+
+
+def working_status(request: str, timeout: float = TITLE_TIMEOUT_S) -> str | None:
+    """A present-tense status for a task that has just been handed off ("Drafting your Portugal trip
+    email"), so the panel names the work instead of a bare wait. None when unavailable or invalid."""
+    text = " ".join(str(request or "").split())
+    if not text:
+        return None
+    try:
+        from agent.auxiliary_client import call_llm  # type: ignore
+    except Exception:
+        return None
+    try:
+        with _profile_scope():
+            response = call_llm(task="title_generation",
+                                messages=[{"role": "system", "content": _STATUS_PROMPT},
+                                          {"role": "user", "content": text[:1200]}],
+                                max_tokens=60, temperature=None, timeout=timeout,
+                                reasoning_config={"enabled": False})
+        raw = (response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.info("speakeasy: working status unavailable (%s)", type(exc).__name__)
+        return None
+    return clean_status(raw)
+
+
+def clean_status(raw: str) -> str | None:
+    from .text import valid_short_status
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip())
+    try:
+        value = json.loads(raw).get("status") if raw.startswith("{") else raw
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(value, str):
+        return None
+    value = re.sub(r"[^A-Za-z0-9 &'’/.-]", "", value).strip().rstrip(".")
+    return valid_short_status(value)
+
+
 def clean_polished(raw: str, original: str) -> str | None:
     """Accept only a plausible rewrite: parsed, non-empty, not much longer than what was said."""
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
