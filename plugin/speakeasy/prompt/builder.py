@@ -499,6 +499,15 @@ def result_background(name: str | None, full: str | None, spoken: str | None) ->
     return head + (text if len(text) <= room else text[:room - 1].rstrip() + "…")
 
 
+def pictures_note(count: int) -> str:
+    """What the user can see for a finished task, as fact for the voice model (not read aloud)."""
+    if count:
+        return (f"Fact, not to read aloud: {count} picture{'s' if count != 1 else ''} from this task "
+                f"{'are' if count != 1 else 'is'} on the user's screen now in a review card.")
+    return ("Fact, not to read aloud: this task sent no picture to the app. Don't say anything is on "
+            "screen or showing; if they wanted to see it, say the picture didn't come through.")
+
+
 STOPPED_SPOKEN = "I stopped that task. I'm still here."
 FAILED_SPOKEN = "I couldn't finish that one; the app shows what went wrong."
 NO_TRANSCRIPT_SPOKEN = "I did not receive enough transcript to act. Please repeat the request."

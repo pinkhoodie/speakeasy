@@ -74,5 +74,56 @@ def test_ordinary_questions_do_not_pop_anything(home, hermes):
         wait_for(lambda: any(t.get("status") == "completed" for t in
                              svc.interaction(created["interaction_id"]).feed.last["tasks"] or []))
         assert not _shows(svc.interaction(created["interaction_id"]).feed)
+        notes = wait_for(lambda: [c for _, _, c in workers[-1].sent if "sent no picture" in c])
+        assert "Don't say anything is on screen" in notes[0]
+    finally:
+        svc.close()
+
+
+def test_a_picture_from_a_thread_task_still_pops_up(home, hermes):
+    """The Lisbon hotel case: a channel that opens a thread per task. Hermes answers in the thread
+    (no Hermes run id), with two photos. The review card and the on-screen opening still happen."""
+    from speakeasy import threads
+    folder = home / "cache" / "screenshots"
+    folder.mkdir(parents=True, exist_ok=True)
+    photos = [folder / "me_c.jpg", folder / "me_b.jpg"]
+    for p in photos:
+        p.write_bytes(b"\xff\xd8\xff\xe0" + b"\0" * 64)
+
+    class Threads:
+        def __init__(self):
+            self.opened = []
+
+        def available(self, target):
+            return True
+
+        def open(self, target, *, message, title, delivery_id):
+            self.opened.append(message)
+            return threads.Opened("speakeasy-x", "999", "discord")
+
+        def wait(self, opened, on_session, on_title=None):
+            on_session("thread_session_1")
+            return (f"Voice: hotel\nYou stayed at Lisbon Experimental. Here's the main building:\nMEDIA:{photos[0]}\n"
+                    f"And a typical room:\nMEDIA:{photos[1]}")
+
+    svc, workers = _svc(home, SHOW.replace('"channel": null', '"channel": "#life"'))
+    runner = Threads()
+    svc.rt.threads = runner
+    svc.settings.patch({"delivery": {"target": "telegram:555", "channels": [
+        {"label": "#life", "target": "discord:222", "topic": "life", "new_thread": True}]}})
+    try:
+        created = svc.create_session({"sdp": SDP}, "req_see_3")
+        workers[-1].delegate("call_see_3", "send me a picture of the hotel I stayed at in Lisbon")
+        feed = svc.interaction(created["interaction_id"]).feed
+        show = wait_for(lambda: _shows(feed))[-1]
+        assert P.SHOW_IT_FOCUS.strip() in runner.opened[0], "the thread task is told to bring back a picture"
+        assert show["image"] == "review" and show["run_id"]
+        task = next(t for t in feed.last["tasks"] if t.get("task_id") == "call_see_3")
+        assert task["review"]["images"] == [1, 2]
+        data, mime = svc.card_image(show["run_id"], 1)
+        assert data.startswith(b"\xff\xd8") and mime == "image/jpeg"
+        assert all(str(p) not in json.dumps(feed.last) for p in photos)
+        notes = [c for _, _, c in workers[-1].sent]
+        assert any("2 pictures from this task are on the user's screen" in c for c in notes)
     finally:
         svc.close()

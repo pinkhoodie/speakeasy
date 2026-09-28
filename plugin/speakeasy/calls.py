@@ -29,6 +29,7 @@ from .text import (ID_RE, MAX_TRANSCRIPT, TERMINAL, clean_transcript, delivery_t
 logger = logging.getLogger(__name__)
 
 TASK_SESSION_PREFIX = "speakeasy_task_"
+LOCAL_RUN_PREFIX = "lr_"   # ids for tasks Hermes ran without a run id (thread tasks)
 MAX_TASKS = 8
 ACTIVE_RUN_STATES = {"admitting", "running", "working", "waiting_for_approval", "resolving_approval",
                      "cancel_requested"}
@@ -1063,7 +1064,8 @@ class SidebandWorker:
         self._register(task_id, backend)
         self.publish()
         summary = notice_text(request, 200) or "voice request"
-        message = P.thread_task_message(self.names, request, summary, context)
+        asked = request + (P.SHOW_IT_FOCUS if self._take_show(task_id, idem) else "")
+        message = P.thread_task_message(self.names, asked, summary, context)
         try:
             opened = await asyncio.to_thread(self.rt.threads.open, channel.target, message=message,
                                              title=short_title(request) or "Voice task", delivery_id=idem)
@@ -1210,7 +1212,16 @@ class SidebandWorker:
             await self.append("session.commentary.append", delegation_id, P.approval_note(self.names))
         elif kind and kind.startswith("run."):
             status = kind.split(".", 1)[1]
-            self.store.update_run(idem, None, status)
+            if status in TERMINAL and not backend.run_id:
+                # A task that ran in a Discord/Telegram thread has no Hermes run id, and review cards,
+                # image routes, dismissals and "show" are all addressed by one: give it a local id
+                # so its pictures are not silently dropped.
+                local = LOCAL_RUN_PREFIX + hashlib.sha256(idem.encode()).hexdigest()[:32]
+                with self.interaction.lock:
+                    backend.run_id = local
+                self.store.update_run(idem, local, status)
+            else:
+                self.store.update_run(idem, None, status)
             if status not in TERMINAL:
                 return
             result = split_result(event.get("output"), self.rt.image_roots())
@@ -1234,7 +1245,7 @@ class SidebandWorker:
                 is_latest = latest is not None and latest.say_id == delegation_id
                 siblings = [r for r in head.runs.values()
                             if r is not backend and r.say_id == delegation_id and r.status in ACTIVE_RUN_STATES]
-            if status != "completed" and backend.run_id:
+            if status != "completed" and backend.run_id and not backend.run_id.startswith(LOCAL_RUN_PREFIX):
                 self.notices.stopped(backend.run_id, status, self.store.request_text(idem))
             if status == "completed" and backend.run_id and result and not event.get("continued"):
                 self.notices.answered(backend.run_id, delivery_text(result), backend.deliver_to)
@@ -1247,6 +1258,10 @@ class SidebandWorker:
                                                  result.get("full") if result else None, spoken)
                 if background:
                     await self.append("session.thinking.append", delegation_id, background)
+                # The answer text says "here's the building" either way; tell the voice what the user
+                # can actually see, so it never claims a picture is up when none reached the app.
+                pictures = len(((self.store.work(idem_key=idem) or {}).get("review") or {}).get("images") or [])
+                await self.append("session.thinking.append", delegation_id, P.pictures_note(pictures))
                 if stored_drafts:
                     d = stored_drafts[-1]
                     await self.append("session.thinking.append", delegation_id,
