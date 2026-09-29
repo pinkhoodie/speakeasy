@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# Top-level Swift package build output
+/.build/
