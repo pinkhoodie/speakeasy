@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import channels, continuity, router
+from . import home_control as home_control_mod
 from .settings import valid_delivery_target
 from .prompt import builder as P
 from .text import (ID_RE, MAX_TRANSCRIPT, TERMINAL, clean_transcript, delivery_text, derive_tool_status,
@@ -368,6 +369,10 @@ class SidebandWorker:
         self.fragments: deque[dict[str, Any]] = deque(maxlen=512)
         self.handoff_at: dict[str, float] = {}   # delegation id -> when the handoff arrived (monotonic)
         self.show_pending: set[str] = set()      # task keys asked for a screenshot by "show me"
+        # Home control: the question just asked (original request, question, when) and answers given
+        # on this call, so "the thermostat" means the den until hang-up once they've said so.
+        self.home_question: tuple[str, str, float] | None = None
+        self.home_notes: list[str] = []
         self.wants_show: set[str] = set()        # delegation ids the user wants to SEE (routing said show)
         self.show_seq = 0
         self.route_timings: dict[str, int] = {}  # task id -> routing latency (ms), stored with the task
@@ -782,13 +787,30 @@ class SidebandWorker:
         home = self.rt.home
         if home is None or not request or not getattr(home, "enabled", False):
             return False
+        pending, self.home_question = self.home_question, None  # a question is answered at most once
+        answering = None
+        if pending and time.monotonic() - pending[2] <= home_control_mod.ASK_WINDOW_S:
+            answering = (pending[0], pending[1])
         try:
-            reply = await asyncio.to_thread(home.respond, request)
+            reply = await asyncio.to_thread(home.respond, request, list(self.home_notes), answering)
         except Exception as exc:  # the fast path must never break a request
             logger.warning("speakeasy: home control failed, using Hermes (%s)", type(exc).__name__)
             return False
+        if reply is None and answering:
+            # Their answer didn't settle it: Hermes gets the original request plus the answer.
+            return False
         if reply is None:
             return False
+        if reply.ask:
+            self.home_question = (request, reply.spoken, time.monotonic())
+            self.handoff_at.pop(delegation_id, None)
+            self.publish()
+            await self.append("session.commentary.append", delegation_id, P.home_question(reply.spoken))
+            return True
+        if answering:
+            self.home_notes = (self.home_notes + [
+                f'For "{answering[0]}" I asked "{answering[1]}" and they said "{request}".'])[-home_control_mod.MAX_NOTES:]
+            request = f"{answering[0]} ({request})"
         idem = self._idem(delegation_id, revision)
         backend = BackendRun(delegation_id, revision, idem, status="completed" if reply.ok else "failed")
         if not reply.ok:

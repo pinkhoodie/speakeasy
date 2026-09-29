@@ -206,11 +206,22 @@ PLANNER_RULES = """You turn one spoken home request into Home Assistant service 
 - "Off"/"on" for a room means that room's devices of the kind asked; "the lights" with no room means every light in the list.
 - A question about the devices ("is the bedroom light on?", "what's the den set to?"): answer it from the list's
   current states with {{"answer": "one short sentence"}} and no calls.
-- All or nothing: if ANY part is unclear (which device, which room, what value), or needs timing, a condition, a
-  routine, or anything but direct device commands, return {{"handoff": true}} for the whole request. Never do part of it.
-- "The thermostat" when the list has several thermostats and no room was named is unclear: hand off.
+- All or nothing: never do part of a request.
+- Needs timing, a condition, a routine or scene you'd have to invent, or anything but direct device commands:
+  return {{"handoff": true}}.
+{ask_rule}
 Reply with JSON only: {{"calls": [{{"service": "light.turn_off", "entity_id": ["light.x"], "data": {{}}}}], "say": "short past-tense confirmation, e.g. Kitchen lights are off."}}
-or {{"answer": "The den is set to 72."}} or {{"handoff": true}}."""
+or {{"answer": "The den is set to 72."}}{ask_shape} or {{"handoff": true}}."""
+
+ASK_RULE = """- A named room means all of that room's devices of the kind asked ("dim the kitchen" = every kitchen light); never
+  ask which one within a room.
+- Unclear only about WHICH listed device(s) (e.g. "the thermostat" with several thermostats and no room) or a
+  missing value ("dim the kitchen" -> "How dim?"): ask ONE short spoken question instead, naming up to three choices by their
+  plain names: {{"ask": "Den, bedroom, or office?"}}. Never ask to confirm, never ask about timing or scenes, and
+  never ask when the request is already clear enough to do.
+- Otherwise unclear: {{"handoff": true}}."""
+NO_ASK_RULE = """- This is their answer to a question you already asked. If it is still unclear, return {{"handoff": true}};
+  do not ask again. If the answer is really a new home request, plan that instead."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -225,18 +236,30 @@ class Call:
 class Plan:
     calls: tuple[Call, ...]
     say: str
+    ask: bool = False  # say is a clarifying question; nothing runs
 
 
 @dataclasses.dataclass(frozen=True)
 class Reply:
     ok: bool
     spoken: str
+    ask: bool = False  # spoken is a question for the user; no device moved
 
 
-def planner_messages(request: str, devices: list[Device], unit: str) -> list[dict[str, str]]:
+def planner_messages(request: str, devices: list[Device], unit: str, notes: list[str] | None = None,
+                     may_ask: bool = True) -> list[dict[str, str]]:
     listing = "\n".join(d.line() for d in devices)
-    return [{"role": "system", "content": PLANNER_RULES.format(unit=unit) + "\n\nDevices (entity_id | name | state):\n" + listing},
+    rules = PLANNER_RULES.format(unit=unit, ask_rule=(ASK_RULE if may_ask else NO_ASK_RULE).format(),
+                                 ask_shape=' or {{"ask": "Den or bedroom?"}}'.format() if may_ask else "")
+    if notes:
+        rules += ("\n\nEarlier on this call they answered these; apply them the same way unless they say otherwise:\n"
+                  + "\n".join(f"- {n}" for n in notes[-MAX_NOTES:]))
+    return [{"role": "system", "content": rules + "\n\nDevices (entity_id | name | state):\n" + listing},
             {"role": "user", "content": request}]
+
+
+MAX_NOTES = 5
+ASK_WINDOW_S = 120  # an answer after this long is treated as a new request
 
 
 def _json_object(text: Any) -> dict[str, Any] | None:
@@ -261,13 +284,78 @@ def c_to_f(c: float) -> float:
     return round(c * 9 / 5 + 32)
 
 
-def parse_plan(text: Any, by_id: dict[str, Device], unit: str) -> Plan | None:
+EXCEPT = re.compile(r"(?i)\b(?:except(?: for)?|but not|other than|besides|apart from|excluding)\s+(.+?)(?:,|;|\band\b|\bthen\b|$)")
+GENERIC = {"the", "my", "a", "an", "all", "ones", "one", "light", "lights", "fan", "fans", "thermostat", "thermostats",
+           "in", "of", "room", "stuff", "things", "those", "that", "this", "it"}
+
+
+KIND_WORDS = {"light": "light", "lights": "light", "lamp": "light", "lamps": "light", "fan": "fan", "fans": "fan",
+              "thermostat": "climate", "thermostats": "climate", "heat": "climate", "ac": "climate",
+              "blinds": "cover", "shades": "cover", "speaker": "media_player", "speakers": "media_player", "tv": "media_player"}
+
+
+def exclusions(request: str) -> list[tuple[set[str], set[str]]]:
+    """(excluded words, domains that clause is about; empty = any) per "except ..." in the request."""
+    out = []
+    for m in EXCEPT.finditer(request or ""):
+        clause = re.split(r",|;|\band\b|\bthen\b", request[:m.start()])[-1]
+        domains = {KIND_WORDS[w] for w in re.findall(r"[a-z]+", clause.lower()) if w in KIND_WORDS}
+        words = excluded_words(m.group(0))
+        if words:
+            out.append((words, domains))
+    return out
+
+
+def excluded_words(request: str) -> set[str]:
+    """Words naming what the user said to leave alone ("except the bedroom lamps" -> bedroom, lamp)."""
+    words: set[str] = set()
+    for m in EXCEPT.finditer(request or ""):
+        for w in re.findall(r"[a-z0-9']+", m.group(1).lower()):
+            w = w.removesuffix("'s")
+            w = w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+            if w not in GENERIC and len(w) >= 3:
+                words.add(w)
+    return words
+
+
+def breaks_exclusion(plan: "Plan", request: str, by_id: dict[str, Device]) -> bool:
+    """True when a call touches a device whose name or id carries a word the user excluded. Checked in
+    code because planners get exclusions wrong; a false alarm only costs a trip to Hermes."""
+    rules = exclusions(request)
+    for call in plan.calls:
+        words = set().union(*[w for w, domains in rules if not domains or call.domain in domains])
+        if not words:
+            continue
+        for eid in call.entity_ids:
+            d = by_id.get(eid)
+            hay = set(re.findall(r"[a-z0-9]+", f"{d.name if d else ''} {eid}".lower()))
+            hay |= {h[:-1] for h in hay if len(h) > 3 and h.endswith("s")}
+            if words & hay:
+                return True
+    return False
+
+
+def parse_plan(text: Any, by_id: dict[str, Device], unit: str, may_ask: bool = False) -> Plan | None:
     """The planner's JSON, checked against the chosen devices; None = hand to Hermes."""
     data = _json_object(text)
     if not data or data.get("handoff"):
         return None
+    ask = data.get("ask")
+    say_raw = data.get("say")
+    if not (isinstance(ask, str) and ask.strip()) and data.get("calls") and isinstance(say_raw, str) and "?" in say_raw:
+        # Did part and asked about the rest. All or nothing: run none of it, just ask; the answer
+        # re-plans the whole request.
+        asked = [q.strip() for q in re.findall(r"[^.?!]*\?", say_raw) if q.strip()]
+        ask, data = (asked[-1] if asked else ""), {}
+    if isinstance(ask, str) and ask.strip() and not data.get("calls"):
+        question = " ".join(ask.split())
+        if not may_ask or len(question) > 160 or not question.endswith("?"):
+            return None  # asked twice, or not a real short question: Hermes takes it
+        return Plan((), question, ask=True)
     answer = data.get("answer")
     if isinstance(answer, str) and answer.strip() and not data.get("calls"):
+        if "?" in answer:
+            return None  # a question dressed as an answer
         return Plan((), " ".join(answer.split())[:200])  # a question, answered from current states
     if not isinstance(data.get("calls"), list) or not data["calls"]:
         return None
@@ -281,6 +369,8 @@ def parse_plan(text: Any, by_id: dict[str, Device], unit: str) -> Plan | None:
         return None
     say = data.get("say")
     say = " ".join(say.split())[:200] if isinstance(say, str) and say.strip() else "Done."
+    if "?" in say:
+        return None  # did part and asked about the rest: all or nothing, so Hermes takes it
     return Plan(tuple(calls), say)
 
 
@@ -439,8 +529,12 @@ class HomeControl:
         low = text.lower()
         return any(len(d.name) >= 3 and re.search(r"\b" + re.escape(d.name.lower()) + r"\b", low) for d in devices)
 
-    def respond(self, request: str) -> Reply | None:
-        """The spoken result, or None to hand the request to Hermes unchanged."""
+    def respond(self, request: str, notes: list[str] | None = None, answering: tuple[str, str] | None = None
+                ) -> Reply | None:
+        """The spoken result, or None to hand the request to Hermes unchanged.
+
+        ``notes``: answers given earlier on this call. ``answering``: (original request, question) when
+        this request answers a question just asked; the planner may not ask a second time."""
         if not self.enabled or self._plan_call is None:
             return None
         try:
@@ -449,18 +543,33 @@ class HomeControl:
             logger.info("speakeasy: home control unavailable (%s); using Hermes", exc.kind)
             return None
         devices = self.chosen(snap)
-        if not devices or not self.wants(request, devices):
+        if not devices:
             return None
+        if answering:
+            original, question = answering
+            if TIMING.search(request or "") or len(request or "") > MAX_REQUEST:
+                return None
+            request = (f"{original}\n(I asked: {question} They answered: {request}. The answer only fills in what I "
+                       "asked; keep every other part of the original request, including which devices, unchanged.)")
+        elif not self.wants(request, devices):
+            return None
+        may_ask = not answering
         started = time.monotonic()
         try:
-            text = self._plan_call(planner_messages(request, devices, snap.unit))
+            text = self._plan_call(planner_messages(request, devices, snap.unit, notes, may_ask))
         except Exception as exc:
             logger.info("speakeasy: home planner unavailable (%s); using Hermes", type(exc).__name__)
             return None
-        plan = parse_plan(text, {d.entity_id: d for d in devices}, snap.unit)
+        plan = parse_plan(text, {d.entity_id: d for d in devices}, snap.unit, may_ask)
         planned_ms = int((time.monotonic() - started) * 1000)
         if plan is None:
             logger.info("speakeasy: home request handed to Hermes after %d ms", planned_ms)
+            return None
+        if plan.ask:
+            logger.info("speakeasy: home control asked which one after %d ms", planned_ms)
+            return Reply(True, plan.say, ask=True)
+        if breaks_exclusion(plan, request.split("\n(I asked:")[0], {d.entity_id: d for d in devices}):
+            logger.info("speakeasy: home plan touched an excluded device; using Hermes")
             return None
         reply = self.run(plan)
         logger.info("speakeasy: home control %s in %d ms (%d calls)", "done" if reply.ok else "failed",

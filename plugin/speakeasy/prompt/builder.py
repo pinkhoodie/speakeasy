@@ -455,6 +455,12 @@ def status_note(detail: str) -> str:
             + re.sub(r"\s+", " ", detail or "").strip()[:300])
 
 
+def home_question(question: str) -> str:
+    """Home control needs one detail before it can act (which device, or what value)."""
+    return (f'Before I can do that I need one detail. Ask {"this"} now, in one short line, in your own voice: "{question}" '
+            "Then wait for the answer and hand the answer off as the request; do not guess, and do not say anything is done.")[:2000]
+
+
 def clarify_channel(named: list[str], known: list[str]) -> str:
     """Asked instead of starting work: two channels were named, or one that is not set up."""
     if len(named) >= 2:
