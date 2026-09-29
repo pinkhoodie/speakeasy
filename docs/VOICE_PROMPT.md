@@ -43,7 +43,7 @@ The user's Hermes writes the brief, which only adds personal context. Speakeasy 
 
 3. **Per-call context** (assembled by the server at call start, never stored)
    - Local date and time.
-   - "While you were away": tasks that finished since the last call.
+   - "Earlier work": tasks that settled since the last call, as background. Finished work is not announced (it already reached the app and chat); an approval still waiting is mentioned once, after the user speaks.
    - Recent voice turns from this device's voice session, when the user has that setting on.
    - Resume: the conversation so far, when resuming a paused call.
 

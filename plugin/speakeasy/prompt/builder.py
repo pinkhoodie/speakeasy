@@ -94,21 +94,31 @@ def truthfulness(names: Names) -> str:
 # -- the voice session ------------------------------------------------------------------
 
 def away_block(away: list[dict[str, Any]], names: Names) -> str:
-    lines = []
-    for item in away[:3]:
+    """What settled since the last call. Finished work is background: its answer already went to the
+    app (and their chat), so reciting it when they call back hours later is noise. Only something
+    that still needs them (an approval) is raised, briefly, and only after their opening line."""
+    needs, done = [], []
+    for item in away[:5]:
         request = item.get("request") or "an earlier request"
         status = item.get("status")
         if status == "waiting_for_approval":
-            outcome = f"needs {names.possessive} approval"
+            needs.append(f"- {request}: needs {names.possessive} approval in the app")
         elif status == "completed":
-            outcome = "finished" + (f": {item['spoken']}" if item.get("spoken") else "")
+            done.append(f"- {request}: finished" + (f": {item['spoken']}" if item.get("spoken") else ""))
         else:
-            outcome = f"stopped ({status})"
-        lines.append(f"- {request}: {outcome}")
-    if not lines:
+            done.append(f"- {request}: stopped ({status})")
+    if not needs and not done:
         return ""
-    return ("# While you were away\nSince your last call:\n" + "\n".join(lines)
-            + f"\nOpen the call by telling {names.user} this in one or two sentences, then listen.")
+    parts = ["# Earlier work (background; do not open the call with it)"]
+    if done:
+        parts.append(f"Settled since the last call; {names.user} has most likely already seen these in the app or "
+                     f"their chat:\n" + "\n".join(done)
+                     + f"\nDon't bring these up. Use them only if {names.user} asks about that work or what happened.")
+    if needs:
+        parts.append("Still waiting on them:\n" + "\n".join(needs)
+                     + f"\nRespond to whatever {names.user} opens with first. If it fits naturally, mention in one "
+                       "short line that something is waiting for their approval; say it once.")
+    return "\n".join(parts)
 
 
 def resume_block(tasks: list[dict[str, Any]], names: Names) -> str:

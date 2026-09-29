@@ -130,7 +130,22 @@ def test_idle_calls_close(server, service):
 def test_while_you_were_away_recap():
     away = [{"request": "Order printer ink", "status": "completed", "spoken": "Ordered the ink.", "task_id": "t1"}]
     block = P.away_block(away, P.Names("Hermes", "Sam"))
-    assert "Order printer ink" in block and "Ordered the ink." in block
+    assert "Order printer ink" in block and "Ordered the ink." in block  # known, for "what happened with..."
+
+
+def test_finished_work_is_not_announced_when_they_call_back():
+    """Calling back hours later and saying "hey" must not start with "by the way, that's done":
+    the result already went to the app and chat."""
+    away = [{"request": "Order printer ink", "status": "completed", "spoken": "Ordered the ink."}]
+    block = P.away_block(away, P.Names("Hermes", "Sam"))
+    assert "do not open the call" in block and "Don't bring these up" in block
+    assert "Open the call by telling" not in block
+
+
+def test_an_approval_waiting_is_raised_once_after_they_speak():
+    away = [{"request": "Send the invoice", "status": "waiting_for_approval"}]
+    block = P.away_block(away, P.Names("Hermes", "Sam"))
+    assert "Send the invoice" in block and "Respond to whatever Sam opens with first" in block
 
 
 def test_rules_are_generic_and_templated():
