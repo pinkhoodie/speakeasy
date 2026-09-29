@@ -17,6 +17,7 @@ import dataclasses
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -26,6 +27,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 ROUTE_PREFIX = "speakeasy-"
 EVENT = "speakeasy.task"
@@ -307,6 +310,50 @@ def wait_for_answer(state_db: Path, opened: Opened, timeout_s: float, poll_s: fl
     return None
 
 
+# -- making sure the user can see a new Discord thread ---------------------------------------------
+
+DISCORD_API = "https://discord.com/api/v10"
+PRIVATE_THREAD = 12
+_MAX_MEMBERS = 10
+
+
+def discord_allowed_user_ids(environ: dict[str, str] | None = None) -> list[str]:
+    """The Discord users allowed to talk to this Hermes (``DISCORD_ALLOWED_USERS``), numeric IDs only."""
+    raw = (environ if environ is not None else os.environ).get("DISCORD_ALLOWED_USERS", "")
+    ids = [part.strip() for part in re.split(r"[,\s]+", raw) if part.strip().isdigit()]
+    return list(dict.fromkeys(ids))[:_MAX_MEMBERS]
+
+
+def ensure_discord_thread_visible(thread_id: str, *, token: str, user_ids: list[str],
+                                  opener: Callable[..., Any] = urllib.request.urlopen,
+                                  timeout: float = 10) -> int:
+    """Hermes versions before the #95670 fix open handoff threads as PRIVATE (discord.py's default for
+    a channel thread), so nobody but the bot can see them. When that happened, add the allowed users.
+    Returns how many were added; a public thread or any error adds none and never raises."""
+    if not (token and user_ids and SAFE_ID_RE.fullmatch(thread_id)):
+        return 0
+    headers = {"Authorization": f"Bot {token}", "User-Agent": "Speakeasy (https://speakeasyvoice.ai)"}
+    try:
+        with opener(urllib.request.Request(f"{DISCORD_API}/channels/{thread_id}", headers=headers),
+                    timeout=timeout) as response:
+            channel = json.loads(response.read(20_000) or b"{}")
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return 0
+    if not isinstance(channel, dict) or channel.get("type") != PRIVATE_THREAD:
+        return 0
+    added = 0
+    for user_id in user_ids:
+        req = urllib.request.Request(f"{DISCORD_API}/channels/{thread_id}/thread-members/{user_id}",
+                                     data=b"", method="PUT", headers=headers)
+        try:
+            with opener(req, timeout=timeout) as response:
+                if getattr(response, "status", 204) in (200, 204):
+                    added += 1
+        except (urllib.error.URLError, TimeoutError, OSError):
+            continue
+    return added
+
+
 class ThreadRunner:
     """What the call needs to run a task in a new thread (tests pass a fake with the same shape)."""
 
@@ -321,7 +368,13 @@ class ThreadRunner:
         base = webhook_base(self.home)
         if base is None:
             raise ThreadError("Hermes' webhook platform is off")
-        return open_thread(base, secret(self.home), target, message=message, title=title, delivery_id=delivery_id)
+        opened = open_thread(base, secret(self.home), target, message=message, title=title, delivery_id=delivery_id)
+        if opened.platform == "discord":
+            added = ensure_discord_thread_visible(opened.thread_id, token=os.environ.get("DISCORD_BOT_TOKEN", ""),
+                                                  user_ids=discord_allowed_user_ids())
+            if added:
+                logger.info("speakeasy: new Discord thread was private; added %d allowed user(s) so it shows up", added)
+        return opened
 
     def wait(self, opened: Opened, on_session: Callable[[str], None],
              on_title: Callable[[str], None] | None = None) -> str | None:
