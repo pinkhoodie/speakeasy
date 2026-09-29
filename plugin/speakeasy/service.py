@@ -30,7 +30,7 @@ from .hermes_api import HermesAPI, HermesError
 RESTART_NEEDED = ("Speakeasy was updated while Hermes was running. Restart the Hermes gateway "
                   "(hermes gateway restart) to finish the update.")
 from .prompt import builder as P
-from .router import routing_model
+from .router import home_plan_call as router_home_plan_call, routing_model
 from .threads import THREAD_PLATFORMS
 from .settings import (OPENAI_KEY_NAME, Settings, SettingsError, default_voice, find_codex, hermes_api_base,
                        hermes_secret, valid_delivery_target)
@@ -42,6 +42,12 @@ from .text import ID_RE, MAX_CARDS, TERMINAL, notice_text, split_result
 logger = logging.getLogger(__name__)
 
 ROUTING_EXPLAINER = ("When you ask for something on a call, a quick model first decides where it goes: a new task, an addition to a task that's already running, several separate tasks, or a Hermes chat or thread you were already working in. It also decides whether you want to see something on screen. It doesn't do the work; your Hermes agent does. Every request waits on this step, so pick a fast model; a wrong call can put a task in the wrong place.")
+HOME_EXPLAINER = ("Home control lets your voice run your Home Assistant devices directly, in about a second. "
+                  "Say \"lights off in the kitchen\", \"set the den to 72 and turn on the fan\" or \"is the bedroom "
+                  "light on?\" and it's done without starting a Hermes task. Anything with a time, a condition or real "
+                  "thinking (\"close the blinds at 11\") still goes to Hermes, which keeps its own Home Assistant access. "
+                  "It can only use the devices you tick here. Locks, alarms, garage doors and gates are never on the list; "
+                  "those stay with Hermes. It uses the Home Assistant connection Hermes already has; nothing new is stored.")
 ROUTING_HINT = ("Also: `hermes voice routing` on the machine that runs Hermes. "
                 "Stored in your Hermes config under auxiliary → speakeasy_router.")
 
@@ -78,7 +84,8 @@ class VoiceService:
                  suggest_run: Callable[[str, str], tuple[str, str]] | None = None,
                  title_call: Callable[[str], str | None] | None = None,
                  polish_call: Callable[[str], str | None] | None = None,
-                 status_call: Callable[[str], str | None] | None = None):
+                 status_call: Callable[[str], str | None] | None = None,
+                 home_plan_call: Callable[..., Any] | None = None, home_client: Callable[..., Any] | None = None):
         self.home = Path(hermes_home)
         self.dir = self.home / "speakeasy"
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -95,6 +102,11 @@ class VoiceService:
                           image_roots=self.image_roots, notices=self.notices, hermes_key=self.hermes_key,
                           route_call=route_call, title_call=title_call, polish_call=polish_call, status_call=status_call,
                           threads=thread_runner or ThreadRunner(self.home, D.threads_supported))
+        from .home_control import HomeAssistantClient, HomeControl, credentials
+        self.home_control = HomeControl(self.settings.get, lambda: credentials(self.home),
+                                        plan_call=home_plan_call or router_home_plan_call,
+                                        client_factory=home_client or HomeAssistantClient)
+        self.rt.home = self.home_control
         self._suggest_run = suggest_run or self._brief_run
         self.brief = BriefManager(self.home, brief_run or self._brief_run, self.settings.get,
                                   error_fn=lambda: getattr(self.hermes, "last_error", "") or "")
@@ -811,11 +823,39 @@ class VoiceService:
             "hermes_api_ok": self.hermes.health(), "hermes_api_key_set": bool(self.hermes_key()),
             "delivery_target": s["delivery"]["target"], **self.thread_status(),
             "continuity_enabled": s["continuity"]["enabled"], "devices": len(self.devices.devices()),
+            "home_control_enabled": s["home_control"]["enabled"],
             "routing_model": routing_model(), "routing_hint": ROUTING_HINT, "routing_explainer": ROUTING_EXPLAINER,
             "routing_choice": self.routing_choices(),
             "advertised_url": s["server"]["advertised_url"], "tailscale_name": s["server"]["tailscale_name"],
             "version": __version__,
         }
+
+    # -- home control ---------------------------------------------------------------------------------
+    def get_home(self) -> dict[str, Any]:
+        """Settings › Home: on/off, whether Home Assistant is found, and every device it could use."""
+        return {**self.home_control.overview(), "explainer": HOME_EXPLAINER}
+
+    def put_home(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Turn it on/off and/or set exactly which devices it may use. Turning it on needs Home
+        Assistant to answer; the first time, the default picks (lights, thermostats, fans) are saved."""
+        if not isinstance(body, dict) or not body or not set(body) <= {"enabled", "entities"}:
+            raise ServiceError(400, "body may contain only: enabled, entities")
+        patch: dict[str, Any] = {}
+        if "entities" in body:
+            patch["entities"] = body["entities"]
+        if "enabled" in body:
+            if not isinstance(body["enabled"], bool):
+                raise ServiceError(400, "enabled must be true or false")
+            if body["enabled"]:
+                found = self.home_control.detect()
+                if not found["available"]:
+                    raise ServiceError(409, found["reason"])
+                if "entities" not in body and self.settings.get()["home_control"]["entities"] is None:
+                    from .home_control import default_selection
+                    patch["entities"] = default_selection(self.home_control.snapshot().states)
+            patch["enabled"] = body["enabled"]
+        self.patch_settings({"home_control": patch})
+        return self.get_home()
 
     def thread_status(self) -> dict[str, Any]:
         cap = capability(self.home, D.threads_supported())
@@ -849,15 +889,17 @@ class VoiceService:
             "names_set": s["onboarding"]["names_set"],
             "delivery_set": s["onboarding"]["delivery_set"],
             "brief_ready": brief_state in {"ready", "edited"},
+            "home_offered": s["onboarding"].get("home_offered", False),
         }
         required = ("paired", "voice_ready", "names_set", "delivery_set")
         return {"steps": steps, "complete": all(steps[k] for k in required), "brief_state": brief_state,
                 "codex_message": message, "assistant_name": s["assistant_name"], "user_name": s["user_name"],
                 "delivery_target": s["delivery"]["target"], "continuity_enabled": s["continuity"]["enabled"],
+                "home_control_enabled": s["home_control"]["enabled"],
                 "advertised_url": s["server"]["advertised_url"], "tailscale_name": s["server"]["tailscale_name"]}
 
     def save_onboarding(self, body: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"assistant_name", "user_name", "delivery_target", "write_brief", "continuity_enabled"}
+        allowed = {"assistant_name", "user_name", "delivery_target", "write_brief", "continuity_enabled", "home_enabled"}
         if not isinstance(body, dict) or not set(body) <= allowed or not body:
             raise ServiceError(400, f"body may contain only: {', '.join(sorted(allowed))}")
         patch: dict[str, Any] = {}
@@ -876,10 +918,17 @@ class VoiceService:
             if not isinstance(body["continuity_enabled"], bool):
                 raise ServiceError(400, "continuity_enabled must be true or false")
             patch["continuity"] = {"enabled": body["continuity_enabled"]}
+        if "home_enabled" in body:
+            # The setup step's answer: yes turns it on with the default device picks, no leaves it off.
+            if not isinstance(body["home_enabled"], bool):
+                raise ServiceError(400, "home_enabled must be true or false")
+            onboarding["home_offered"] = True
         if onboarding:
             patch["onboarding"] = onboarding
         if patch:
             self.patch_settings(patch)
+        if body.get("home_enabled") is not None:
+            self.put_home({"enabled": body["home_enabled"]})
         if body.get("write_brief") is True:
             try:
                 self.brief.rewrite(force=False)

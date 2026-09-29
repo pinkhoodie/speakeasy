@@ -74,6 +74,8 @@ def setup_parser(parser) -> None:
     thinking.add_argument("--thinking", dest="thinking", action="store_true",
                           help="leave the model's reasoning on")
     routing.add_argument("--models", action="store_true", help="list every model of PROVIDER")
+    home_ = sub.add_parser("home", help="Instant home control through Home Assistant: show, or turn on/off")
+    home_.add_argument("state", nargs="?", choices=("on", "off", "status"), default="status")
     reload_ = sub.add_parser("reload", help="Load a newly installed Speakeasy now, without restarting Hermes "
                                             "(ends a live call; running tasks keep going in Hermes)")
     reload_.add_argument("--timeout", type=float, default=30, help=argparse.SUPPRESS)
@@ -212,6 +214,7 @@ def cmd_setup(args, home: Path, env=None) -> int:
         out("✓ Your agent will write a short voice brief in the background: what the voice should know about "
             "you and what it can hand off. You can read and edit it in the app.")
     _print_routing_model(out)
+    _print_home_offer(home, settings, out)
     _sync_thread_routes(home, settings, out)
     out("")
 
@@ -276,6 +279,45 @@ def _sync_thread_routes(home: Path, settings: Settings, out) -> None:
             out("• New-thread channels: " + ("ready." if status["threads_supported"] else status["threads_reason"]))
     finally:
         service.close()
+
+
+def _print_home_offer(home: Path, settings: Settings, out) -> None:
+    """Hermes has Home Assistant: say that instant home control can be turned on (in the app, or
+    `hermes voice home on`). Nothing is turned on here, and nothing is said when it isn't set up."""
+    from .home_control import credentials
+    if settings.get()["home_control"]["enabled"]:
+        out("• Home control is on: `hermes voice home` shows which devices it can use.")
+    elif credentials(home):
+        out("• Your Hermes has Home Assistant: turn on instant home control in the app's setup, "
+            "or with `hermes voice home on`.")
+
+
+def cmd_home(home: Path, args) -> int:
+    from .service import HOME_EXPLAINER, VoiceService, ServiceError
+    svc = VoiceService(home, start_threads=False)
+    try:
+        state = getattr(args, "state", "status")
+        if state in {"on", "off"}:
+            try:
+                svc.put_home({"enabled": state == "on"})
+            except ServiceError as exc:
+                print(f"Error: {exc.message}")
+                return 2
+        info = svc.get_home()
+        if state == "status":
+            print("Home control: " + HOME_EXPLAINER + "\n")
+        print(f"Home control is {'on' if info['enabled'] else 'off'}.")
+        if not info["available"]:
+            print(info["reason"])
+            return 0 if state != "on" else 2
+        chosen = [d for d in info["devices"] if d["included"]]
+        print(f"It can use {len(chosen)} of the {len(info['devices'])} devices Home Assistant offers:")
+        for d in chosen:
+            print(f"  {d['name']:<34} {d['kind']}")
+        print("\nChange which devices it can use in the app: Settings › Home.")
+        return 0
+    finally:
+        svc.close()
 
 
 def _print_routing_model(out) -> None:
@@ -472,6 +514,8 @@ def handle(args) -> int:
         return cmd_reload(home, getattr(args, "timeout", 30))
     if command == "routing":
         return cmd_routing(home, args)
+    if command == "home":
+        return cmd_home(home, args)
     store = _store(home)
     if command == "devices":
         devices = store.devices()
@@ -487,5 +531,5 @@ def handle(args) -> int:
             return 0
         print(f"No device {args.device_id}.")
         return 1
-    print("Usage: hermes voice {setup|pair|devices|revoke <id>|config get|set|status|reload}")
+    print("Usage: hermes voice {setup|pair|devices|revoke <id>|config get|set|status|routing|home|reload}")
     return 2

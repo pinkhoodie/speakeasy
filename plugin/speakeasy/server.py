@@ -164,6 +164,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/voice/destinations": self.service.destinations,
                 "/voice/onboarding": self.service.onboarding,
                 "/voice/routing": self.service.routing_choices,
+                "/voice/home": self.service.get_home,
             }
             if path in routes:
                 self._reply(200, routes[path]())
@@ -249,6 +250,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         try:
             self._auth()
+            if self.route == "/voice/home":
+                self._reply(200, self.service.put_home(self._body()))
+                return
             if self.route != "/voice/brief":
                 raise ServiceError(404, "not found")
             self._reply(200, self.service.put_brief(self._body()))

@@ -75,6 +75,8 @@ class Runtime:
     polish_call: Callable[[str], str | None] | None = None
     status_call: Callable[[str], str | None] | None = None
     progress_call: Callable[..., str | None] | None = None
+    # Instant home control (home_control.HomeControl); None or turned off = every request goes to Hermes.
+    home: Any = None
 
     @property
     def names(self) -> P.Names:
@@ -735,6 +737,8 @@ class SidebandWorker:
                              if line.startswith("User: ")), "")
         if router.is_show_me(last_request) and await self.show_me(delegation_id, last_request):
             return
+        if not marked and await self.home_control(delegation_id, revision, last_request):
+            return
         candidates = await self.conversation_candidates(last_request)
         now = time.time()
         chats = [router.Chat(f"c{i + 1}", c.conv.where, c.snippets, c.voice_request,
@@ -770,6 +774,41 @@ class SidebandWorker:
             await self.start_parts(delegation_id, revision, context, [p.request for p in decision.parts], choice)
             return
         await self.start_routed(delegation_id, revision, context, last_request, choice)
+
+    async def home_control(self, delegation_id: str, revision: int, request: str) -> bool:
+        """A request that is only device commands, done straight through Home Assistant (opt-in).
+        True when handled: the result is spoken and left as a finished task card. False sends the
+        request on to Hermes unchanged, including whenever anything goes wrong before a device moved."""
+        home = self.rt.home
+        if home is None or not request or not getattr(home, "enabled", False):
+            return False
+        try:
+            reply = await asyncio.to_thread(home.respond, request)
+        except Exception as exc:  # the fast path must never break a request
+            logger.warning("speakeasy: home control failed, using Hermes (%s)", type(exc).__name__)
+            return False
+        if reply is None:
+            return False
+        idem = self._idem(delegation_id, revision)
+        backend = BackendRun(delegation_id, revision, idem, status="completed" if reply.ok else "failed")
+        if not reply.ok:
+            backend.error = reply.spoken
+        with self.interaction.lock:
+            self.interaction.runs[delegation_id] = backend
+            self.interaction.latest_delegation_id = delegation_id
+        try:
+            self.store.reserve_run(idem, self.interaction.interaction_id, delegation_id, revision)
+            self.store.set_title(idem, short_title(request) or "Home")
+            self.store.progress(idem, "request", request)
+            self.store.update_run(idem, None, backend.status)
+            self.store.set_result(idem, split_result(reply.spoken, ()))
+            self.store.progress(idem, "result", reply.spoken)
+        except Exception:
+            logger.warning("speakeasy: could not record the home-control card")
+        self.handoff_at.pop(delegation_id, None)
+        self.publish()
+        await self.append("session.commentary.append", delegation_id, reply.spoken)
+        return True
 
     async def show_me(self, delegation_id: str, request: str, task_id: str | None = None,
                       only_if_visible: bool = False) -> bool:
