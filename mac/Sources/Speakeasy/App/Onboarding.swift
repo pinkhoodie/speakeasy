@@ -4,11 +4,11 @@ import SpeakeasyCore
 import SwiftUI
 
 /// The guided first run, one screen per step:
-/// connect → microphone → voice sign-in → names → where finished work goes → voice brief → hotkey + try it.
+/// connect → microphone → voice sign-in → names → where finished work goes → task routing → voice brief → hotkey + try it.
 @MainActor
 final class OnboardingFlow: ObservableObject {
     enum Step: Int, CaseIterable {
-        case connect, microphone, voice, names, delivery, brief, hotkey
+        case connect, microphone, voice, names, delivery, routing, brief, hotkey
         var title: String {
             switch self {
             case .connect: return "Connect to Hermes"
@@ -16,6 +16,7 @@ final class OnboardingFlow: ObservableObject {
             case .voice: return "Voice sign-in"
             case .names: return "Names"
             case .delivery: return "Finished work"
+            case .routing: return "Task routing"
             case .brief: return "Voice brief"
             case .hotkey: return "Try it"
             }
@@ -185,6 +186,7 @@ struct OnboardingView: View {
                 case .voice: VoiceSignInStep(flow: flow)
                 case .names: NamesStep(flow: flow)
                 case .delivery: DeliveryStep(flow: flow)
+                case .routing: RoutingStep(flow: flow)
                 case .brief: BriefStep(flow: flow)
                 case .hotkey: HotkeyStep(flow: flow)
                 }
@@ -386,6 +388,39 @@ private struct NamesStep: View {
             Spacer()
             StepButtons(back: flow.back, primary: "Continue", action: flow.next)
         }
+    }
+}
+
+// MARK: Task routing
+
+/// Pick the model that decides where each spoken request goes. Uses the same picker as Settings
+/// (providers Hermes is signed in to); a pending choice is saved on Continue.
+private struct RoutingStep: View {
+    @ObservedObject var flow: OnboardingFlow
+    @EnvironmentObject var app: AppModel
+    @State private var saving = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            StepHeader(title: "Task routing",
+                       subtitle: app.status?.routingExplainer ?? routingExplainerFallback)
+            Form { RoutingModelPicker(app: app) }
+                .formStyle(.grouped)
+                .frame(height: 170)
+            Text("A small, fast model is best; turning thinking off speeds it up. You can change this any time in Settings › Behavior.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let error = app.lastError, saving == false, app.routingEdit != nil { Text(error).foregroundStyle(.orange) }
+            Spacer()
+            StepButtons(back: { app.routingDraft = nil; flow.back() }, primary: "Continue",
+                        primaryDisabled: app.routingNeedsModel, busy: saving) {
+                saving = true
+                Task {
+                    let ok = await app.saveRoutingEdit()
+                    saving = false
+                    if ok { flow.next() }
+                }
+            }
+        }
+        .task { await app.refresh() }
     }
 }
 

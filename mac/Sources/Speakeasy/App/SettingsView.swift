@@ -691,7 +691,8 @@ private struct AboutSettings: View {
             }
             Toggle("Check for updates automatically", isOn: $autoCheck)
                 .toggleStyle(.checkbox).font(.callout)
-                .help("Once a week, asks GitHub for the latest release. Nothing is downloaded without you.")
+                .help("Once a week, looks for a new version. Nothing is installed until you click Install Update.")
+                .onChange(of: autoCheck) { _, on in AppUpdater.shared.automaticallyChecks = on }
             Text("Talk to your own Hermes agent by voice.").foregroundStyle(.secondary)
             Text("MIT License").font(.callout)
             Text("Uses WebRTC (BSD license).").font(.caption).foregroundStyle(.secondary)
@@ -703,7 +704,11 @@ private struct AboutSettings: View {
         HStack(spacing: 8) {
             if let release = app.updateAvailable {
                 Text("Version \(release.version) is available.").foregroundStyle(.primary)
-                Button("Download") { app.openUpdate(release) }
+                if AppUpdater.shared.isAvailable {
+                    Button("Install Update…") { AppUpdater.shared.checkForUpdates() }
+                } else {
+                    Button("Download") { app.openUpdate(release) }
+                }
             } else {
                 Button(app.checkingForUpdates ? "Checking…" : "Check for Updates") {
                     Task { await app.checkForUpdates() }

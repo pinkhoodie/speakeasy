@@ -27,6 +27,9 @@ NOTARY_ARGS=(--keychain-profile "$PROFILE")
 xcrun notarytool history "${NOTARY_ARGS[@]}" >/dev/null \
     || { echo "error: notary profile '$PROFILE' missing; run xcrun notarytool store-credentials" >&2; exit 1; }
 
+[[ -r "${SPEAKEASY_SPARKLE_KEY:-$HOME/.config/speakeasy/sparkle-ed-key}" ]] \
+    || { echo "error: Sparkle signing key missing (see scripts/release.sh)" >&2; exit 1; }
+
 # The version lives in Info.plist; the build number is the commit count so it only goes up.
 BUILD="$(git rev-list --count HEAD)"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Resources/Info.plist
@@ -36,6 +39,7 @@ BUILD="$(git rev-list --count HEAD)"
 SPEAKEASY_CODESIGN_IDENTITY="-" ./scripts/package-app.sh >/dev/null
 APP="$ROOT/dist/Speakeasy.app"
 FW="$APP/Contents/Frameworks/WebRTC.framework"
+"$ROOT/scripts/sign-sparkle.sh" "$APP/Contents/Frameworks/Sparkle.framework" "$IDENTITY" --options runtime --timestamp
 codesign --force --options runtime --timestamp --sign "$IDENTITY" "$FW"
 codesign --force --options runtime --timestamp --entitlements Resources/Speakeasy.entitlements \
     --sign "$IDENTITY" "$APP"
@@ -58,6 +62,35 @@ xcrun stapler staple "$DMG"
 spctl -a -t open --context context:primary-signature -v "$DMG"
 shasum -a 256 "$DMG" | tee "$DMG.sha256"
 
+# In-app updates: an appcast pointing at this release's dmg, signed with the Sparkle EdDSA key
+# (a private key file on the release Mac, default ~/.config/speakeasy/sparkle-ed-key; never in the repo).
+# A file, not the keychain: a keychain read can pop a dialog and stall an unattended release.
+SIGN_UPDATE="$ROOT/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+SPARKLE_KEY="${SPEAKEASY_SPARKLE_KEY:-$HOME/.config/speakeasy/sparkle-ed-key}"
+[[ -r "$SPARKLE_KEY" ]] || { echo "error: Sparkle signing key not found at $SPARKLE_KEY" >&2; exit 1; }
+SIG_ATTRS="$("$SIGN_UPDATE" --ed-key-file "$SPARKLE_KEY" "$DMG")"   # sparkle:edSignature="…" length="…"
+[[ "$SIG_ATTRS" == *edSignature* ]] || { echo "error: could not sign the update (Sparkle key missing?)" >&2; exit 1; }
+BUILD_NUM="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" Resources/Info.plist)"
+MIN_OS="$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" Resources/Info.plist)"
+cat > "$ROOT/dist/appcast.xml" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Speakeasy</title>
+    <item>
+      <title>Speakeasy $VERSION</title>
+      <link>https://github.com/rungmc357/speakeasy/releases/tag/v$VERSION</link>
+      <sparkle:version>$BUILD_NUM</sparkle:version>
+      <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>$MIN_OS</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://github.com/rungmc357/speakeasy/releases/tag/v$VERSION</sparkle:releaseNotesLink>
+      <pubDate>$(LC_ALL=C date -u "+%a, %d %b %Y %H:%M:%S +0000")</pubDate>
+      <enclosure url="https://github.com/rungmc357/speakeasy/releases/download/v$VERSION/Speakeasy.dmg" $SIG_ATTRS type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>
+XML
+
 if [[ "$PUBLISH" == "--publish" ]]; then
     # Also as a fixed name, so https://github.com/rungmc357/speakeasy/releases/latest/download/Speakeasy.dmg
     # always downloads the newest app directly (the website's Download button).
@@ -65,7 +98,8 @@ if [[ "$PUBLISH" == "--publish" ]]; then
     # finds) and every download all get "Speakeasy.dmg", never a versioned file next to an old one.
     cp "$DMG" "$ROOT/dist/Speakeasy.dmg"
     (cd "$ROOT/dist" && shasum -a 256 Speakeasy.dmg > Speakeasy.dmg.sha256)
-    gh release create "v$VERSION" "$ROOT/dist/Speakeasy.dmg" "$ROOT/dist/Speakeasy.dmg.sha256" --title "Speakeasy $VERSION" \
-        --notes "Signed and notarized macOS app (macOS 14+). Open the dmg and drag Speakeasy into Applications."
+    gh release create "v$VERSION" "$ROOT/dist/Speakeasy.dmg" "$ROOT/dist/Speakeasy.dmg.sha256" "$ROOT/dist/appcast.xml" \
+        --title "Speakeasy $VERSION" \
+        --notes "Signed and notarized macOS app (macOS 14+). New install: open the dmg and drag Speakeasy into Applications. Already on 0.2.10 or later: Check for Updates installs it in place."
 fi
 echo "$DMG"

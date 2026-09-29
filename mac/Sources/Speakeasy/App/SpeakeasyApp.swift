@@ -60,13 +60,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if args.contains("--native-mic-smoke") { NativeSmoke.mic(); return }
         if args.contains("--live-call-smoke") { LiveCallSmoke.run(); return }
         if let i = args.firstIndex(of: "--onboarding-snapshot"), i + 1 < args.count {
-            OnboardingSnapshot.render(to: args[i + 1]); return
+            OnboardingSnapshot.render(to: args[i + 1], step: i + 2 < args.count && !args[i + 2].hasPrefix("--") ? args[i + 2] : nil); return
         }
         if args.contains("--panel-smoke") {
             let dir = args.firstIndex(of: "--snapshot-dir").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
             PanelSmoke.run(config: app.config, snapshotDir: dir); return
         }
         if let index = args.firstIndex(of: "--ui-preview") { runPreview(args, index: index); return }
+        if let i = args.firstIndex(of: "--update-smoke"), i + 1 < args.count {
+            AppUpdater.shared.runSmoke(feed: args[i + 1]); return
+        }
         if let i = args.firstIndex(of: "--settings-smoke"), i + 3 < args.count {
             SettingsSmoke.run(app: app, dir: args[i + 1], provider: args[i + 2], model: args[i + 3]); return
         }
@@ -84,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let link = pendingLink { pendingLink = nil; handlePairURL(link) }
         else if !app.isPaired || !UserDefaults.standard.bool(forKey: Prefs.onboardingDone) { showOnboarding() }
         Task { await app.refresh() }
+        AppUpdater.shared.start()
         app.checkForUpdatesIfDue()
         Timer.publish(every: 24 * 3600, on: .main, in: .common).autoconnect()
             .sink { [weak self] _ in self?.app.checkForUpdatesIfDue() }
@@ -291,6 +295,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 alert.addButton(withTitle: "Later")
                 NSApp.activate(ignoringOtherApps: true)
                 if alert.runModal() == .alertFirstButtonReturn { app.copyPluginUpdateRequest() }
+            } else if AppUpdater.shared.isAvailable {
+                AppUpdater.shared.checkForUpdates()
             } else if let release = app.updateAvailable {
                 alert.messageText = "Speakeasy \(release.version) is available"
                 alert.informativeText = "You have \(app.appVersion). Download the new version, then drag it into Applications to replace this one."

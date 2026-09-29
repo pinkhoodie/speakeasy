@@ -39,13 +39,20 @@ ditto "$WEBRTC_SRC" "$APP/Contents/Frameworks/WebRTC.framework"
 FW="$APP/Contents/Frameworks/WebRTC.framework"
 rm -rf "$FW/Headers" "$FW/Modules" "$FW/Versions/A/Headers" "$FW/Versions/A/Modules"
 
+# In-place updates: embed Sparkle.framework (its updater app and XPC helpers ride inside it).
+SPARKLE_SRC="$ROOT/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+[[ -d "$SPARKLE_SRC" ]] || { echo "error: Sparkle.framework not found (run swift build first)" >&2; exit 1; }
+ditto "$SPARKLE_SRC" "$APP/Contents/Frameworks/Sparkle.framework"
+SPARKLE_FW="$APP/Contents/Frameworks/Sparkle.framework"
+
 # The executable links @rpath/WebRTC.framework/WebRTC; make the bundle self-contained.
 if ! otool -l "$APP/Contents/MacOS/Speakeasy" | grep -q "@executable_path/../Frameworks"; then
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/Speakeasy"
 fi
 
 SIGNING_IDENTITY="${SPEAKEASY_CODESIGN_IDENTITY:--}"
-# Sign inside-out with the same identity: embedded framework first, then the app.
+# Sign inside-out with the same identity: Sparkle's helpers, the frameworks, then the app.
+"$ROOT/scripts/sign-sparkle.sh" "$SPARKLE_FW" "$SIGNING_IDENTITY"
 codesign --force --sign "$SIGNING_IDENTITY" "$FW"
 codesign --force --sign "$SIGNING_IDENTITY" "$APP"
 codesign --verify --deep --strict "$APP"

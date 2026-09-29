@@ -5,8 +5,13 @@ import SwiftUI
 /// (no window, no server) so the setup copy can be reviewed as an image.
 enum OnboardingSnapshot {
     @MainActor
-    static func render(to path: String) {
+    static func render(to path: String, step: String? = nil) {
         let flow = OnboardingFlow(app: AppModel.shared)
+        if let step, let s = OnboardingFlow.Step.allCases.first(where: { "\($0)" == step }) {
+            flow.step = s
+            Task { await AppModel.shared.refresh() }
+            RunLoop.main.run(until: Date().addingTimeInterval(4))
+        }
         let view = OnboardingView(flow: flow).environmentObject(AppModel.shared)
             .frame(width: 520, height: 460).background(Color(nsColor: .windowBackgroundColor))
         let host = NSHostingView(rootView: view)

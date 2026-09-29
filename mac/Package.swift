@@ -10,12 +10,14 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/stasel/WebRTC.git", exact: "153.0.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
     ],
     targets: [
         .target(name: "SpeakeasyCore"),
         .executableTarget(name: "Speakeasy", dependencies: [
             "SpeakeasyCore",
             .product(name: "WebRTC", package: "WebRTC"),
+            .product(name: "Sparkle", package: "Sparkle"),
         ]),
         .testTarget(name: "SpeakeasyCoreTests", dependencies: ["SpeakeasyCore"], resources: [.copy("Contract")]),
     ],

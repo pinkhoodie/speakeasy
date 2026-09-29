@@ -43,5 +43,13 @@
 	<string>MIT License</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Speakeasy uses the microphone only during a voice call you start.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/rungmc357/speakeasy/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>uD9ynnsoAc/qhv/Z3Led5RPSaAUJe9pgZ4m8ZrsZPd8=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>
