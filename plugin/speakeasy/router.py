@@ -310,15 +310,22 @@ def needs_model(request: str, tasks: list[OpenTask], topics: list[Topic], chats:
     return bool(request) and bool(tasks or topics or chats or _COMPOUND.search(request) or _VISUAL.search(request))
 
 
-def aux_call(messages: list[dict[str, str]], timeout: float = ROUTE_TIMEOUT_S) -> str | None:
+def aux_call(messages: list[dict[str, str]], timeout: float = ROUTE_TIMEOUT_S, max_tokens: int = 300) -> str | None:
     """One request through Hermes' auxiliary client, in-process (the plugin runs in the gateway)."""
     try:
         from agent.auxiliary_client import call_llm, extract_content_or_reasoning  # type: ignore
     except Exception:
         return None
     with _profile_scope():
-        response = call_llm(task=AUX_TASK, messages=messages, temperature=0, max_tokens=300, timeout=timeout)
+        response = call_llm(task=AUX_TASK, messages=messages, temperature=0, max_tokens=max_tokens, timeout=timeout)
     return extract_content_or_reasoning(response)
+
+
+def home_plan_call(messages: list[dict[str, str]]) -> str | None:
+    """The home-control planner: the same fast routing model, with room for several device calls."""
+    from .home_control import PLAN_TIMEOUT_S
+    future = _EXECUTOR.submit(aux_call, messages, PLAN_TIMEOUT_S, 700)
+    return future.result(timeout=PLAN_TIMEOUT_S + 0.5)
 
 
 def smart_title(request: str, timeout: float = TITLE_TIMEOUT_S) -> str | None:

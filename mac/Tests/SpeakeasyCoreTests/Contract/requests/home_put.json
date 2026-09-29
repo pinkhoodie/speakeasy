@@ -1,0 +1,11 @@
+{
+  "body" : {
+    "enabled" : true,
+    "entities" : [
+      "climate.den",
+      "fan.dyson"
+    ]
+  },
+  "method" : "PUT",
+  "path" : "\/voice\/home"
+}

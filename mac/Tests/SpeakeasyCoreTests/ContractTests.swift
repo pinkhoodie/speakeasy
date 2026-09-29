@@ -71,6 +71,22 @@ final class ContractTests: XCTestCase {
         Preparing a client pitch this week.
         """
         try record("brief_put", "PUT", "/voice/brief", VoiceBrief.putBody(text: brief))
+        let home = try HomeControlInfo.decode(fixture("home_put"))
+        try record("home_put", "PUT", "/voice/home", HomeControlInfo.putBody(enabled: true, entities: Array(home.includedIDs.prefix(2))))
+    }
+
+    func testHomeControl() throws {
+        let found = try HomeControlInfo.decode(fixture("home"))
+        XCTAssertTrue(found.available)
+        XCTAssertFalse(found.enabled, "off until the user turns it on")
+        XCTAssertFalse(found.devices.isEmpty)
+        XCTAssertFalse(found.explainer.isEmpty)
+        XCTAssertEqual(found.groups.first?.kind, "light", "lights first")
+        let on = try HomeControlInfo.decode(fixture("home_put"))
+        XCTAssertTrue(on.enabled)
+        XCTAssertTrue(on.configured)
+        XCTAssertFalse(on.includedIDs.isEmpty, "turning on saves the default picks")
+        XCTAssertFalse(on.devices.contains { $0.kind == "lock" && $0.included }, "locks are never ticked by default")
     }
 
     func testDestinationsAndSuggestion() throws {

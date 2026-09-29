@@ -73,6 +73,29 @@ Routing (follow-up or new task, splitting "do X and Y", picking a channel) uses 
 your Hermes auxiliary model `speakeasy_router`; pick its model with `hermes model` → auxiliary
 tasks. If it's slow or fails, simple built-in rules take over.
 
+## Instant home control (optional)
+
+If your Hermes already controls Home Assistant (`HASS_URL` and `HASS_TOKEN` in its `.env`), Speakeasy
+offers to handle home requests itself during a call, in about a second, instead of starting a full
+Hermes task. Setup in the app shows the offer only when it finds your Home Assistant, with the list
+of devices it would use; untick anything you'd rather it left alone. Change it any time in
+Settings › Home, or from the terminal:
+
+    hermes voice home on       # checks Hermes' Home Assistant connection, then turns it on
+    hermes voice home off
+    hermes voice home          # shows whether it's on and how many devices it uses
+
+- **What it does:** direct device commands, several at once ("kitchen lights to 30%, den to 70 and
+  the fan on"), and quick questions ("is the bedroom light on?", "what's the den set to?").
+- **What still goes to Hermes:** anything with a time or condition ("at 11", "if nobody's home"),
+  routines and scenes you describe rather than name, devices you didn't tick, and anything unclear.
+  It's all or nothing: if any part is unclear, the whole request goes to Hermes.
+- **Safety:** every planned command is checked against your ticked devices and Home Assistant's own
+  limits before anything runs. Locks are never included unless you tick them. It only says "done"
+  after Home Assistant accepts the command.
+- **Privacy:** the token stays in Hermes' `.env`; turning this on never changes your Hermes config.
+  The device names you tick are sent to your task-routing model to plan each request.
+
 ## Updating
 
 On the machine that runs Hermes:

@@ -550,3 +550,68 @@ public struct ProviderModels: Codable, Equatable, Sendable {
     public var models: [String]
     public static func decode(_ data: Data) throws -> ProviderModels { try JSONDecoder().decode(ProviderModels.self, from: data) }
 }
+
+/// `GET /voice/home` (and the `PUT` reply): instant home control through Home Assistant.
+public struct HomeControlInfo: Codable, Equatable, Sendable {
+    public struct Device: Codable, Equatable, Sendable, Identifiable {
+        public var entityID: String
+        public var name: String
+        public var kind: String
+        public var state: String
+        public var included: Bool
+        public var id: String { entityID }
+        enum CodingKeys: String, CodingKey { case entityID = "entity_id", name, kind, state, included }
+        public init(entityID: String, name: String, kind: String, state: String, included: Bool) {
+            self.entityID = entityID; self.name = name; self.kind = kind; self.state = state; self.included = included
+        }
+        /// A plain-words label for the kind ("Lights", "Thermostats").
+        public var kindLabel: String { HomeControlInfo.kindLabels[kind] ?? kind.capitalized }
+    }
+    public var enabled: Bool
+    public var configured: Bool
+    public var available: Bool
+    public var reason: String
+    public var devices: [Device]
+    public var explainer: String
+    public var unit: String?
+
+    enum CodingKeys: String, CodingKey { case enabled, configured, available, reason, devices, explainer, unit }
+    public init(enabled: Bool = false, configured: Bool = false, available: Bool = false, reason: String = "",
+                devices: [Device] = [], explainer: String = "", unit: String? = nil) {
+        self.enabled = enabled; self.configured = configured; self.available = available; self.reason = reason
+        self.devices = devices; self.explainer = explainer; self.unit = unit
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = (try? c.decode(Bool.self, forKey: .enabled)) ?? false
+        configured = (try? c.decode(Bool.self, forKey: .configured)) ?? false
+        available = (try? c.decode(Bool.self, forKey: .available)) ?? false
+        reason = (try? c.decode(String.self, forKey: .reason)) ?? ""
+        devices = (try? c.decode([Device].self, forKey: .devices)) ?? []
+        explainer = (try? c.decode(String.self, forKey: .explainer)) ?? ""
+        unit = try? c.decode(String.self, forKey: .unit)
+    }
+    public static func decode(_ data: Data) throws -> HomeControlInfo { try JSONDecoder().decode(HomeControlInfo.self, from: data) }
+
+    /// Kinds in display order, with plain labels.
+    public static let kindOrder = ["light", "climate", "fan", "switch", "cover", "media_player", "scene", "script", "lock"]
+    public static let kindLabels = ["light": "Lights", "climate": "Thermostats", "fan": "Fans", "switch": "Switches & plugs",
+                                    "cover": "Blinds & shades", "media_player": "TVs & speakers", "scene": "Scenes",
+                                    "script": "Scripts", "lock": "Locks"]
+    /// Devices grouped by kind, in display order.
+    public var groups: [(kind: String, devices: [Device])] {
+        let byKind = Dictionary(grouping: devices, by: \.kind)
+        let known = HomeControlInfo.kindOrder.compactMap { k in byKind[k].map { (k, $0) } }
+        let rest = byKind.keys.filter { !HomeControlInfo.kindOrder.contains($0) }.sorted().map { ($0, byKind[$0]!) }
+        return known + rest
+    }
+    public var includedIDs: [String] { devices.filter(\.included).map(\.entityID).sorted() }
+
+    /// `PUT /voice/home` body: on/off and/or exactly which devices.
+    public static func putBody(enabled: Bool?, entities: [String]?) throws -> Data {
+        var body: [String: Any] = [:]
+        if let enabled { body["enabled"] = enabled }
+        if let entities { body["entities"] = entities.sorted() }
+        return try JSONSerialization.data(withJSONObject: body)
+    }
+}

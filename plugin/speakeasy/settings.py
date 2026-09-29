@@ -35,12 +35,15 @@ DEFAULTS: dict[str, Any] = {
     # A brief spoken update on long tasks. (Where a task went, e.g. a new thread, is always said.)
     "speech": {"progress": True},
     "brief": {"auto_refresh": True, "include_recent_voice": True},
+    # Instant home control through Home Assistant (offered when Hermes has it set up). entities:
+    # the devices it may use (None = not chosen yet: lights, thermostats and fans).
+    "home_control": {"enabled": False, "entities": None},
     "image_roots": [],
     # Written by `hermes voice setup`: the URL other devices use to reach this server (a tailnet
     # HTTPS name when Tailscale was imported), reused by `hermes voice pair`.
     "server": {"advertised_url": "", "tailscale_name": ""},
     # Set by POST /voice/onboarding (or `hermes voice config set`) when the user confirmed them.
-    "onboarding": {"names_set": False, "delivery_set": False},
+    "onboarding": {"names_set": False, "delivery_set": False, "home_offered": False},
 }
 DEFAULT_VOICES = {"codex": "cove", "openai": "marin"}
 # Voices each provider accepts; they do not overlap (the ChatGPT-sign-in voice model rejects API
@@ -107,9 +110,10 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(s["hermes_profile"], str) or not PROFILE_RE.fullmatch(s["hermes_profile"]):
         raise SettingsError("hermes_profile must be a profile name")
     s["delivery"] = validate_delivery(s["delivery"])
+    s["home_control"] = validate_home_control(s["home_control"])
     s["server"] = validate_server(s["server"])
     for group, keys in (("continuity", ("enabled",)), ("speech", ("progress",)), ("brief", ("auto_refresh", "include_recent_voice")),
-                        ("onboarding", ("names_set", "delivery_set"))):
+                        ("onboarding", ("names_set", "delivery_set", "home_offered"))):
         for key in keys:
             if not isinstance(s[group].get(key), bool):
                 raise SettingsError(f"{group}.{key} must be true or false")
@@ -118,6 +122,21 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
             isinstance(r, str) and Path(r).expanduser().is_absolute() for r in roots):
         raise SettingsError("image_roots must be a list of absolute paths")
     return s
+
+
+ENTITY_ID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
+
+
+def validate_home_control(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or not isinstance(raw.get("enabled", False), bool):
+        raise SettingsError("home_control.enabled must be true or false")
+    entities = raw.get("entities")
+    if entities is not None:
+        if not isinstance(entities, list) or len(entities) > 150 or not all(
+                isinstance(e, str) and ENTITY_ID_RE.fullmatch(e) for e in entities):
+            raise SettingsError("home_control.entities must be a list of Home Assistant entity ids (up to 150)")
+        entities = sorted(set(entities))
+    return {"enabled": raw.get("enabled", False), "entities": entities}
 
 
 def validate_channel(raw: Any) -> dict[str, Any]:
