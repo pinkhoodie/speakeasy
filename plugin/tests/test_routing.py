@@ -330,7 +330,7 @@ def test_new_thread_channel_runs_the_task_in_a_thread(server, service, hermes):
     worker.delegate("call_t", "Put this in work: move my 3pm meeting to Thursday")
     done = wait_for(lambda: [t for t in tasks(server) if t["status"] == "completed"])[0]
     assert runner.opened and runner.opened[0][0] == "discord:111" and hermes.calls == []
-    assert "Started that in a new thread in #work." in spoken(worker)
+    assert "Sending that to #work." in spoken(worker)  # named by the user: a short confirmation
     assert "dark mode" in done["result"]["full"] and not done["result"]["full"].startswith("Voice:")
     key = next(iter(worker.interaction.runs.values())).idem_key
     assert service.store.continued_for(key)["session_id"] == "thread_session_1"  # follow-ups go there
@@ -344,8 +344,43 @@ def test_thread_destination_wording_reads_as_a_place():
     from speakeasy.prompt import builder as P
     for label, spoken_as in (("your Discord", "your Discord"), ("#voice on Discord", "#voice")):
         assert P.new_thread_in(label) == f"a new thread in {label}"
-        assert P.ack_channel_thread(label) == f"Started that in a new thread in {spoken_as}."
-    assert P.ack_channel_post("your Telegram") == "That'll go to your Telegram."
+        assert P.ack_channel_thread(label) == f"Sending that to {spoken_as}."
+    assert P.ack_channel_post("your Telegram") == "Sending that to your Telegram."
+
+
+def thinking(worker):
+    return [c for k, _, c in worker.sent if k == "session.thinking.append"]
+
+
+def test_a_thread_picked_by_topic_is_not_announced(server, service, hermes):
+    """Where work goes is plumbing: unless the user named the place, nothing is spoken about it;
+    the voice gets it as a silent note for "where did that go?"."""
+    runner = FakeThreads()
+    service.rt.threads = runner
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [dict(WORK, new_thread=True)]}})
+    service.rt.topical_channel = lambda label: channels.Choice(channels.Channel(**{k: WORK[k] for k in ("target", "label", "topic")}, new_thread=True), "topic")
+    _, worker = start_call(server, service)
+    worker.delegate("call_q", "move my 3pm meeting to Thursday")
+    wait_for(lambda: [t for t in tasks(server) if t["status"] == "completed"])
+    assert runner.opened
+    assert not any("#work" in line or "thread" in line.lower() for line in spoken(worker))
+    assert any("#work" in note and "do not say" in note for note in thinking(worker))
+
+
+def test_continuing_a_conversation_never_reads_its_title():
+    note = P_builder().continuing_in_note("Discord thread: Refactor the lisbon itinerary into days")
+    assert "do not read this aloud" in note and "never read the conversation's name" in note
+
+
+def test_the_prompt_no_longer_asks_to_announce_where_work_went():
+    from speakeasy.prompt import builder as P
+    text = P.delivery_clause("your Discord", [WORK])
+    assert "say in one short line where" not in text and "only if" in text
+
+
+def P_builder():
+    from speakeasy.prompt import builder as P
+    return P
 
 
 def test_thread_failure_falls_back_to_posting(server, service, hermes):

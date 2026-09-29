@@ -602,12 +602,16 @@ class SidebandWorker:
         return any(f["speaker"] == "user" and f.get("at", 0) >= since and clean_transcript(f["text"]).strip()
                    for f in list(self.fragments))
 
-    async def say_where(self, delegation_id: str, line: str | None) -> None:
-        """Speak where a task went (a new thread, another channel). The voice model acknowledges
-        work on its own; this is the one thing only the server knows, so it is said as-is."""
+    async def say_where(self, delegation_id: str, line: str | None, place: str | None = None,
+                        named: bool = False) -> None:
+        """Where a task went (a new thread, another channel). Spoken only when the user named the
+        place ("put that in #work"): otherwise the voice model's own acknowledgement is enough and
+        the place is a silent note it can use if asked. The app shows it either way."""
         self.handoff_at.pop(delegation_id, None)
-        if line:
+        if line and named:
             await self.append("session.commentary.append", delegation_id, line)
+        elif place:
+            await self.append("session.thinking.append", delegation_id, P.where_note(place))
 
     def record_timing(self, task_id: str, idem: str) -> None:
         ms = self.route_timings.pop(task_id, None)
@@ -932,11 +936,13 @@ class SidebandWorker:
         if channel is not None and channel.new_thread and runner is not None:
             available = await asyncio.to_thread(runner.available, channel.target)
             if available:
-                await self.start_thread_task(delegation_id, revision, context, request, channel)
+                await self.start_thread_task(delegation_id, revision, context, request, channel,
+                                             named=choice.how == "named")
                 return
+        named = choice.how == "named"
         if routed:
             await self.start_task(delegation_id, revision, context, request, deliver_to=channel.target,
-                                  ack=P.ack_channel_post(channel.label))
+                                  ack=P.ack_channel_post(channel.label), ack_place=channel.label, named=named)
             return
         await self.start_task(delegation_id, revision, context, request)
 
@@ -1025,7 +1031,8 @@ class SidebandWorker:
     async def start_task(self, task_id: str, revision: int, context: str, request: str,
                          focus: str | None = None, voice_id: str | None = None,
                          session_id: str | None = None, replaces: str | None = None,
-                         deliver_to: str | None = None, ack: str | None = None) -> None:
+                         deliver_to: str | None = None, ack: str | None = None,
+                         ack_place: str | None = None, named: bool = False) -> None:
         idem = self._idem(task_id, revision)
         backend = BackendRun(task_id, revision, idem, voice_id=voice_id, deliver_to=deliver_to)
         delegation_id = backend.say_id
@@ -1058,7 +1065,10 @@ class SidebandWorker:
         parallel = [r for r in (notice_text(self.store.request_text(k), 80) for k in others[-4:]) if r]
         if voice_id is None:
             await self.append("session.thinking.append", delegation_id, P.work_started_note(parallel))
-            await self.say_where(delegation_id, ack if deliver_to and not replaces else None)
+            if deliver_to and not replaces:
+                await self.say_where(delegation_id, ack, place=ack_place, named=named)
+            else:
+                self.handoff_at.pop(delegation_id, None)
         try:
             run_id = await asyncio.to_thread(self.hermes.start_run, prompt, idem, session_id)
             self.store.update_run(idem, run_id, "running")
@@ -1193,7 +1203,7 @@ class SidebandWorker:
             await self.append("session.commentary.append", delegation_id, P.continuing_failed_note(where))
 
     async def start_thread_task(self, task_id: str, revision: int, context: str, request: str,
-                                channel: channels.Channel) -> None:
+                                channel: channels.Channel, named: bool = False) -> None:
         """Open a new thread in the channel and run the task there, as if typed in it: the user can
         follow up in that thread, and the call hears its first answer. Falls back to running here
         and posting the answer to the channel when Hermes can't open the thread."""
@@ -1212,7 +1222,7 @@ class SidebandWorker:
         except (ThreadError, OSError) as exc:
             logger.info("speakeasy: new thread unavailable, posting to the channel instead (%s)", exc)
             await self.start_task(task_id, revision, context, request, deliver_to=channel.target,
-                                  ack=P.ack_channel_post(channel.label))
+                                  ack=P.ack_channel_post(channel.label), ack_place=channel.label, named=named)
             return
         state, _ = self.store.reserve_run(idem, self.interaction.interaction_id, task_id, revision)
         if state != "created":
@@ -1227,7 +1237,7 @@ class SidebandWorker:
         with self.interaction.lock:
             backend.status = "running"
         self.publish()
-        await self.say_where(delegation_id, P.ack_channel_thread(channel.label))
+        await self.say_where(delegation_id, P.ack_channel_thread(channel.label), place=where, named=named)
 
         def on_session(session_id: str) -> None:
             # Follow-ups to this task continue inside the thread (thread continuity).

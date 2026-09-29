@@ -71,8 +71,9 @@ def delivery_clause(delivery_label: str, channels: list[dict[str, Any]] | None =
     fallback = delivery_label or "the app only"
     return (clause + ". New tasks can also go to these chats: " + listed + ". A task goes where "
             + "{user_name} names (\"start this in <channel>\"), else to the channel whose topic fits, else to "
-            + fallback + "; follow-ups stay where their task runs. When a task starts, say in one short line where "
-            "it went")
+            + fallback + "; follow-ups stay where their task runs. Where a task goes is background: don't mention "
+            "threads, channels, sessions or conversation names when starting work (the app shows it); say where only "
+            "if {user_name} named the place or asks where it went")
 
 
 def rules_text(names: Names, delivery_label: str = "", channels: list[dict[str, Any]] | None = None) -> str:
@@ -431,11 +432,19 @@ def new_thread_in(label: str) -> str:
 
 
 def ack_channel_thread(label: str) -> str:
-    return f"Started that in {new_thread_in(short_place(label))}."
+    """Spoken only when the user named the place: a short confirmation, not a status report."""
+    return f"Sending that to {short_place(label)}."
 
 
 def ack_channel_post(label: str) -> str:
-    return f"That'll go to {short_place(label)}."
+    return f"Sending that to {short_place(label)}."
+
+
+def where_note(place: str) -> str:
+    """Where a task went, as silent background: the voice acknowledges work in its own words and
+    brings up the place only if asked. Plumbing is not news."""
+    return (f"Background, do not say this now: this task runs in {place}. Don't mention threads, channels or "
+            "where it went unless asked where it went or where to find it; then answer in a few words.")
 
 
 def progress_fallback(steps: list[str], milestone: str) -> str | None:
@@ -548,7 +557,12 @@ def added_to_task_note(earlier: str) -> str:
 
 
 def continuing_in_note(where: str) -> str:
-    return f"Picking that up in the {where} conversation; the answer lands there too."
+    """Silent background for continuing an earlier Hermes conversation. The conversation's name is an
+    auto-generated title: never read it aloud."""
+    return (f"Background, do not read this aloud: this continues an earlier conversation ({where}), and its answer "
+            "lands there too. If you acknowledge it, say you're picking up where you left off, naming the topic in "
+            "two or three words of your own; never read the conversation's name, and don't mention threads or sessions. "
+            "If asked where it went, say it continues that earlier conversation.")
 
 
 def continuing_failed_note(where: str) -> str:
