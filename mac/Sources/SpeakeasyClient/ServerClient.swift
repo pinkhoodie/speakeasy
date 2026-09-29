@@ -97,6 +97,13 @@ public final class ServerClient: @unchecked Sendable {
         try RoutingChoices.decode(try await data("/voice/routing", method: "POST",
                                                  body: try RoutingChoices.postBody(provider: provider, model: model, thinking: thinking)))
     }
+    public func homeControl() async throws -> HomeControlInfo {
+        try HomeControlInfo.decode(try await data("/voice/home", timeout: 30))
+    }
+    public func setHomeControl(enabled: Bool? = nil, entities: [String]? = nil) async throws -> HomeControlInfo {
+        try HomeControlInfo.decode(try await data("/voice/home", method: "PUT",
+                                                  body: try HomeControlInfo.putBody(enabled: enabled, entities: entities), timeout: 30))
+    }
     public func onboarding() async throws -> OnboardingStatus { OnboardingStatus.parse(try await data("/voice/onboarding")) }
     public func completeOnboarding(assistantName: String, userName: String, target: String?, continuity: Bool?) async throws {
         _ = try await data("/voice/onboarding", method: "POST", body: try OnboardingStatus.postBody(

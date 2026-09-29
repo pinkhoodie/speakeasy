@@ -16,6 +16,7 @@ struct SettingsView: View {
             BriefSettings().tabItem { Label("Voice brief", systemImage: "text.quote") }
             BehaviorSettings().tabItem { Label("Behavior", systemImage: "slider.horizontal.3") }
             DeliverySettings().tabItem { Label("Delivery", systemImage: "paperplane") }
+            HomeSettings().tabItem { Label("Home", systemImage: "house") }
             ConnectionSettings().tabItem { Label("Connection", systemImage: "network") }
             AboutSettings().tabItem { Label("About", systemImage: "info.circle") }
         }

@@ -5,11 +5,12 @@ import SpeakeasyClient
 import SwiftUI
 
 /// The guided first run, one screen per step:
-/// connect → microphone → voice sign-in → names → where finished work goes → task routing → voice brief → hotkey + try it.
+/// connect → microphone → voice sign-in → names → where finished work goes → task routing → home control
+/// (only when Hermes has Home Assistant) → voice brief → hotkey + try it.
 @MainActor
 final class OnboardingFlow: ObservableObject {
     enum Step: Int, CaseIterable {
-        case connect, microphone, voice, names, delivery, routing, brief, hotkey
+        case connect, microphone, voice, names, delivery, routing, home, brief, hotkey
         var title: String {
             switch self {
             case .connect: return "Connect to Hermes"
@@ -18,6 +19,7 @@ final class OnboardingFlow: ObservableObject {
             case .names: return "Names"
             case .delivery: return "Finished work"
             case .routing: return "Task routing"
+            case .home: return "Home control"
             case .brief: return "Voice brief"
             case .hotkey: return "Try it"
             }
@@ -87,6 +89,8 @@ final class OnboardingFlow: ObservableObject {
         case .microphone: return app.micAuthorization == .authorized
         case .voice: return app.status?.voiceReady == true
         case .brief: return true  // written in the background; shown and editable in Settings
+        // Only offered when Hermes has Home Assistant and it answered; else nothing to ask.
+        case .home: return app.home?.available != true
         default: return false
         }
     }
@@ -188,6 +192,7 @@ struct OnboardingView: View {
                 case .names: NamesStep(flow: flow)
                 case .delivery: DeliveryStep(flow: flow)
                 case .routing: RoutingStep(flow: flow)
+                case .home: HomeStep(flow: flow)
                 case .brief: BriefStep(flow: flow)
                 case .hotkey: HotkeyStep(flow: flow)
                 }
@@ -416,12 +421,58 @@ private struct RoutingStep: View {
                 saving = true
                 Task {
                     let ok = await app.saveRoutingEdit()
+                    if ok { await app.refreshHome() }  // decides whether the home step is offered
                     saving = false
                     if ok { flow.next() }
                 }
             }
         }
         .task { await app.refresh() }
+    }
+}
+
+// MARK: Home control (offered only when Hermes has Home Assistant)
+
+private struct HomeStep: View {
+    @ObservedObject var flow: OnboardingFlow
+    @EnvironmentObject var app: AppModel
+    @State private var selection: Set<String> = []
+    @State private var saving = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            StepHeader(title: "Home control", subtitle: "Control your home by voice, instantly.")
+            if let info = app.home, info.available {
+                HomeStepContent(selection: $selection, info: info)
+                    .frame(maxHeight: .infinity)
+            } else {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            if let error = app.homeError { Text(error).font(.caption).foregroundStyle(.orange) }
+            HStack {
+                Button("Back") { flow.back() }
+                Spacer()
+                Button("Not now") {
+                    Task { saving = true; await app.setHome(enabled: false); saving = false; flow.next() }
+                }
+                .disabled(saving)
+                Button("Turn on") {
+                    Task {
+                        saving = true
+                        let ok = await app.setHome(enabled: true, entities: Array(selection))
+                        saving = false
+                        if ok { flow.next() }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(saving || selection.isEmpty)
+            }
+            Text("You can change this any time in Settings › Home.").font(.caption).foregroundStyle(.secondary)
+        }
+        .task {
+            if app.home == nil { await app.refreshHome() }
+            selection = Set(app.home?.includedIDs ?? [])
+        }
     }
 }
 

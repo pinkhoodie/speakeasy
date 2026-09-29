@@ -140,6 +140,22 @@ async def main() -> None:
                                                                "delivery_target": "none", "write_brief": False}, token)
         check("POST /voice/onboarding with the app's body", code_ == 200, body_)
         (out / "onboarding_post.json").write_text(json.dumps(body_))
+    # Home control with a fake Home Assistant (no real one is contacted).
+    from test_home_control import FakeHA
+    from speakeasy.home_control import HomeControl
+    fake_ha = FakeHA()
+    svc = adapter.service
+    svc.home_control = HomeControl(svc.settings.get, lambda: ("http://ha.test:8123", "fake-token"),
+                                   plan_call=lambda m: None, client_factory=lambda url, token: fake_ha)
+    svc.rt.home = svc.home_control
+    code_, home_found = await run("GET", "/voice/home", token=token)
+    check("GET /voice/home finds Home Assistant", code_ == 200 and home_found.get("available") is True, home_found)
+    code_, home_on = await run("PUT", "/voice/home", {"enabled": True}, token)
+    check("PUT /voice/home turns it on with the default picks", code_ == 200 and home_on.get("enabled") is True, home_on)
+    if os.environ.get("SPEAKEASY_CONTRACT_DIR"):
+        out = Path(os.environ["SPEAKEASY_CONTRACT_DIR"])
+        (out / "home.json").write_text(json.dumps(home_found))
+        (out / "home_put.json").write_text(json.dumps(home_on))
     # Requests the Mac app sends, recorded by its tests (mac/Tests/.../Contract/requests/*.json).
     requests_dir = Path(__file__).resolve().parents[2] / "mac/Tests/SpeakeasyCoreTests/Contract/requests"
     for req_file in sorted(requests_dir.glob("*.json")) if requests_dir.is_dir() else []:

@@ -79,6 +79,9 @@ final class AppModel: ObservableObject {
     /// The server's preselected delivery target for onboarding (a connected home channel).
     @Published var suggestedDestination: String?
     @Published var onboarding: OnboardingStatus?
+    /// Instant home control (`/voice/home`); nil until loaded or on an older server.
+    @Published var home: HomeControlInfo?
+    @Published var homeError: String?
     @Published var lastError: String?
     @Published var refreshing = false
     @Published var callShortcut: KeyShortcut = Prefs.callShortcut
@@ -249,6 +252,28 @@ final class AppModel: ObservableObject {
         }
         onboarding = try? await api.onboarding()
         micAuthorization = AVCaptureDevice.authorizationStatus(for: .audio)
+    }
+
+    /// Loads home control: whether Home Assistant is found, on/off, every device it could use.
+    func refreshHome() async {
+        guard let api else { return }
+        do { home = try await api.homeControl(); homeError = nil }
+        catch { homeError = describe(error) }
+    }
+
+    /// Turns home control on/off and/or saves exactly which devices it may use.
+    @discardableResult
+    func setHome(enabled: Bool? = nil, entities: [String]? = nil) async -> Bool {
+        guard let api else { homeError = "Not connected"; return false }
+        do {
+            home = try await api.setHomeControl(enabled: enabled, entities: entities)
+            homeError = nil
+            if let s = try? await api.settings() { applySettings(s) }
+            return true
+        } catch {
+            homeError = describe(error)
+            return false
+        }
     }
 
     func refreshBrief() async {
