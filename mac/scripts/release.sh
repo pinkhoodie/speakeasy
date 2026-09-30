@@ -12,6 +12,7 @@
 #     then export SPEAKEASY_NOTARY_KEYCHAIN=~/Library/Keychains/login.keychain-db
 # Overrides: SPEAKEASY_DEVELOPER_ID (identity name), SPEAKEASY_NOTARY_PROFILE (default "speakeasy").
 set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Personal data / secrets gate: refuse to build or publish anything if the scan fails.
 "$ROOT/../scripts/scan-secrets.sh" || { echo "release: scan-secrets failed, nothing published" >&2; exit 1; }
@@ -23,7 +24,6 @@ latest_changes() {
 VERSION="${1:?usage: scripts/release.sh <version> [--publish]}"
 PUBLISH="${2:-}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: version must look like 0.2.0" >&2; exit 1; }
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 PROFILE="${SPEAKEASY_NOTARY_PROFILE:-speakeasy}"
 IDENTITY="${SPEAKEASY_DEVELOPER_ID:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}"
