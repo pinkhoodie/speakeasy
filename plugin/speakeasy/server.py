@@ -165,6 +165,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/voice/onboarding": self.service.onboarding,
                 "/voice/routing": self.service.routing_choices,
                 "/voice/home": self.service.get_home,
+                "/voice/brief/tune": self.service.get_tune,
             }
             if path in routes:
                 self._reply(200, routes[path]())
@@ -203,6 +204,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/voice/brief/rewrite":
                 self._reply(202, self.service.rewrite_brief())
+                return
+            if path == "/voice/brief/tune":
+                self._reply(202, self.service.start_tune())
+                return
+            if path == "/voice/brief/tune/apply":
+                self._reply(200, self.service.apply_tune(self._body()))
+                return
+            if path == "/voice/brief/tune/dismiss":
+                self._reply(200, self.service.dismiss_tune())
                 return
             if path == "/voice/onboarding":
                 self._reply(200, self.service.save_onboarding(self._body()))

@@ -78,6 +78,8 @@ class Runtime:
     progress_call: Callable[..., str | None] | None = None
     # Instant home control (home_control.HomeControl); None or turned off = every request goes to Hermes.
     home: Any = None
+    # The local log of ended calls that "Tune from my calls" learns from (tune.CallLog); None = not kept.
+    call_log: Any = None
 
     @property
     def names(self) -> P.Names:
@@ -477,11 +479,28 @@ class SidebandWorker:
         try:
             if history:
                 self.store.set_meta("recent_voice", json.dumps(history[-30:]))
+            if not paused and self.rt.call_log is not None:
+                self.rt.call_log.record(self.interaction.interaction_id, history, self.call_tasks(),
+                                        self.interaction.device_id)
             if not paused:
                 self.store.mark_call_ended()
                 self.still_working_notices()
         except Exception as exc:
             logger.warning("speakeasy: call-close bookkeeping failed: %s", type(exc).__name__)
+
+    def call_tasks(self) -> list[dict[str, Any]]:
+        """This call's tasks for the call log: what was asked, how it ended, the spoken answer."""
+        with self.interaction.lock:
+            keys = [(r.idem_key, r.status) for r in self.interaction.runs.values()]
+        out = []
+        for key, status in keys:
+            request = self.store.request_text(key)
+            if not request:
+                continue
+            work = self.store.work(idem_key=key) or {}
+            out.append({"request": request[:400], "title": self.store.title(key) or "", "status": status,
+                        "result": str(((work.get("result") or {}).get("spoken")) or "")[:400]})
+        return out
 
     def still_working_notices(self) -> None:
         with self.interaction.lock:

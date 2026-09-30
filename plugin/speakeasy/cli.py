@@ -76,6 +76,9 @@ def setup_parser(parser) -> None:
     routing.add_argument("--models", action="store_true", help="list every model of PROVIDER")
     home_ = sub.add_parser("home", help="Instant home control through Home Assistant: show, or turn on/off")
     home_.add_argument("state", nargs="?", choices=("on", "off", "status"), default="status")
+    tune_ = sub.add_parser("tune", help="Improve the voice brief from your recent calls (you review every edit)")
+    tune_.add_argument("action", nargs="?", choices=("start", "show", "apply", "dismiss"), default="show")
+    tune_.add_argument("ids", nargs="*", help="edit ids to apply (default: all)")
     reload_ = sub.add_parser("reload", help="Load a newly installed Speakeasy now, without restarting Hermes "
                                             "(ends a live call; running tasks keep going in Hermes)")
     reload_.add_argument("--timeout", type=float, default=30, help=argparse.SUPPRESS)
@@ -320,6 +323,69 @@ def cmd_home(home: Path, args) -> int:
         svc.close()
 
 
+def cmd_tune(home: Path, args) -> int:
+    """Runs in this process (like `hermes voice home`); the proposal is a file the app reads too."""
+    from .service import VoiceService, ServiceError
+    action = getattr(args, "action", "show")
+    svc = VoiceService(home, start_threads=False)
+    try:
+        if action == "start":
+            print("Reading your recent calls (this takes a minute or two)…")
+            try:
+                state = svc.tune.start(background=False)
+            except Exception as exc:
+                print(f"Can't tune yet: {exc}")
+                return 2
+            print(_format_tune(state))
+            return 0 if state.get("state") == "ready" else 1
+        state = svc.get_tune()
+        if action == "dismiss":
+            svc.dismiss_tune()
+            print("Dismissed the proposed edits.")
+            return 0
+        if action == "apply":
+            ids = getattr(args, "ids", None) or [e["id"] for e in state.get("edits", [])]
+            try:
+                done = svc.apply_tune({"accept": ids})
+            except ServiceError as exc:
+                print(f"Error: {exc.message}")
+                return 2
+            print(f"Applied {done.get('applied', 0)} edit(s) to your voice brief. Your next call uses it.")
+            return 0
+        print(_format_tune(state))
+        return 0
+    finally:
+        svc.close()
+
+
+def _format_tune(state: dict) -> str:
+    lines = []
+    if state.get("state") == "working":
+        return "Still reading your calls…"
+    if state.get("state") == "failed":
+        return f"The last tune failed: {state.get('error')}"
+    if state.get("state") != "ready":
+        return (f"No tune yet. {state.get('calls', 0)} recent call(s) to learn from. "
+                "Run `hermes voice tune start`.")
+    if state.get("summary"):
+        lines += [state["summary"], ""]
+    for e in state.get("edits", []):
+        verb = {"add": f"Add to {e.get('section')}", "change": "Change", "remove": "Remove"}[e["kind"]]
+        lines.append(f"[{e['id']}] {verb}")
+        if e.get("old"):
+            lines.append(f"    was: {e['old']}")
+        if e.get("new"):
+            lines.append(f"    now: {e['new']}")
+        lines.append(f"    why: {e['why']}" + (f" ({e['evidence']})" if e.get("evidence") else ""))
+    if state.get("product_issues"):
+        lines += ["", "Not something the brief can fix:"]
+        lines += [f"  - {i['what']}" + (f" ({i['evidence']})" if i.get("evidence") else "")
+                  for i in state["product_issues"]]
+    lines += ["", "Apply all with `hermes voice tune apply`, some with `hermes voice tune apply e1 e3`, "
+                  "or `hermes voice tune dismiss`."]
+    return "\n".join(lines)
+
+
 def _print_routing_model(out) -> None:
     from .router import AUX_TASK, routing_model
     out(f"• Task routing uses: {routing_model()}. Switch it with `hermes voice routing`, or set "
@@ -516,6 +582,8 @@ def handle(args) -> int:
         return cmd_routing(home, args)
     if command == "home":
         return cmd_home(home, args)
+    if command == "tune":
+        return cmd_tune(home, args)
     store = _store(home)
     if command == "devices":
         devices = store.devices()

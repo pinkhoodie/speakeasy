@@ -2,6 +2,19 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## 2026-09-29 (later) — Mac app 0.2.12, plugin 0.2.26–0.2.27
+
+**Tune your voice from your own calls**
+- Settings › Voice brief › Tune from my calls: your Hermes reads the last week of calls and suggests specific edits to what the voice knows about you, each with the moment that prompted it. You tick the ones you want; nothing changes otherwise. Problems a brief can't fix are listed separately.
+- Also from the terminal: `hermes voice tune start`.
+
+**Smoother calls**
+- "What's the status?" is answered right away from what the task has done so far, instead of waiting behind it.
+- "No, Hermes does" or "yeah, go" goes to the task you were just talking about, not a brand-new one.
+- Half-words and repeats no longer start extra tasks. "Make 'em dimmer" right after a lights command is instant.
+- The voice no longer says it can't do something or doesn't have access; it starts the work and lets the result say what happened.
+- Settings › About links to this list.
+
 ## September 29, 2026
 
 **Talk to your house** — Mac app 0.2.11, plugin 0.2.22–0.2.23

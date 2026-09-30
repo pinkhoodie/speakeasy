@@ -241,6 +241,51 @@ public struct VoiceBrief: Codable, Equatable, Sendable {
     }
 }
 
+/// `GET /voice/brief/tune`: brief edits Hermes proposes from recent calls, each reviewed by the user.
+public struct BriefTune: Codable, Equatable, Sendable {
+    public struct Edit: Codable, Equatable, Sendable, Identifiable {
+        public var id: String
+        public var kind: String          // add | change | remove
+        public var section: String?
+        public var old: String?
+        public var new: String?
+        public var why: String
+        public var evidence: String?
+    }
+    public struct Issue: Codable, Equatable, Sendable {
+        public var what: String
+        public var evidence: String?
+    }
+    public var state: String             // none | working | ready | failed
+    public var calls: Int
+    public var error: String?
+    public var summary: String
+    public var edits: [Edit]
+    public var productIssues: [Issue]
+
+    enum CodingKeys: String, CodingKey { case state, calls, error, summary, edits, productIssues = "product_issues" }
+
+    public init(state: String = "none", calls: Int = 0, error: String? = nil, summary: String = "",
+                edits: [Edit] = [], productIssues: [Issue] = []) {
+        self.state = state; self.calls = calls; self.error = error; self.summary = summary
+        self.edits = edits; self.productIssues = productIssues
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        state = (try? c.decodeIfPresent(String.self, forKey: .state)) ?? "none"
+        calls = (try? c.decodeIfPresent(Int.self, forKey: .calls)) ?? 0
+        error = try? c.decodeIfPresent(String.self, forKey: .error)
+        summary = (try? c.decodeIfPresent(String.self, forKey: .summary)) ?? ""
+        edits = (try? c.decodeIfPresent([Edit].self, forKey: .edits)) ?? []
+        productIssues = (try? c.decodeIfPresent([Issue].self, forKey: .productIssues)) ?? []
+    }
+
+    public static func applyBody(accept: [String]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: ["accept": accept], options: [])
+    }
+}
+
 /// `GET /voice/status`.
 public struct ServerStatus: Codable, Equatable, Sendable {
     public var assistantName: String?

@@ -40,6 +40,10 @@ used in the tests (timestamps and IDs will differ).
 | GET, PATCH | `/voice/settings` | device | Server settings |
 | GET, PUT | `/voice/brief` | device | The voice brief |
 | POST | `/voice/brief/rewrite` | device | Ask Hermes to rewrite the brief |
+| GET | `/voice/brief/tune` | device | Brief edits proposed from recent calls (state, edits, product issues) |
+| POST | `/voice/brief/tune` | device | Ask Hermes to propose edits from the last week of calls |
+| POST | `/voice/brief/tune/apply` | device | Apply the accepted edits: `{"accept": ["e1", ...]}` |
+| POST | `/voice/brief/tune/dismiss` | device | Discard the proposal |
 | GET | `/voice/status` | device | Provider, Hermes API, brief readiness |
 | GET | `/voice/destinations` | device | Where finished results can be posted |
 | POST | `/voice/destinations/suggest` | device | Ask Hermes to propose delivery channels (never saved) |
@@ -629,6 +633,18 @@ no secrets or card-like numbers, else **422**. A manual edit turns auto-refresh 
 POST `/voice/brief/rewrite` (body `{}`) asks Hermes to write a new brief in the background and
 returns `202` with the status (`state: "writing"`) and the current `brief`. 409 if the Hermes API
 is not configured. Poll GET or `/voice/status` → `brief_state`.
+
+
+### Tune from my calls
+
+`POST /voice/brief/tune` (body `{}`, 202) asks Hermes to read the last week of calls next to the brief
+and propose at most 8 edits. `GET /voice/brief/tune` returns
+`{"state": "none|working|ready|failed", "calls": N, "summary", "edits": [...], "product_issues": [...], "error"}`.
+Each edit is `{"id", "kind": "add|change|remove", "section" (add), "old" (change/remove: an exact brief line),
+"new" (add/change), "why", "evidence"}`; edits that don't match the brief or look like secrets are dropped
+server-side. `POST /voice/brief/tune/apply` with `{"accept": [ids]}` applies only those edits (the brief is
+then marked edited, so auto-refresh leaves it alone). Calls are kept locally in `call-log.jsonl` (owner-only,
+14 days / 60 calls); their text goes to the model Hermes uses only when a tune is requested.
 
 ## GET /voice/status
 
