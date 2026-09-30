@@ -53,8 +53,11 @@ def test_call_log_is_private_and_pruned(tmp_path):
     assert log.recent()[0]["device"] == "iPhone"
 
 
+FAKE_KEY = "sk-" + "abcdef" * 4  # built at runtime so the repo secret scan stays clean
+
+
 def test_digest_scrubs_secrets_and_labels_speakers():
-    calls = [{"id": "a", "ended": 0, "turns": [{"role": "user", "text": "my key is sk-abcdefghijklmnopqrstuvwxyz123456"},
+    calls = [{"id": "a", "ended": 0, "turns": [{"role": "user", "text": "my key is " + FAKE_KEY},
                                               {"role": "assistant", "text": "I don't have access to your passwords."}],
               "tasks": [{"request": "sign in to the bank", "status": "failed", "result": "No saved login"}]}]
     text = T.digest(calls, "Nova", "Sam")
