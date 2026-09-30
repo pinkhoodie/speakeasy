@@ -15,7 +15,7 @@ set -euo pipefail
 
 # The newest dated section of CHANGELOG.md, used as the release notes (and so the update prompt).
 latest_changes() {
-    awk '/^## /{n++} n==1 && !/^## /{print}' "$ROOT/CHANGELOG.md" | sed -e '/./,$!d'
+    awk '/^## /{n++} n==1 && !/^## /{print}' "$ROOT/../CHANGELOG.md" | sed -e '/./,$!d'
 }
 VERSION="${1:?usage: scripts/release.sh <version> [--publish]}"
 PUBLISH="${2:-}"
