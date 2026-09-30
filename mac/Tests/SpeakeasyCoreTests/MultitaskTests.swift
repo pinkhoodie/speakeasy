@@ -204,8 +204,8 @@ final class MultitaskTests: XCTestCase {
 
     func testTaskUsesTitleOverRequestWhenNamed() {
         var info = WorkInfo(runID: "r1", status: "working",
-                            events: [WorkEventItem(kind: "request", text: "What's the weather gonna be like this weekend?", at: nil)])
-        XCTAssertEqual(TaskItem(id: "d1", info: info).name, "What's the weather gonna be like this weekend?")
+                            events: [WorkEventItem(kind: "request", text: "Forecast for Saturday?", at: nil)])
+        XCTAssertEqual(TaskItem(id: "d1", info: info).name, "Forecast for Saturday?")
         info.title = "Weekend weather"
         XCTAssertEqual(TaskItem(id: "d1", info: info).name, "Weekend weather")
         let parsed = TaskItem(json: ["task_id": "d1", "run_id": "r1", "status": "working", "title": "Weekend weather"] as [String: Any])

@@ -145,7 +145,7 @@ def derive_tool_status(tool: Any, preview: Any) -> tuple[str, str] | None:
 # A command someone must paste into a terminal. Fenced blocks count whole; a bare line counts when it
 # starts with a shell command or chains/expands like one, and doesn't read as a sentence.
 SHELL_START_RE = re.compile(
-    r"^(?:\$ )?(?:sudo|brew|launchctl|mkdir|chmod|chown|curl|wget|ssh|scp|cd|git|gh|npm|npx|pnpm|yarn|pip3?|"
+    r"^(?:\$ )?(?:sudo|brew|install|printf|tee|launchctl|mkdir|chmod|chown|curl|wget|ssh|scp|cd|git|gh|npm|npx|pnpm|yarn|pip3?|"
     r"python3?|uv|hermes|defaults|open|killall|export|echo|cat|cp|mv|rm|ln|tailscale|docker|colima|xcode-select|"
     r"softwareupdate|networksetup|security|op|systemctl|launchd|pmset|codesign|xattr|diskutil)\b[^\n]*$")
 SHELL_MARK_RE = re.compile(r"&&|\|\||\$\(|>>|\s\|\s|~/|--[a-z]")

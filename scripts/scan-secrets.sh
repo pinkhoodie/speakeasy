@@ -16,8 +16,9 @@ patterns=(
   '[0-9]{17,20}'                     # Discord/Telegram-style IDs
 )
 extra_file="${SPEAKEASY_PRIVATE_TERMS:-$HOME/.config/speakeasy/private-terms.txt}"   # local personal terms, one per line
-if [[ -n "${SPEAKEASY_PRIVATE_TERMS:-}" && ! -f "$SPEAKEASY_PRIVATE_TERMS" ]]; then
-  echo "scan-secrets: SPEAKEASY_PRIVATE_TERMS points at a missing file: $SPEAKEASY_PRIVATE_TERMS" >&2; exit 2
+if [[ ! -f "$extra_file" && -z "${SPEAKEASY_NO_PRIVATE_TERMS:-}" ]]; then
+  echo "scan-secrets: personal-terms list missing ($extra_file). Refusing to pass without it." >&2
+  echo "  (set SPEAKEASY_NO_PRIVATE_TERMS=1 only on machines that never held personal data)" >&2; exit 2
 fi
 allow_file="${SPEAKEASY_ALLOW_TERMS:-}"     # optional local file of exact public strings that may contain a term
 status=0
@@ -50,5 +51,9 @@ if [[ -n "$extra_file" && -f "$extra_file" ]]; then
   done < "$extra_file"
 fi
 rm -f /tmp/speakeasy-scan.$$
+# Real sentences from your own voice calls must never be pasted into tests or docs.
+if [[ -z "${SPEAKEASY_NO_CALL_CHECK:-}" ]] && command -v python3 >/dev/null; then
+  python3 scripts/check-real-calls.py || status=1
+fi
 [[ $status -eq 0 ]] && echo "scan-secrets: clean"
 exit $status

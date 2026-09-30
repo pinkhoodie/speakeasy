@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 NO_SESSION_AFTER_S = 30 * 60      # the thread never started a turn
 NO_ANSWER_AFTER_S = 3 * 3600      # a turn started but never finished
-LOST_TRACK = "Lost track of this after a restart; whatever happened is in its thread."
+INTERRUPTED_NOTE = "Lost track of this after a restart; whatever happened is in its thread."
 NEVER_STARTED = "The thread never started working on this."
 
 
@@ -55,7 +55,7 @@ def sweep(store: Any, state_db: Path, image_roots: Callable[[], tuple[Path, ...]
             # A known thread with no turn never started; an unknown thread (tasks from before the
             # thread was recorded) or a turn that never finished is simply lost track of.
             never = not session_id and bool(task.get("thread_id"))
-            store.progress(key, "result", NEVER_STARTED if never else LOST_TRACK)
+            store.progress(key, "result", NEVER_STARTED if never else INTERRUPTED_NOTE)
             store.update_run(key, None, "interrupted")
             settled.append((key, "interrupted"))
     if settled:

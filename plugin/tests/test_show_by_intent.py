@@ -103,7 +103,7 @@ def test_a_picture_from_a_thread_task_still_pops_up(home, hermes):
 
         def wait(self, opened, on_session, on_title=None):
             on_session("thread_session_1")
-            return (f"Voice: hotel\nYou stayed at Lisbon Experimental. Here's the main building:\nMEDIA:{photos[0]}\n"
+            return (f"Voice: hotel\nThe Lisbon hotel, front view:\nMEDIA:{photos[0]}\n"
                     f"And a typical room:\nMEDIA:{photos[1]}")
 
     svc, workers = _svc(home, SHOW.replace('"channel": null', '"channel": "#life"'))
@@ -113,7 +113,7 @@ def test_a_picture_from_a_thread_task_still_pops_up(home, hermes):
         {"label": "#life", "target": "discord:222", "topic": "life", "new_thread": True}]}})
     try:
         created = svc.create_session({"sdp": SDP}, "req_see_3")
-        workers[-1].delegate("call_see_3", "send me a picture of the hotel I stayed at in Lisbon")
+        workers[-1].delegate("call_see_3", "show the Lisbon hotel photo")
         feed = svc.interaction(created["interaction_id"]).feed
         show = wait_for(lambda: _shows(feed))[-1]
         assert P.SHOW_IT_FOCUS.strip() in runner.opened[0], "the thread task is told to bring back a picture"

@@ -2,8 +2,8 @@
 from speakeasy import router, text
 from speakeasy.prompt import builder as P
 
-SETUP = router.OpenTask("t_setup", "Okay, cool. Uh, continue with the setup of the new computer", "running", age_s=300)
-DOCK = router.OpenTask("t_dock", "Can you organize my dock the way that it is on the laptop", "completed",
+SETUP = router.OpenTask("t_setup", "Right. Keep going with provisioning the new computer", "running", age_s=300)
+DOCK = router.OpenTask("t_dock", "Copy the laptop's dock layout over", "completed",
                        "Your dock matches the laptop now.", age_s=600)
 FOOD = router.OpenTask("t_food", "Find a taco spot open near me", "running", age_s=90)
 
@@ -13,7 +13,7 @@ def never_called(_messages):
 
 
 def test_status_questions_are_answered_not_queued():
-    for said in ["What's the status", "Can you get an update on what's happening with the setup",
+    for said in ["What's the status", "Any progress on provisioning",
                  "Are you still checking?", "How we looking", "how's the taco search going"]:
         d = router.decide(said, [DOCK, SETUP, FOOD], None, [], never_called)
         assert d.parts[0].kind == router.STATUS, said

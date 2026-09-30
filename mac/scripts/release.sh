@@ -13,6 +13,9 @@
 # Overrides: SPEAKEASY_DEVELOPER_ID (identity name), SPEAKEASY_NOTARY_PROFILE (default "speakeasy").
 set -euo pipefail
 
+# Personal data / secrets gate: refuse to build or publish anything if the scan fails.
+"$ROOT/../scripts/scan-secrets.sh" || { echo "release: scan-secrets failed, nothing published" >&2; exit 1; }
+
 # The newest dated section of CHANGELOG.md, used as the release notes (and so the update prompt).
 latest_changes() {
     awk '/^## /{n++} n==1 && !/^## /{print}' "$ROOT/../CHANGELOG.md" | sed -e '/./,$!d'

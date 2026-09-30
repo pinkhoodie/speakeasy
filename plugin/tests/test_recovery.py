@@ -87,7 +87,7 @@ def test_tasks_that_never_answer_are_closed_after_a_while(tmp_path):
     assert status(store, "fresh") == "running"
     events = [e["text"] for e in store.work(idem_key="no_turn")["events"]]
     assert recovery.NEVER_STARTED in events
-    assert recovery.LOST_TRACK in [e["text"] for e in store.work(idem_key="unknown")["events"]]
+    assert recovery.INTERRUPTED_NOTE in [e["text"] for e in store.work(idem_key="unknown")["events"]]
 
 
 def test_regular_runs_are_not_touched(tmp_path):

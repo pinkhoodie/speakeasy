@@ -693,17 +693,17 @@ def test_task_gets_a_semantic_name_after_the_instant_label(home, hermes):
                        openai_worker=lambda rt, i: workers.append(FakeLiveWorker(rt, i)) or workers[-1],
                        route_call=lambda m: None,
                        title_call=lambda request: "Tomorrow's weather in New York",
-                       polish_call=lambda request: "What will the weather be like in New York tomorrow?")
+                       polish_call=lambda request: "Forecast for Chicago on Friday?")
     svc.settings.patch({"voice": {"provider": "openai"}})
     try:
         svc.create_session({"sdp": SDP}, "req_title")
-        workers[-1].delegate("call_t", "What's the weather going to look like tomorrow in New York")
+        workers[-1].delegate("call_t", "Chicago forecast for Friday please")
         wait_for(lambda: len(hermes.calls) == 1)
         key = next(iter(workers[-1].interaction.runs.values())).idem_key
         wait_for(lambda: svc.store.title(key) == "Tomorrow's weather in New York")
         wait_for(lambda: (svc.store.work(idem_key=key) or {}).get("summary")
-                 == "What will the weather be like in New York tomorrow?")
-        assert svc.store.request_text(key).startswith("What's the weather going")  # raw words kept
+                 == "Forecast for Chicago on Friday?")
+        assert svc.store.request_text(key).startswith("Chicago forecast for Friday")  # raw words kept
     finally:
         svc.close()
 
@@ -738,9 +738,9 @@ def test_semantic_name_never_overwrites_a_better_name(home, hermes):
 
 
 def test_polished_request_rejects_answers_and_junk():
-    said = "um so like check the weather tomorrow in new york I guess"
-    assert router.clean_polished('{"request": "Check the weather in New York tomorrow."}', said) \
-        == "Check the weather in New York tomorrow."
+    said = "um so like check the forecast friday in chicago I guess"
+    assert router.clean_polished('{"request": "Check the Chicago forecast for Friday."}', said) \
+        == "Check the Chicago forecast for Friday."
     assert router.clean_polished("```json\n{\"request\": \"Check the weather.\"}\n```", said) == "Check the weather."
     assert router.clean_polished('{"request": ""}', said) is None
     assert router.clean_polished('{"request": "' + "It will be sunny with highs near 70. " * 10 + '"}', said) is None
@@ -749,7 +749,7 @@ def test_polished_request_rejects_answers_and_junk():
 
 def test_thread_task_asks_for_an_email_draft_card():
     names = P.Names.from_settings(S.validate({}))
-    message = P.thread_task_message(names, "draft an email to myself with my Portugal details", "Portugal email", "")
+    message = P.thread_task_message(names, "write me a note summarizing the Portugal plans", "Portugal email", "")
     assert "`email-draft`" in message and "do NOT send" in message
 
 
@@ -761,7 +761,7 @@ def test_thread_email_draft_becomes_an_approvable_card(server, service, hermes):
     service.rt.threads = FakeThreads(answer=answer)
     service.settings.patch({"delivery": {"target": "telegram:555", "channels": [dict(WORK, new_thread=True)]}})
     _, worker = start_call(server, service)
-    worker.delegate("call_e", "Put this in work: draft an email to myself with my Portugal details")
+    worker.delegate("call_e", "Put this in work: write me a note summarizing the Portugal plans")
     done = wait_for(lambda: [t for t in tasks(server) if t["status"] == "completed"])[0]
     assert "email-draft" not in done["result"]["full"]
     key = next(iter(worker.interaction.runs.values())).idem_key
@@ -779,14 +779,14 @@ def test_voice_rules_never_claim_a_draft_before_it_exists():
 
 def test_new_task_shows_what_it_was_handed_instead_of_a_bare_wait(server, service, hermes):
     service.rt.title_call = lambda request: "Draft Portugal trip email"
-    service.rt.polish_call = lambda request: "Draft an email to me with all my Portugal details."
+    service.rt.polish_call = lambda request: "Write me a note summarizing the Portugal plans."
     service.rt.status_call = lambda request: "Drafting your Portugal trip email"
     hermes.hold = True   # Hermes is still working and hasn't reported any progress of its own
     _, worker = start_call(server, service)
-    worker.delegate("call_s", "can you draft an email to me with uh all of my Portugal details")
+    worker.delegate("call_s", "uh, write me a note summarizing the Portugal plans")
     task = wait_for(lambda: [t for t in tasks(server) if t.get("short_status") == "Drafting your Portugal trip email"])[0]
     assert task["title"] == "Draft Portugal trip email"
-    assert task["detail"] == "Handed to Hermes: Draft an email to me with all my Portugal details."
+    assert task["detail"] == "Handed to Hermes: Write me a note summarizing the Portugal plans."
 
 
 def test_handoff_status_never_overrides_real_progress(service):

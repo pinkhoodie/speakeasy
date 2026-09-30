@@ -16,7 +16,7 @@ def md(mime: str, blob: bytes) -> str:
 
 
 def test_inline_images_from_the_api_become_picture_cards(tmp_path: Path) -> None:
-    output = ("Here are two photos of the hotel. The first is the main building.\n\n"
+    output = ("Two renders attached. Render one shows the front elevation.\n\n"
               + md("image/jpeg", JPEG) + "\n\n" + md("image/png", PNG))
     assert len(output) > 8000  # the display-text cap used to cut these mid-image
     result = split_result(output, (tmp_path,))
@@ -25,7 +25,7 @@ def test_inline_images_from_the_api_become_picture_cards(tmp_path: Path) -> None
     assert [Path(c["path"]).read_bytes() for c in images] == [JPEG, PNG]
     assert all(tmp_path in Path(c["path"]).parents for c in images)
     assert "base64" not in result["full"] and "data:" not in result["full"]
-    assert result["full"].startswith("Here are two photos")
+    assert result["full"].startswith("Two renders attached")
     assert all("path" not in c for c in public_result(result)["cards"])  # the app never sees paths
     assert delivery_text(result).count("MEDIA:") == 2  # chat delivery still gets the pictures
 
