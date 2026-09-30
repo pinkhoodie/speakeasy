@@ -634,6 +634,14 @@ def still_working_notice(request: str | None, short_status: str | None) -> str:
     return text + (f" ({status})" if status else "")
 
 
+def pointer_notice(title: str | None, where: str) -> str:
+    """"Done: <task> → <link>". A Discord chat or thread id becomes a clickable <#id> mention."""
+    platform, _, rest = where.partition(":")
+    ref = rest.split(":")[-1] if rest else ""
+    place = f"<#{ref}>" if platform == "discord" and ref.isdigit() else f"your {platform.title()}"
+    return f"Done: {notice_text(title, 120) or 'a voice task'} → {place}"
+
+
 def needs_you_notice(names: Names, summary: str | None) -> str:
     return f"Needs you: {notice_text(summary, 300) or names.assistant_name + ' is waiting for your approval'}"
 

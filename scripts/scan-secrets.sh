@@ -15,7 +15,10 @@ patterns=(
   '\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}\b'  # tailnet IPs
   '[0-9]{17,20}'                     # Discord/Telegram-style IDs
 )
-extra_file="${SPEAKEASY_PRIVATE_TERMS:-}"   # optional local file of personal terms, one per line
+extra_file="${SPEAKEASY_PRIVATE_TERMS:-$HOME/.config/speakeasy/private-terms.txt}"   # local personal terms, one per line
+if [[ -n "${SPEAKEASY_PRIVATE_TERMS:-}" && ! -f "$SPEAKEASY_PRIVATE_TERMS" ]]; then
+  echo "scan-secrets: SPEAKEASY_PRIVATE_TERMS points at a missing file: $SPEAKEASY_PRIVATE_TERMS" >&2; exit 2
+fi
 allow_file="${SPEAKEASY_ALLOW_TERMS:-}"     # optional local file of exact public strings that may contain a term
 status=0
 for p in "${patterns[@]}"; do

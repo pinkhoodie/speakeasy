@@ -351,6 +351,14 @@ class Notices:
     def needs_you(self, request_id: str, summary: str | None) -> None:
         self.post(f"approval:{request_id}", P.needs_you_notice(self.names(), summary))
 
+    def pointer(self, run_id: str, title: str | None, where: str | None) -> None:
+        """One line in the voice channel for work whose answer landed somewhere else (another channel,
+        a thread, an older conversation), so the voice channel is a complete log of every voice task."""
+        home = self.target()
+        if not where or not home or home == "none" or where == home:
+            return
+        self.post(f"pointer:{run_id}", P.pointer_notice(title, where), limit=400, target=home)
+
     def answered(self, run_id: str, full: str | None, target: str | None = None) -> None:
         """Post a finished answer in full, once per run (`hermes send` splits long text), to the
         task's routed channel when it has one, else the default target."""
@@ -535,7 +543,7 @@ class SidebandWorker:
                     continue
                 work = self.store.work(run_id) or {}
                 short = work.get("short_status") if work.get("status_source") != "system" else None
-                self.notices.still_working(run_id, self.store.request_text(key), short)
+                self.notices.still_working(run_id, self.store.title(key) or self.store.request_text(key), short)
         except Exception as exc:
             logger.warning("speakeasy: still-working notices failed: %s", type(exc).__name__)
 
@@ -1174,7 +1182,7 @@ class SidebandWorker:
                 backend.status, backend.error = "failed", str(exc)[:240]
             self.publish()
             if backend.run_id:
-                self.notices.stopped(backend.run_id, "failed", self.store.request_text(idem))
+                self.notices.stopped(backend.run_id, "failed", self.store.title(idem) or self.store.request_text(idem))
             await self.append("session.commentary.append", delegation_id, P.FAILED_SPOKEN)
 
     async def start_continuity_task(self, task_id: str, revision: int, context: str, request: str,
@@ -1346,7 +1354,9 @@ class SidebandWorker:
         await self.handle_hermes_event(backend, {"event": "run.completed", "output": P.without_voice_header(answer),
                                                  "continued": True,
                                                  "thread_target": f"{channel.target}:{opened.thread_id}"
-                                                 if channel.target.count(":") == 1 else None})
+                                                 if channel.target.count(":") == 1 else None,
+                                                 "pointer_target": None if channel.target == self.notices.target()
+                                                 else f"{opened.platform}:{opened.thread_id}"})
 
     async def reconcile_stream_end(self, backend: BackendRun, cause: Exception | None = None) -> None:
         if not backend.run_id:
@@ -1367,7 +1377,7 @@ class SidebandWorker:
         with self.interaction.lock:
             backend.status, backend.approval, backend.error = "ambiguous", None, detail
         self.publish()
-        self.notices.stopped(backend.run_id, "ambiguous", self.store.request_text(backend.idem_key))
+        self.notices.stopped(backend.run_id, "ambiguous", self.store.title(backend.idem_key) or self.store.request_text(backend.idem_key))
         await self.append("session.commentary.append", backend.say_id, P.lost_track_note(self.names))
 
     async def handle_hermes_event(self, backend: BackendRun, event: dict[str, Any]) -> None:
@@ -1484,11 +1494,13 @@ class SidebandWorker:
                 siblings = [r for r in head.runs.values()
                             if r is not backend and r.say_id == delegation_id and r.status in ACTIVE_RUN_STATES]
             if status != "completed" and backend.run_id and not backend.run_id.startswith(LOCAL_RUN_PREFIX):
-                self.notices.stopped(backend.run_id, status, self.store.request_text(idem))
+                self.notices.stopped(backend.run_id, status, self.store.title(idem) or self.store.request_text(idem))
             if status == "completed" and backend.run_id and result and not event.get("continued"):
                 self.notices.answered(backend.run_id, delivery_text(result), backend.deliver_to)
+                self.notices.pointer(backend.run_id, self.store.title(idem), backend.deliver_to)
             elif status == "completed" and result and event.get("thread_target"):
                 self.notices.commands(backend.run_id or idem, result.get("full"), event["thread_target"])
+                self.notices.pointer(backend.run_id or idem, self.store.title(idem), event.get("pointer_target"))
             for draft in stored_drafts:
                 if not self.call_connected():
                     self.notices.draft_waiting(draft["draft_id"], draft.get("subject"))
