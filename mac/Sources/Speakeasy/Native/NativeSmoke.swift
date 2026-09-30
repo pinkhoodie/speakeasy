@@ -102,7 +102,7 @@ enum PreviewFixtures {
         return rep.representation(using: .png, properties: [:])
     }
 
-    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "looking", "email-draft", "ended"]
+    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "looking", "email-draft", "ended", "home"]
 
     static func state(_ name: String) -> (VoiceState, workExpanded: Bool)? {
         let now = Date()
@@ -191,6 +191,27 @@ enum PreviewFixtures {
             s.workInfo = s.tasks[2].info
             s.exchange = Exchange(you: "Salty, around sixty bucks.", assistant: "Got it — looking into that now.", replyStarted: true)
             if name == "paused" { s.connection = .paused; s.resumeFrom = "vi_preview" }
+        case "home":
+            // Instant home control: the lights and heat are done before the reply ends, while a
+            // bigger task keeps running next to it.
+            func item(_ id: String, _ status: String, _ text: String, title: String, short: String, age: TimeInterval,
+                      result: WorkResult? = nil) -> TaskItem {
+                TaskItem(id: id, info: WorkInfo(runID: "run_\(id)", status: status, updated: now - age, shortStatus: short,
+                                                updatedAt: now - age, statusSource: "authored",
+                                                events: [WorkEventItem(kind: "request", text: text, at: now - age - 1)],
+                                                result: result, title: title))
+            }
+            s.tasks = [
+                item("h0", "working", "Find a Thai place that delivers after ten", title: "Late-night Thai delivery",
+                     short: "Checking who's still open", age: 40),
+                item("h1", "completed", "Kitchen lights to thirty percent and the living room to seventy-two",
+                     title: "Kitchen lights and heat", short: "Done", age: 2,
+                     result: WorkResult(spoken: "Kitchen's at 30 percent and the living room is set to 72.", full: nil, label: nil)),
+            ]
+            s.runID = "run_h0"; s.delegationAt = now - 3
+            s.workInfo = s.tasks[0].info
+            s.exchange = Exchange(you: "Kitchen lights to 30, and heat to 72.",
+                                  assistant: "Done. Anything else?", replyStarted: true)
         case "detail":
             let events = [
                 WorkEventItem(kind: "request", text: "Restock the snack cart with salty stuff, about $60", at: now - 70),

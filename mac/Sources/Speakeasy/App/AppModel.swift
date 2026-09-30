@@ -103,8 +103,11 @@ final class AppModel: ObservableObject {
 
     private init() {
         Prefs.register()
+        // Snapshot/smoke runs never touch the keychain: an unsigned build waits forever on the
+        // "allow access" prompt, which no one can click on a headless or locked machine.
+        let smoke = CommandLine.arguments.contains { $0.hasSuffix("-smoke") }
         config = AppConfig.resolve(savedServer: UserDefaults.standard.string(forKey: Prefs.serverURL),
-                                   savedToken: Keychain.readToken())
+                                   savedToken: smoke ? nil : Keychain.readToken())
     }
 
     var api: ServerClient? { ServerClient(config: config) }

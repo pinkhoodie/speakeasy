@@ -417,6 +417,38 @@ final class VoicePanelController {
         path.addClip()
         rep.draw(in: panelRect)
         image.unlockFocus()
+        // Website shots want retina pixels even on a machine whose screen is 1x (or locked):
+        // SPEAKEASY_SNAPSHOT_SCALE=2 redraws the finished image at twice the size.
+        let scale = CGFloat(Double(ProcessInfo.processInfo.environment["SPEAKEASY_SNAPSHOT_SCALE"] ?? "") ?? 1)
+        if scale > 1, let big = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale),
+                                                  pixelsHigh: Int(size.height * scale), bitsPerSample: 8,
+                                                  samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                                  colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) {
+            big.size = size
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: big)
+            NSGraphicsContext.current?.imageInterpolation = .high
+            // Draw the view itself again at the higher resolution, not an upscaled bitmap.
+            let hi = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(bounds.width * scale),
+                                      pixelsHigh: Int(bounds.height * scale), bitsPerSample: 8, samplesPerPixel: 4,
+                                      hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                      bytesPerRow: 0, bitsPerPixel: 0)
+            (dark ? NSColor(calibratedWhite: 0.18, alpha: 1) : NSColor(calibratedWhite: 0.86, alpha: 1)).setFill()
+            NSRect(origin: .zero, size: size).fill()
+            (dark ? NSColor(calibratedRed: 0.11, green: 0.12, blue: 0.15, alpha: 0.92) : NSColor(calibratedWhite: 0.97, alpha: 0.92)).setFill()
+            path.fill()
+            path.addClip()
+            if let hi {
+                hi.size = bounds.size
+                view.cacheDisplay(in: bounds, to: hi)
+                hi.draw(in: panelRect)
+            } else {
+                rep.draw(in: panelRect)
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            try big.representation(using: .png, properties: [:])?.write(to: url)
+            return
+        }
         guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) else { throw CocoaError(.fileWriteUnknown) }
         try bitmap.representation(using: .png, properties: [:])?.write(to: url)
     }

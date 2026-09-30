@@ -321,7 +321,7 @@ enum PanelSmoke {
         await longStrings(c, dir: dir)
         await slim(c, dir: dir)
         // Screens for the website: the task list, a card result, and an approval.
-        for name in ["tasklist", "products", "approval", "detail"] {
+        for name in ["tasklist", "products", "approval", "detail", "home"] {
             guard let (state, _) = PreviewFixtures.state(name) else { continue }
             c.showPreview(state, workExpanded: name == "products" || name == "detail")
             await settle()
