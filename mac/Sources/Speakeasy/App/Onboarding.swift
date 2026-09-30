@@ -6,11 +6,12 @@ import SwiftUI
 
 /// The guided first run, one screen per step:
 /// connect → microphone → voice sign-in → names → where finished work goes → task routing → home control
-/// (only when Hermes has Home Assistant) → voice brief → hotkey + try it.
+/// (only when Hermes has Home Assistant) → voice brief → where Speakeasy lives (menu bar and
+/// Dock, or menu bar only) → hotkey + try it.
 @MainActor
 final class OnboardingFlow: ObservableObject {
     enum Step: Int, CaseIterable {
-        case connect, microphone, voice, names, delivery, routing, home, brief, hotkey
+        case connect, microphone, voice, names, delivery, routing, home, brief, appearance, hotkey
         var title: String {
             switch self {
             case .connect: return "Connect to Hermes"
@@ -21,6 +22,7 @@ final class OnboardingFlow: ObservableObject {
             case .routing: return "Task routing"
             case .home: return "Home control"
             case .brief: return "Voice brief"
+            case .appearance: return "Menu bar and Dock"
             case .hotkey: return "Try it"
             }
         }
@@ -37,6 +39,9 @@ final class OnboardingFlow: ObservableObject {
     @Published var continuity = true
     @Published var saving = false
     @Published var saveError: String?
+    /// Chosen on the "Where Speakeasy lives" step; applied when setup finishes, so the setup
+    /// window can't slip behind other apps mid-setup the way a menu-bar-only app's can.
+    @Published var showInDock = UserDefaults.standard.object(forKey: Prefs.showInDock) as? Bool ?? true
 
     let app: AppModel
     var onFinish: () -> Void = {}
@@ -127,7 +132,10 @@ final class OnboardingFlow: ObservableObject {
         }
     }
 
-    func finish() { onFinish() }
+    func finish() {
+        UserDefaults.standard.set(showInDock, forKey: Prefs.showInDock)
+        onFinish()
+    }
 }
 
 @MainActor
@@ -163,6 +171,10 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         // Closing early is fine: every step is also in Settings. Only a paired Mac counts as done.
+        // Keep the Dock choice if the user got past that step, even without pressing Done.
+        if flow.step.rawValue > OnboardingFlow.Step.appearance.rawValue {
+            UserDefaults.standard.set(flow.showInDock, forKey: Prefs.showInDock)
+        }
         if flow.app.isPaired { onFinish() }
         window = nil
     }
@@ -194,6 +206,7 @@ struct OnboardingView: View {
                 case .routing: RoutingStep(flow: flow)
                 case .home: HomeStep(flow: flow)
                 case .brief: BriefStep(flow: flow)
+                case .appearance: AppearanceStep(flow: flow)
                 case .hotkey: HotkeyStep(flow: flow)
                 }
             }
@@ -556,6 +569,62 @@ private struct BriefStep: View {
         case "failed": return "Couldn't write it this time. Calls still work; try Rewrite in Settings later."
         default: return "Not started yet. Calls still work."
         }
+    }
+}
+
+// MARK: Where Speakeasy lives (menu bar and Dock, or menu bar only)
+
+private struct AppearanceStep: View {
+    @ObservedObject var flow: OnboardingFlow
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            StepHeader(title: "Where should Speakeasy live?",
+                       subtitle: "The Speakeasy icon is always in the menu bar. You can also keep it in the Dock.")
+            HStack(spacing: 12) {
+                AppearanceOption(symbol: "dock.rectangle", title: "Menu bar and Dock",
+                                 detail: "Easy to find: click the Dock icon to get back to Settings.",
+                                 selected: flow.showInDock) { flow.showInDock = true }
+                AppearanceOption(symbol: "menubar.rectangle", title: "Menu bar only",
+                                 detail: "Out of the way. Everything is in the menu bar icon.",
+                                 selected: !flow.showInDock) { flow.showInDock = false }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            Text("You can change this any time in Settings › General › Show in Dock.")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            StepButtons(back: flow.back, primary: "Continue", action: flow.next)
+        }
+    }
+}
+
+private struct AppearanceOption: View {
+    var symbol: String
+    var title: String
+    var detail: String
+    var selected: Bool
+    var action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: symbol).font(.system(size: 28)).foregroundStyle(Color.accentColor)
+                    Spacer()
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.title3).foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                }
+                Text(title).font(.headline)
+                Text(detail).font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(selected ? 0.08 : 0.03)))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(selected ? Color.accentColor : Color.secondary.opacity(0.25), lineWidth: selected ? 2 : 1))
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
