@@ -572,7 +572,7 @@ private struct BriefStep: View {
     }
 }
 
-// MARK: Where Speakeasy lives (menu bar and Dock, or menu bar only)
+// MARK: Dock icon choice
 
 private struct AppearanceStep: View {
     @ObservedObject var flow: OnboardingFlow

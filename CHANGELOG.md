@@ -2,6 +2,11 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## 2026-09-30 — Mac app 0.2.13
+
+**Choose where Speakeasy lives**
+- A new setup screen lets you keep the Dock icon or hide it and use just the menu bar icon. Switch any time with Settings › General › Show in Dock.
+
 ## 2026-09-29 (later) — Mac app 0.2.12, plugin 0.2.26–0.2.30
 
 **Tune your voice from your own calls**
