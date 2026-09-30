@@ -36,6 +36,9 @@ ACTIVE_RUN_STATES = {"admitting", "running", "working", "waiting_for_approval", 
                      "cancel_requested"}
 CONTINUITY_WAIT_S = 600
 THREAD_OPEN_WAIT_S = 20
+# Thread tasks whose answer this process is waiting for right now, with when the wait began
+# (monotonic). The recovery sweep skips them; a wait orphaned by a hang-up ages out.
+LIVE_THREAD_WAITS: dict[str, float] = {}
 CONTINUITY_POLL_S = 5
 # Spoken progress: only for tasks running this long, at most once per PROGRESS_EVERY_S across the
 # whole call (two tasks don't take turns talking), and only when the task has done something new
@@ -1289,6 +1292,7 @@ class SidebandWorker:
             self.publish()
             return
         where = P.new_thread_in(channel.label)
+        self.store.set_thread(idem, opened.platform, opened.thread_id, f"a thread in {channel.label}")
         self.record_timing(task_id, idem)
         self.store.progress(idem, "request", request)
         self.name_task(idem, request)
@@ -1308,10 +1312,13 @@ class SidebandWorker:
             self.store.set_title(idem, title)
             self.publish()
 
+        LIVE_THREAD_WAITS[idem] = time.monotonic()
         try:
             answer = await asyncio.to_thread(self.rt.threads.wait, opened, on_session, on_title)
         except Exception as exc:
             answer, backend.error = None, type(exc).__name__
+        finally:
+            LIVE_THREAD_WAITS.pop(idem, None)
         if answer is None:
             self.store.user_progress(idem, "In the thread", f"The answer will land in {where}")
             self.store.update_run(idem, None, "ambiguous")

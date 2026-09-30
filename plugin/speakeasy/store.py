@@ -111,8 +111,39 @@ class StateStore:
     def set_continued(self, key: str, session_id: str, label: str) -> None:
         """This task runs inside an existing Hermes conversation (thread continuity)."""
         with self._lock, self._db:
+            row = self._db.execute("SELECT continued FROM runs WHERE idem_key=?", (key,)).fetchone()
+            try:
+                known = json.loads(row[0]) if row and row[0] else {}
+            except ValueError:
+                known = {}
+            known = known if isinstance(known, dict) else {}
+            known.update(session_id=session_id, label=label)
             self._db.execute("UPDATE runs SET session_id=?, continued=? WHERE idem_key=?",
-                             (session_id, json.dumps({"session_id": session_id, "label": label}), key))
+                             (session_id, json.dumps(known), key))
+
+    def set_thread(self, key: str, platform: str, thread_id: str, label: str) -> None:
+        """The thread a task opened, kept before its session exists so it can be found again later."""
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET continued=? WHERE idem_key=? AND continued IS NULL",
+                             (json.dumps({"platform": platform, "thread_id": str(thread_id), "label": label}), key))
+
+    def unsettled_thread_tasks(self) -> list[dict[str, Any]]:
+        """Thread tasks still marked running or unconfirmed: a gateway restart or plugin reload ends
+        the wait for their answer, so nothing else will ever settle them."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT idem_key, interaction_id, status, updated, continued FROM runs "
+                "WHERE run_id IS NULL AND status IN ('running','ambiguous')").fetchall()
+        out = []
+        for key, interaction, status, updated, continued in rows:
+            try:
+                placed = json.loads(continued) if continued else {}
+            except ValueError:
+                placed = {}
+            placed = placed if isinstance(placed, dict) else {}
+            out.append({"key": key, "interaction_id": interaction, "status": status, "updated": float(updated or 0),
+                        **{k: placed.get(k) for k in ("session_id", "platform", "thread_id", "label")}})
+        return out
 
     def continued_for(self, key: str) -> dict[str, str] | None:
         with self._lock:

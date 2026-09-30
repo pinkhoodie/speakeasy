@@ -438,11 +438,25 @@ class VoiceService:
         return paused
 
     def _idle_loop(self) -> None:
+        ticks = 0
+        self.settle_stuck_tasks()
         while not self._stop.wait(IDLE_CHECK_S):
             try:
                 self.idle_check()
             except Exception as exc:
                 logger.warning("speakeasy: idle check failed: %s", type(exc).__name__)
+            ticks += 1
+            if ticks % 4 == 0:  # about once a minute
+                self.settle_stuck_tasks()
+
+    def settle_stuck_tasks(self) -> list[tuple[str, str]]:
+        from .calls import LIVE_THREAD_WAITS
+        from .recovery import sweep
+        try:
+            return sweep(self.store, self.home / "state.db", self.image_roots, LIVE_THREAD_WAITS)
+        except Exception as exc:
+            logger.warning("speakeasy: stuck-task sweep failed: %s", type(exc).__name__)
+            return []
 
     # -- lookups -------------------------------------------------------------------------------
     def interaction(self, interaction_id: str) -> Interaction:
