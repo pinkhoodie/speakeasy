@@ -103,11 +103,21 @@ final class AppModel: ObservableObject {
 
     private init() {
         Prefs.register()
-        // Snapshot/smoke runs never touch the keychain: an unsigned build waits forever on the
-        // "allow access" prompt, which no one can click on a headless or locked machine.
-        let smoke = CommandLine.arguments.contains { $0.hasSuffix("-smoke") }
         config = AppConfig.resolve(savedServer: UserDefaults.standard.string(forKey: Prefs.serverURL),
-                                   savedToken: smoke ? nil : Keychain.readToken())
+                                   savedToken: Self.readSavedToken())
+    }
+
+    /// Automated runs (smoke tests, snapshots, previews) never touch the Keychain. Dev builds are
+    /// ad-hoc signed, so every rebuild is a "new app" to macOS and "Always Allow" never sticks:
+    /// the read blocks on a prompt no one is there to click.
+    static let isAutomatedRun: Bool = {
+        if ProcessInfo.processInfo.environment["SPEAKEASY_NO_KEYCHAIN"] == "1" { return true }
+        let flags: Set<String> = ["--onboarding-snapshot", "--ui-preview", "--snapshot"]
+        return CommandLine.arguments.contains { $0.hasSuffix("-smoke") || flags.contains($0) }
+    }()
+
+    private static func readSavedToken() -> String? {
+        isAutomatedRun ? nil : Keychain.readToken()
     }
 
     var api: ServerClient? { ServerClient(config: config) }
@@ -420,7 +430,7 @@ final class AppModel: ObservableObject {
     /// Point the app at the advertised address (same device token: it's the same server).
     func switchServer(to url: URL) async {
         UserDefaults.standard.set(url.absoluteString, forKey: Prefs.serverURL)
-        setConfig(AppConfig.resolve(savedServer: url.absoluteString, savedToken: Keychain.readToken()))
+        setConfig(AppConfig.resolve(savedServer: url.absoluteString, savedToken: Self.readSavedToken()))
         tailnetOffer = nil
         await refresh()
     }
