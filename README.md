@@ -7,7 +7,7 @@ floating voice panel you open with a hotkey. The conversation runs on **OpenAI's
 speech model, and anything that needs real work goes to your own Hermes, with its tools, memory,
 skills and approvals.
 
-**Download the Mac app:** [Speakeasy.dmg](https://github.com/rungmc357/speakeasy/releases/latest/download/Speakeasy.dmg) (all versions: [releases](https://github.com/rungmc357/speakeasy/releases))
+**Download the Mac app:** [Speakeasy.dmg](https://github.com/rungmc357/speakeasy/releases/latest/download/Speakeasy.dmg) (all versions: [releases](https://github.com/rungmc357/speakeasy/releases); what's new: [changelog](CHANGELOG.md))
 (signed and notarized, macOS 14+) · Website: https://speakeasyvoice.ai
 
 Status: early. Mac only.

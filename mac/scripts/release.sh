@@ -12,6 +12,11 @@
 #     then export SPEAKEASY_NOTARY_KEYCHAIN=~/Library/Keychains/login.keychain-db
 # Overrides: SPEAKEASY_DEVELOPER_ID (identity name), SPEAKEASY_NOTARY_PROFILE (default "speakeasy").
 set -euo pipefail
+
+# The newest dated section of CHANGELOG.md, used as the release notes (and so the update prompt).
+latest_changes() {
+    awk '/^## /{n++} n==1 && !/^## /{print}' "$ROOT/CHANGELOG.md" | sed -e '/./,$!d'
+}
 VERSION="${1:?usage: scripts/release.sh <version> [--publish]}"
 PUBLISH="${2:-}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: version must look like 0.2.0" >&2; exit 1; }
@@ -100,6 +105,9 @@ if [[ "$PUBLISH" == "--publish" ]]; then
     (cd "$ROOT/dist" && shasum -a 256 Speakeasy.dmg > Speakeasy.dmg.sha256)
     gh release create "v$VERSION" "$ROOT/dist/Speakeasy.dmg" "$ROOT/dist/Speakeasy.dmg.sha256" "$ROOT/dist/appcast.xml" \
         --title "Speakeasy $VERSION" \
-        --notes "Signed and notarized macOS app (macOS 14+). New install: open the dmg and drag Speakeasy into Applications. Already on 0.2.10 or later: Check for Updates installs it in place."
+        --notes "$(latest_changes)
+
+---
+Signed and notarized macOS app (macOS 14+). New install: open the dmg and drag Speakeasy into Applications. Already on 0.2.10 or later: Check for Updates installs it in place. Everything that's changed: [CHANGELOG.md](https://github.com/rungmc357/speakeasy/blob/main/CHANGELOG.md)"
 fi
 echo "$DMG"
