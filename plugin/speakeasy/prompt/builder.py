@@ -468,6 +468,38 @@ def progress_fallback(steps: list[str], milestone: str) -> str | None:
     return f"Quick update: {latest[0].lower() + latest[1:] if latest[:2].istitle() else latest}."
 
 
+DIDNT_CATCH = ("I heard only a fragment and did not start anything. Say, in a few words of your own, that you didn't "
+               "catch that, and let them finish. Don't guess what they meant.")
+
+_PLUMBING = re.compile(r"(?i)^(?:continuing in|started in|queued|in the thread|the answer will land)")
+
+
+def status_answer(name: str, status: str | None, steps: list[str], age_s: float, result: str | None) -> str:
+    """What the voice says to "what's the status?", built from what the task has actually reported."""
+    concrete = [re.sub(r"\s+", " ", s).strip().rstrip(".") for s in steps if s and not _PLUMBING.search(s)]
+    minutes = int(age_s // 60)
+    running = f"{minutes} min" if minutes else "under a minute"
+    if status == "completed":
+        facts = f"It finished: {result}" if result else "It finished; the details are in the app."
+    elif status == "waiting_for_approval":
+        facts = "It's waiting for their approval in the app."
+    elif status in {"failed", "interrupted", "cancelled"}:
+        facts = f"It ended without finishing ({status})."
+    elif concrete:
+        facts = f"Running for {running}. Latest steps, newest last: " + "; ".join(concrete[-3:]) + "."
+    else:
+        facts = f"Running for {running}; no concrete step reported yet."
+    return (f"They asked how the \"{name}\" task is going. Answer now, briefly, in your own words, from these facts "
+            f"only; do not start new work and don't read them out verbatim. {facts}")[:2000]
+
+
+def late_result(asked: str, spoken: str) -> str:
+    """A result that lands after the user has moved on: say what it answers before giving it."""
+    return (f"A result just arrived for their earlier request \"{asked}\". They have said something else since. "
+            "If you still owe an answer to what they just said, answer that first. Then, in one short line, say this "
+            f"is about \"{asked}\" (in a few words) and give it: {spoken}")[:2000]
+
+
 def status_note(detail: str) -> str:
     """A silent status note for the voice model: context for "how's it going?", never a cue to talk."""
     return ("Background status, do not say anything now; only use it if asked how the task is going: "

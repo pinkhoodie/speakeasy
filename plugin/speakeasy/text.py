@@ -428,6 +428,10 @@ def notice_text(value: Any, limit: int) -> str | None:
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
+_TITLE_FILLER = set("""a an the and or but so um uh oh okay ok yeah yes no sure hey it its it's that this
+there is are was be do did like well just maybe i you we me my huh hmm right cool""".split())
+
+
 def short_title(request: str | None) -> str | None:
     """A to-do style label from the spoken request (no classifier): first few content words."""
     text = notice_text(request, 200)
@@ -436,7 +440,8 @@ def short_title(request: str | None) -> str | None:
     text = re.sub(r"(?i)^(?:(?:hey|ok|okay|so|um+|uh+|please|can you|could you|would you|i need you to|"
                   r"i want you to|go ahead and|let'?s)[\s,]+)+", "", text).strip()
     words = text.rstrip(".!?").split()
-    if not words:
-        return None
+    content = [w for w in re.findall(r"[a-z0-9']+", text.lower()) if w not in _TITLE_FILLER]
+    if not words or len(content) < 2:
+        return None  # "Uh, sure", "that": no name is better than a name made of filler
     title = " ".join(words[:6])
     return (title[0].upper() + title[1:])[:60]

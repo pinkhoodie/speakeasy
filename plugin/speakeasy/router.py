@@ -71,6 +71,60 @@ def _words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 and w not in _STOP}
 
 
+STATUS = "status"    # a "how's it going?" about an open task: answered from its steps, no new work
+IGNORE = "ignore"    # a scrap with nothing to act on ("that", "it's"): no task
+
+_STATUS_ASK = re.compile(
+    r"(?i)^(?:(?:hey|so|okay|ok|and|um|uh|yo)[,.]? )*(?:"
+    r"what(?:'s| is) the (?:status|update|latest|progress)|status(?: update)?|any (?:update|news|progress)|"
+    r"(?:can|could) (?:you|i) (?:get|give me|have) (?:an? |the )?(?:update|status)|"
+    r"how(?:'s| is| are) (?:it|that|this|things|everything|we|the \w+(?: \w+)?) (?:going|looking|coming along|doing)|"
+    r"how (?:we|are we) looking|are you still (?:checking|working|on it|looking|going)|still (?:working|checking|going)|"
+    r"where are we (?:at|on)|how far along|is it done|are you done|did (?:it|that) finish)")
+_SCRAPS = set("""that it it's its um uh so okay ok hmm the and but like oh well yeah no huh what
+hm er ah mm""".split())
+_AGREE = re.compile(
+    r"(?i)^(?:(?:uh|um|oh|okay|ok|yeah|yes)[,.]? )*(?:yes|yeah|yep|yup|sure|go|go ahead|do it|do that|"
+    r"sounds good|let's do it|let's do that|please do|yes please|go for it|perfect|okay|ok|that works|"
+    r"that's fine|fine|cool|great)(?:[,.]? (?:please|thanks|do it|go ahead|go for it|let's go))?[.!?]*$")
+REPEAT_WINDOW_S = 12
+
+
+def _norm(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", (text or "").lower())
+
+
+def quick_intent(request: str, tasks: list["OpenTask"], replied_task_id: str | None = None) -> "Part | None":
+    """Deterministic answers to the requests that must never become fresh work: a status question
+    about something running, a bare yes to what the assistant just offered, a meaningless scrap,
+    and the same request heard twice seconds apart. None: route normally."""
+    words = _norm(request)
+    if not words:
+        return Part(IGNORE, request)
+    live = [t for t in tasks if t.status in {"admitting", "working", "running", "waiting_for_approval"}]
+    if len(words) <= 14 and _STATUS_ASK.search(request.strip()) and tasks:
+        pool = live or tasks
+        asked = _words(request)
+        scored = sorted(((len(asked & _words(t.request)), i, t) for i, t in enumerate(pool)),
+                        key=lambda item: (item[0], item[1]), reverse=True)
+        return Part(STATUS, request, scored[0][2].task_id)
+    if replied_task_id and len(words) <= 6 and _AGREE.search(request.strip()):
+        if any(t.task_id == replied_task_id for t in tasks):
+            return Part("follow_up", request, replied_task_id)
+    if len(words) <= 2 and all(w in _SCRAPS for w in words):
+        return Part(IGNORE, request)
+    if live:
+        newest = live[-1]
+        old = _norm(newest.request)
+        if newest.age_s is not None and newest.age_s <= REPEAT_WINDOW_S and len(old) >= 3:
+            # Heard again, or heard again with the rest of the sentence: most of the new request is
+            # the old one. Two different asks back to back share little and stay separate tasks.
+            shared = set(old) & set(words)
+            if len(shared) / max(1, len(set(words))) >= 0.6 and len(shared) / max(1, len(set(old))) >= 0.7:
+                return Part("follow_up", request, newest.task_id)
+    return None
+
+
 FRAGMENT_WINDOW_S = 45
 # How a trailing half-thought starts: a joiner, or a bare question that leans on the previous one.
 _FRAGMENT_START = re.compile(
@@ -219,9 +273,12 @@ def chat_lines(chats: list[Chat]) -> str:
 
 
 def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
-                   chats: list[Chat] | None = None, call_so_far: str = "") -> list[dict[str, str]]:
+                   chats: list[Chat] | None = None, call_so_far: str = "",
+                   replied_task_id: str | None = None) -> list[dict[str, str]]:
     open_lines = "\n".join(f"- {t.task_id}: {t.request[:200]} ({t.status}"
                            + (f", started {int(t.age_s)}s ago" if t.age_s is not None else "") + ")"
+                           + (f"\n    the assistant's last spoken answer came from this task: \"{t.result[:300]}\""
+                              if t.task_id == replied_task_id and t.result else "")
                            for t in tasks[-MAX_OPEN_TASKS:]) or "none"
     channel_lines = "\n".join(f"- {c.label}: {c.topic or 'no description'}" for c in topics) or "none"
     return [
@@ -230,7 +287,9 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
             '{"follow_up_task_id": string or null, "conversation": string or null, "parts": [strings], '
             '"channel": string or null, "show": true or false}. '
             "follow_up_task_id: the id of an open task ONLY when the request clearly adds to, changes, corrects "
-            "or asks about that task; else null. People pause mid-thought: a short fragment said seconds after "
+            "or asks about that task; else null. A reply to what the assistant just said (agreeing, disagreeing, "
+            "correcting it, pushing back, answering its question: \"no, Hermes can\", \"you're missing a couple\", "
+            "\"that's wrong\") is a follow-up to the task that answer came from, never a new task or conversation. People pause mid-thought: a short fragment said seconds after "
             "a task started that only makes sense as the end of that request (\"...and am I gonna win?\") is a "
             "follow-up to it, never a new task. parts: when not a follow-up, the request as 1 to 4 independent, "
             "self-contained asks (split only clearly separate asks; keep one ask whole; each part must make sense "
@@ -251,7 +310,7 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
         {"role": "user", "content": f"Open tasks:\n{open_lines}\n\nChannels:\n{channel_lines}\n\n"
                                     f"Existing conversations:\n{chat_lines(chats or [])}\n\n"
                                     + (f"The call so far (for what 'that', 'it', 'the X one' refer to):\n"
-                                       f"{call_so_far[-1200:]}\n\n" if call_so_far and chats else "")
+                                       f"{call_so_far[-1200:]}\n\n" if call_so_far and (chats or tasks) else "")
                                     + f"Request: {request[:1500]}"},
     ]
 
@@ -522,13 +581,18 @@ def fallback_decision(request: str) -> Decision:
 def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topics: list[Topic] | None = None,
            call: Callable[[list[dict[str, str]]], str | None] | None = None,
            timeout: float = ROUTE_TIMEOUT_S, chats: list[Chat] | None = None,
-           call_so_far: str = "") -> Decision:
+           call_so_far: str = "", replied_task_id: str | None = None) -> Decision:
     """Route one handoff. A task id the voice model marked wins outright (no model call)."""
     request = (request or "").strip()
     topics = topics or []
     open_tasks = tasks[-MAX_OPEN_TASKS:]
+    quick = quick_intent(request, open_tasks, replied_task_id)
+    if quick is not None and quick.kind in {STATUS, IGNORE}:
+        return Decision([quick], None, "quick")
     if isinstance(marked_task_id, str) and any(t.task_id == marked_task_id for t in open_tasks):
         return Decision([Part("follow_up", request, marked_task_id)], None, "marked")
+    if quick is not None:
+        return Decision([quick], None, "quick")
     tail = continues_newest(request, open_tasks)
     if tail is not None and marked_task_id in (None, "", tail.task_id):
         return Decision([Part("follow_up", request, tail.task_id)], None, "fragment")
@@ -540,7 +604,8 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
         # The model call gets the same budget routing waits for (it used to stop at the 3 s default
         # while routing waited 5 s, so every slow reply burned a retry and a fallback that could not land).
         model_call = call or functools.partial(aux_call, timeout=timeout)
-        future = _EXECUTOR.submit(model_call, route_messages(request, open_tasks, topics, chats, call_so_far))
+        future = _EXECUTOR.submit(model_call, route_messages(request, open_tasks, topics, chats, call_so_far,
+                                                             replied_task_id))
         try:
             decision = parse_decision(future.result(timeout=timeout), request, open_tasks, topics, chats)
         except Exception as exc:  # timeout or provider error: the rules below
