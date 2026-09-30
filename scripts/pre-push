@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Blocks a push when the repo contains a personal term (list kept outside the repo) or a secret.
+# Install: ln -sf ../../scripts/pre-push .git/hooks/pre-push
+set -euo pipefail
+root=$(git rev-parse --show-toplevel)
+exec "$root/scripts/scan-secrets.sh"
