@@ -354,9 +354,26 @@ class Notices:
     def answered(self, run_id: str, full: str | None, target: str | None = None) -> None:
         """Post a finished answer in full, once per run (`hermes send` splits long text), to the
         task's routed channel when it has one, else the default target."""
+        from .text import split_commands
         text = (full or "").strip()
-        if text:
+        if not text:
+            return
+        pieces = split_commands(text)
+        if not any(kind == "command" for kind, _ in pieces):
             self.post(f"answer:{run_id}", text, limit=20000, target=target)
+            return
+        # Each command goes out alone, bare, so long-press → Copy takes just the command.
+        for i, (_, chunk) in enumerate(pieces):
+            self.post(f"answer:{run_id}" if i == 0 else f"answer:{run_id}:{i}", chunk, limit=20000, target=target)
+
+    def commands(self, run_id: str, full: str | None, target: str | None) -> None:
+        """Thread replies are Hermes's own message: we can't reformat them, so any command in them is
+        posted again underneath, alone, so it copies cleanly (only when the reply didn't fence it)."""
+        from .text import split_commands
+        text = full or ""
+        for i, (kind, chunk) in enumerate(split_commands(text)):
+            if kind == "command" and f"```" not in text:
+                self.post(f"command:{run_id}:{i}", chunk, limit=4000, target=target)
 
     def stopped(self, run_id: str, status: str, request: str | None) -> None:
         self.post(f"stopped:{run_id}", P.stopped_notice(self.names(), status, request))
@@ -1327,7 +1344,9 @@ class SidebandWorker:
             self.publish()
             return
         await self.handle_hermes_event(backend, {"event": "run.completed", "output": P.without_voice_header(answer),
-                                                 "continued": True})
+                                                 "continued": True,
+                                                 "thread_target": f"{channel.target}:{opened.thread_id}"
+                                                 if channel.target.count(":") == 1 else None})
 
     async def reconcile_stream_end(self, backend: BackendRun, cause: Exception | None = None) -> None:
         if not backend.run_id:
@@ -1468,6 +1487,8 @@ class SidebandWorker:
                 self.notices.stopped(backend.run_id, status, self.store.request_text(idem))
             if status == "completed" and backend.run_id and result and not event.get("continued"):
                 self.notices.answered(backend.run_id, delivery_text(result), backend.deliver_to)
+            elif status == "completed" and result and event.get("thread_target"):
+                self.notices.commands(backend.run_id or idem, result.get("full"), event["thread_target"])
             for draft in stored_drafts:
                 if not self.call_connected():
                     self.notices.draft_waiting(draft["draft_id"], draft.get("subject"))

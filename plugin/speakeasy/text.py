@@ -142,6 +142,68 @@ def derive_tool_status(tool: Any, preview: Any) -> tuple[str, str] | None:
     return None
 
 
+# A command someone must paste into a terminal. Fenced blocks count whole; a bare line counts when it
+# starts with a shell command or chains/expands like one, and doesn't read as a sentence.
+SHELL_START_RE = re.compile(
+    r"^(?:\$ )?(?:sudo|brew|launchctl|mkdir|chmod|chown|curl|wget|ssh|scp|cd|git|gh|npm|npx|pnpm|yarn|pip3?|"
+    r"python3?|uv|hermes|defaults|open|killall|export|echo|cat|cp|mv|rm|ln|tailscale|docker|colima|xcode-select|"
+    r"softwareupdate|networksetup|security|op|systemctl|launchd|pmset|codesign|xattr|diskutil)\b[^\n]*$")
+SHELL_MARK_RE = re.compile(r"&&|\|\||\$\(|>>|\s\|\s|~/|--[a-z]")
+FENCE_RE = re.compile(r"```[^\n`]*\n(.*?)\n?```", re.S)
+
+
+def looks_like_command(line: str) -> bool:
+    line = line.strip()
+    if not line or len(line) > 1500:
+        return False
+    if SHELL_START_RE.match(line):
+        # "Open Terminal on the laptop." is a sentence, not a command.
+        return not (line.endswith(".") and not SHELL_MARK_RE.search(line)) or bool(SHELL_MARK_RE.search(line))
+    return False
+
+
+def split_commands(text: str) -> list[tuple[str, str]]:
+    """Split an answer into ("text", …) and ("command", …) pieces in reading order, so each command
+    can go out as its own message: long-press → Copy on a phone then copies only the command."""
+    pieces: list[tuple[str, str]] = []
+    buf: list[str] = []
+
+    def flush() -> None:
+        chunk = "\n".join(buf).strip()
+        if chunk:
+            pieces.append(("text", chunk))
+        buf.clear()
+
+    pos = 0
+    for m in FENCE_RE.finditer(text):
+        for line in text[pos:m.start()].split("\n"):
+            if looks_like_command(line):
+                flush(); pieces.append(("command", line.strip().removeprefix("$ ")))
+            else:
+                buf.append(line)
+        body = m.group(1).strip("\n")
+        if body.strip():
+            flush(); pieces.append(("command", body))
+        pos = m.end()
+    for line in text[pos:].split("\n"):
+        if looks_like_command(line):
+            flush(); pieces.append(("command", line.strip().removeprefix("$ ")))
+        else:
+            buf.append(line)
+    flush()
+    return pieces
+
+
+def without_commands(text: str, placeholder: str = "(a command, shown in the app and in chat)") -> str:
+    """The answer with every shell command swapped for a placeholder: what the voice may know about it.
+    Other code (a function it fixed) stays, fences unwrapped: the voice answers questions about it."""
+    out = []
+    for kind, chunk in split_commands(text):
+        is_shell = kind == "command" and all(looks_like_command(ln) or not ln.strip() for ln in chunk.split("\n"))
+        out.append(placeholder if is_shell else chunk)
+    return "\n".join(out)
+
+
 def safe_full_text(value: Any) -> str | None:
     """Multi-line display copy: keep paragraphs, redact secret-looking lines, bound size."""
     if not isinstance(value, str):
@@ -406,6 +468,10 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
         sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", full).strip())
         plain = re.sub(r"https?://\S*[^\s.,;:!?)]|[`*_#>]+", "", " ".join(sentences[:2]))
         spoken = safe_user_text(re.sub(r"\s+([.,;:!?])", r"\1", plain), 500)
+    if spoken and (any(k == "command" for k, _ in split_commands(spoken)) or SHELL_MARK_RE.search(spoken)
+                   or "`" in spoken):
+        # Never hand the voice a command to read out; the pasteable copy is on screen and in chat.
+        spoken = "There's a command for you to run. It's in the app and in chat, ready to copy."
     if not spoken:
         spoken = fallback_spoken
     result: dict[str, Any] = {"spoken": spoken, "full": full or spoken}

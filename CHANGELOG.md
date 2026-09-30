@@ -2,13 +2,14 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
-## 2026-09-29 (later) — Mac app 0.2.12, plugin 0.2.26–0.2.28
+## 2026-09-29 (later) — Mac app 0.2.12, plugin 0.2.26–0.2.29
 
 **Tune your voice from your own calls**
 - Settings › Voice brief › Tune from my calls: your Hermes reads the last week of calls and suggests specific edits to what the voice knows about you, each with the moment that prompted it. You tick the ones you want; nothing changes otherwise. Problems a brief can't fix are listed separately.
 - Also from the terminal: `hermes voice tune start`.
 
 **Smoother calls**
+- The voice no longer reads terminal commands out loud. It tells you there's one to run, and the command shows up in chat as its own message, so a long-press copies just the command.
 - Tasks that ran in their own chat thread no longer get stuck on "running" after you hang up or Hermes restarts. The finished answer is picked up from the thread, even days later.
 - "What's the status?" is answered right away from what the task has done so far, instead of waiting behind it.
 - "No, Hermes does" or "yeah, go" goes to the task you were just talking about, not a brand-new one.

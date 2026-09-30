@@ -297,7 +297,11 @@ def status_rule(names: Names) -> str:
         "Never include reasoning, credentials, or raw tool arguments. "
         "End your final answer with two last lines: DONE: <past-tense label of 1-5 words, e.g. Weather checked> "
         "then SPOKEN: <one or two plain sentences to say aloud>; "
-        "the full answer above them is shown on screen and may include links and detail.", names)
+        "the full answer above them is shown on screen and may include links and detail. "
+        "Anything {user_name} must paste or type (a terminal command, code, a config line) goes in its own fenced "
+        "code block, one command per block, never inside a sentence; it is sent as its own message so it copies "
+        "cleanly. The SPOKEN line never contains a command, path, URL or code: say what it does and that it's "
+        "ready to copy.", names)
 
 
 def build_task_prompt(names: Names, revision: int, context: str, focus: str | None = None,
@@ -347,7 +351,7 @@ def continuation_message(names: Names, request: str, summary: str) -> str:
         "\" so this conversation shows what was asked, then do the work as you normally would here. "
         "Approval prompts cannot be answered from voice on this path: if a step needs {possessive_approval}, stop before "
         "it and ask {user_name} to confirm here. Lead with the outcome in one or two plain sentences.", names,
-        possessive_approval=f"{names.possessive} explicit approval")
+        possessive_approval=f"{names.possessive} explicit approval") + " " + render(COPYABLE_RULE, names)
 
 
 def thread_task_message(names: Names, request: str, summary: str, context: str) -> str:
@@ -361,7 +365,14 @@ def thread_task_message(names: Names, request: str, summary: str, context: str) 
                 "prompts cannot be answered from voice: if a step needs {possessive_approval}, stop before it and ask "
                 "{user_name} to confirm here in the thread.", names,
                 possessive_approval=f"{names.possessive} explicit approval")
+            + "\n\n" + render(COPYABLE_RULE, names)
             + "\n\n" + render(THREAD_EMAIL_DRAFT_RULE, names))
+
+
+COPYABLE_RULE = (
+    "Anything {user_name} must paste or type (a terminal command, code, a config line) goes in its own fenced code "
+    "block, one per block, never inside a sentence, so it copies cleanly on a phone. Never put a command, path or "
+    "URL in your first two sentences: they are read aloud on the call; say what to run and where instead.")
 
 
 THREAD_EMAIL_DRAFT_RULE = (
@@ -559,8 +570,8 @@ def result_notes(name: str | None, full: str | None, spoken: str | None) -> list
     (not read aloud), split to fit live-call appends. Code fences are unwrapped and only lines that
     look like secrets are dropped: rejecting the whole answer (one code block or "token:" did it)
     left the voice nothing to recall, so it re-ran the task for every question about the report."""
-    from ..text import MAX_RESULT_FULL, SENSITIVE_TEXT_RE
-    raw = (full or "").replace("```", "")
+    from ..text import MAX_RESULT_FULL, SENSITIVE_TEXT_RE, without_commands
+    raw = without_commands(full or "")
     lines = [ln for ln in raw.splitlines() if not SENSITIVE_TEXT_RE.search(ln)]
     text = re.sub(r"[ \t]+", " ", "\n".join(lines))
     text = re.sub(r"\n{3,}", "\n\n", text).strip()[:MAX_RESULT_FULL]
