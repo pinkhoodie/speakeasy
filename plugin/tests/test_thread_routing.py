@@ -167,7 +167,12 @@ def test_the_model_gets_the_call_so_far_to_resolve_references():
     assert "The call so far" in seen[0] and "phone-sized e-reader" in seen[0]
     seen.clear()
     router.decide("x and y", [], None, [], lambda m: seen.append(m[1]["content"]) or None, call_so_far="User: hi")
-    assert "The call so far" not in seen[0]  # only when there are conversations to tell apart
+    assert "The call so far" not in seen[0]  # only when there are conversations or open tasks to tell apart
+    seen.clear()
+    task = router.OpenTask("t1", "organize my dock", "completed", "Done: dock matches.")
+    router.decide("no, the other apps too", [task], None, [], lambda m: seen.append(m[1]["content"]) or None,
+                  call_so_far="Assistant: Your dock matches the laptop.")
+    assert "The call so far" in seen[0]  # pushback on an answer needs the answer
 
 
 def test_a_routing_timeout_never_lands_work_in_an_existing_thread(tmp_path):

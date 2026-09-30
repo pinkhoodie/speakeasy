@@ -109,9 +109,11 @@ class Runtime:
         return found.label if found else self.delivery_label()
 
     def route(self, request: str, tasks: list[router.OpenTask], marked: Any,
-              chats: list[router.Chat] | None = None, call_so_far: str = "") -> router.Decision:
+              chats: list[router.Chat] | None = None, call_so_far: str = "",
+              replied_task_id: str | None = None) -> router.Decision:
         topics = [router.Topic(c.label, c.topic) for c in channels.opted_in(self.routable())]
-        return router.decide(request, tasks, marked, topics, self.route_call, chats=chats, call_so_far=call_so_far)
+        return router.decide(request, tasks, marked, topics, self.route_call, chats=chats, call_so_far=call_so_far,
+                             replied_task_id=replied_task_id)
 
     def explicit_channel(self, request: str) -> channels.Choice | None:
         return channels.explicit(request, self.routable(), P.clarify_channel)
@@ -373,6 +375,8 @@ class SidebandWorker:
         # on this call, so "the thermostat" means the den until hang-up once they've said so.
         self.home_question: tuple[str, str, float] | None = None
         self.home_notes: list[str] = []
+        self.home_tasks: set[str] = set()        # task ids that were instant home commands
+        self.replied_task: str | None = None     # the task the voice last spoke an answer from
         self.wants_show: set[str] = set()        # delegation ids the user wants to SEE (routing said show)
         self.show_seq = 0
         self.route_timings: dict[str, int] = {}  # task id -> routing latency (ms), stored with the task
@@ -746,7 +750,11 @@ class SidebandWorker:
                              if line.startswith("User: ")), "")
         if router.is_show_me(last_request) and await self.show_me(delegation_id, last_request):
             return
-        if not marked and await self.home_control(delegation_id, revision, last_request):
+        with self.interaction.lock:
+            device = self.interaction.device_id
+        logger.info("speakeasy: request on device %s (%d words)", (device or "unknown")[:8], len(last_request.split()))
+        home_follow = isinstance(marked, str) and marked in self.home_tasks
+        if (not marked or home_follow) and await self.home_control(delegation_id, revision, last_request):
             return
         candidates = await self.conversation_candidates(last_request)
         now = time.time()
@@ -756,12 +764,20 @@ class SidebandWorker:
         earlier = "\n".join(line for line in context.splitlines()[:-1] if line.startswith(("User: ", "Assistant: ")))
         try:
             decision = await asyncio.to_thread(self.rt.route, last_request, self.open_tasks(), marked, chats,
-                                               earlier[-1200:])
+                                               earlier[-1200:], replied_task_id=self.replied_task)
         except Exception as exc:  # routing is a nicety: without it the request still becomes new work
             logger.warning("speakeasy: routing failed, starting as new work (%s)", type(exc).__name__)
             decision = router.fallback_decision(last_request)
         self.route_timings[delegation_id] = decision.latency_ms
         part = decision.parts[0]
+        if part.kind == router.IGNORE:
+            logger.info("speakeasy: nothing to act on in a %d-word fragment; asked again", len(last_request.split()))
+            self.handoff_at.pop(delegation_id, None)
+            await self.append("session.commentary.append", delegation_id, P.DIDNT_CATCH)
+            return
+        if part.kind == router.STATUS and part.task_id:
+            await self.answer_status(delegation_id, part.task_id)
+            return
         if decision.show:
             # "What do those speakers look like?": about an open task, show what it already has (or ask
             # it for a screenshot); otherwise the work that answers must come back with a picture.
@@ -783,6 +799,26 @@ class SidebandWorker:
             await self.start_parts(delegation_id, revision, context, [p.request for p in decision.parts], choice)
             return
         await self.start_routed(delegation_id, revision, context, last_request, choice)
+
+    async def answer_status(self, delegation_id: str, task_id: str) -> None:
+        """"What's the status?": answered now from the steps the task has reported, never queued
+        behind the task itself (that made status questions wait up to eight minutes)."""
+        with self.interaction.lock:
+            run = self.interaction.runs.get(task_id)
+            steps = list(run.activity) if run else []
+            status = run.status if run else None
+            started = run.started if run else time.monotonic()
+            key = run.idem_key if run else None
+        name = (self.store.title(key) if key else None) or notice_text(self.store.request_text(key) if key else "", 80)
+        work = self.store.work(idem_key=key) if key else None
+        if not steps and work:
+            steps = [e.get("text", "") for e in (work.get("events") or []) if e.get("kind") in {"milestone", "tool"}][-4:]
+        result = notice_text(((work or {}).get("result") or {}).get("spoken"), 300) if status == "completed" else None
+        self.handoff_at.pop(delegation_id, None)
+        self.replied_task = task_id
+        logger.info("speakeasy: status answered from %d steps (%s)", len(steps), status or "unknown")
+        await self.append("session.commentary.append", delegation_id,
+                          P.status_answer(name or "that task", status, steps, time.monotonic() - started, result))
 
     async def home_control(self, delegation_id: str, revision: int, request: str) -> bool:
         """A request that is only device commands, done straight through Home Assistant (opt-in).
@@ -832,6 +868,11 @@ class SidebandWorker:
         except Exception:
             logger.warning("speakeasy: could not record the home-control card")
         self.handoff_at.pop(delegation_id, None)
+        if reply.ok:
+            # "make 'em dimmer" right after: the planner knows which lights were meant.
+            self.home_tasks.add(delegation_id)
+            self.home_notes = (self.home_notes + [f'Just now: "{request}" -> {reply.spoken}'])[-home_control_mod.MAX_NOTES:]
+        self.replied_task = delegation_id
         self.publish()
         await self.append("session.commentary.append", delegation_id, reply.spoken)
         return True
@@ -1417,10 +1458,16 @@ class SidebandWorker:
                     d = stored_drafts[-1]
                     await self.append("session.thinking.append", delegation_id,
                                       P.draft_waiting_note(self.names, d.get("subject"), d.get("to") or []))
+                self.replied_task = backend.delegation_id
+                asked = notice_text(self.store.request_text(idem), 140) or "an earlier request"
+                moved_on = self.user_spoke_since(time.monotonic() - LATE_RESULT_S) and \
+                    time.monotonic() - backend.started > LATE_RESULT_S
                 if is_latest and backend.voice_id:
                     part = notice_text(self.store.request_text(idem), 140) or "one part"
                     await self.append("session.commentary.append", delegation_id,
                                       P.result_for_part(part, spoken, bool(siblings)))
+                elif is_latest and moved_on:
+                    await self.append("session.commentary.append", delegation_id, P.late_result(asked, spoken))
                 elif is_latest:
                     await self.append("session.commentary.append", delegation_id, spoken)
                 else:
@@ -1431,6 +1478,9 @@ class SidebandWorker:
                 await self.append("session.commentary.append", delegation_id, P.STOPPED_SPOKEN)
             else:
                 await self.append("session.commentary.append", delegation_id, P.ended_without_result(status))
+
+
+LATE_RESULT_S = 20.0  # the user spoke in the last 20 s of a task that took longer: say what it answers
 
 
 def new_event_id() -> str:
