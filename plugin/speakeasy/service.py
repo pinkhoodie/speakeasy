@@ -85,7 +85,8 @@ class VoiceService:
                  title_call: Callable[[str], str | None] | None = None,
                  polish_call: Callable[[str], str | None] | None = None,
                  status_call: Callable[[str], str | None] | None = None,
-                 home_plan_call: Callable[..., Any] | None = None, home_client: Callable[..., Any] | None = None):
+                 home_plan_call: Callable[..., Any] | None = None, home_client: Callable[..., Any] | None = None,
+                 tune_run: Callable[[str, str], tuple[str, str]] | None = None):
         self.home = Path(hermes_home)
         self.dir = self.home / "speakeasy"
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -110,6 +111,12 @@ class VoiceService:
         self._suggest_run = suggest_run or self._brief_run
         self.brief = BriefManager(self.home, brief_run or self._brief_run, self.settings.get,
                                   error_fn=lambda: getattr(self.hermes, "last_error", "") or "")
+        from .tune import CallLog, TuneManager, merge_calls
+        self.call_log = CallLog(self.dir)
+        self.rt.call_log = self.call_log
+        self.tune = TuneManager(self.dir, tune_run or brief_run or self._tune_run, self.brief,
+                                lambda: merge_calls(self.call_log.recent(), self.store.calls_from_tasks()),
+                                names=self._tune_names)
         self.interactions: dict[str, Interaction] = {}
         self.lock = threading.Lock()
         self._codex_factory = codex_factory
@@ -130,6 +137,14 @@ class VoiceService:
 
     def image_roots(self) -> tuple[Path, ...]:
         return default_image_roots(self.home, self.settings.get()["image_roots"])
+
+    def _tune_run(self, prompt: str, idem: str) -> tuple[str, str]:
+        self.hermes.last_error = ""
+        return self.hermes.run_to_completion(prompt, idem, "speakeasy_tune")
+
+    def _tune_names(self) -> tuple[str, str]:
+        names = P.Names.from_settings(self.settings.get())
+        return names.assistant_name, names.user_cap or "User"
 
     def _brief_run(self, prompt: str, idem: str) -> tuple[str, str]:
         self.hermes.last_error = ""
@@ -782,6 +797,27 @@ class VoiceService:
             return self.brief.put(body["brief"])
         except BriefInvalid as exc:
             raise ServiceError(422, str(exc)) from None
+
+    def get_tune(self) -> dict[str, Any]:
+        return self.tune.get()
+
+    def start_tune(self) -> dict[str, Any]:
+        try:
+            return self.tune.start()
+        except BriefInvalid as exc:
+            raise ServiceError(409, str(exc)) from None
+
+    def apply_tune(self, body: dict[str, Any]) -> dict[str, Any]:
+        accept = body.get("accept") if isinstance(body, dict) else None
+        if not isinstance(accept, list) or not all(isinstance(a, str) for a in accept):
+            raise ServiceError(400, "accept must be a list of edit ids")
+        try:
+            return self.tune.apply(accept)
+        except BriefInvalid as exc:
+            raise ServiceError(409, str(exc)) from None
+
+    def dismiss_tune(self) -> dict[str, Any]:
+        return self.tune.dismiss()
 
     def rewrite_brief(self) -> dict[str, Any]:
         try:

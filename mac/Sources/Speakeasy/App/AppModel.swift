@@ -75,6 +75,7 @@ final class AppModel: ObservableObject {
     }
     @Published var settings = ServerSettings()
     @Published var brief: VoiceBrief?
+    @Published var tune: BriefTune?
     @Published var destinations: [Destination] = []
     /// The server's preselected delivery target for onboarding (a connected home channel).
     @Published var suggestedDestination: String?
@@ -305,6 +306,34 @@ final class AppModel: ObservableObject {
             if let b = try await api.saveBrief(text) { brief = b } else { await refreshBrief() }
             return true
         } catch { lastError = "Couldn't save the brief: \(describe(error))"; return false }
+    }
+
+    func refreshTune() async {
+        guard let api else { return }
+        tune = try? await api.tune()
+    }
+
+    func startTune() async {
+        guard let api else { return }
+        do { tune = try await api.startTune() }
+        catch let error as ServerClient.HTTPError where error.status == 409 {
+            lastError = error.message.isEmpty ? "Can't tune yet" : error.message
+        } catch { lastError = "Couldn't start tuning: \(describe(error))" }
+    }
+
+    func applyTune(_ accept: [String]) async {
+        guard let api else { return }
+        do {
+            if let b = try await api.applyTune(accept: accept) { brief = b } else { await refreshBrief() }
+            await refreshBrief()
+            tune = try? await api.tune()
+        } catch { lastError = "Couldn't apply the edits: \(describe(error))" }
+    }
+
+    func dismissTune() async {
+        guard let api else { return }
+        try? await api.dismissTune()
+        tune = try? await api.tune()
     }
 
     func rewriteBrief() async {

@@ -62,4 +62,18 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(String(decoding: wav.prefix(4), as: UTF8.self), "RIFF")
         XCTAssertEqual(String(decoding: wav.dropFirst(8).prefix(4), as: UTF8.self), "WAVE")
     }
+
+    func testBriefTuneDecodes() throws {
+        let json = #"{"state":"ready","calls":24,"summary":"Stale context.","edits":[{"id":"e1","kind":"add","section":"User","old":null,"new":"Assume home.","why":"It refused a distance.","evidence":"Mon"}],"product_issues":[{"what":"Slow status","evidence":"Tue"}]}"#
+        let tune = try JSONDecoder().decode(BriefTune.self, from: Data(json.utf8))
+        XCTAssertEqual(tune.state, "ready")
+        XCTAssertEqual(tune.calls, 24)
+        XCTAssertEqual(tune.edits.first?.section, "User")
+        XCTAssertNil(tune.edits.first?.old)
+        XCTAssertEqual(tune.productIssues.first?.what, "Slow status")
+        let empty = try JSONDecoder().decode(BriefTune.self, from: Data(#"{"state":"none","calls":0}"#.utf8))
+        XCTAssertTrue(empty.edits.isEmpty)
+        let body = try JSONSerialization.jsonObject(with: BriefTune.applyBody(accept: ["e1", "e3"])) as? [String: [String]]
+        XCTAssertEqual(body?["accept"], ["e1", "e3"])
+    }
 }

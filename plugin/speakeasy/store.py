@@ -247,6 +247,28 @@ class StateStore:
                             "at": float(updated or 0)})
         return out
 
+    def calls_from_tasks(self, since_s: float = 7 * 86400) -> list[dict[str, Any]]:
+        """Recent calls reconstructed from their tasks: what was asked, how it ended, the answer."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT idem_key, interaction_id, status, updated, title, result_json FROM runs "
+                "WHERE updated > ? ORDER BY updated", (time.time() - since_s,)).fetchall()
+        calls: dict[str, dict[str, Any]] = {}
+        for key, interaction, status, updated, title, result_json in rows:
+            request = self.request_text(key)
+            if not request:
+                continue
+            result = ""
+            if result_json:
+                try:
+                    result = str((json.loads(result_json) or {}).get("spoken") or "")
+                except ValueError:
+                    result = ""
+            call = calls.setdefault(interaction, {"id": interaction, "ended": 0.0, "turns": [], "tasks": []})
+            call["ended"] = max(call["ended"], float(updated or 0))
+            call["tasks"].append({"request": request, "title": title or "", "status": status, "result": result})
+        return list(calls.values())
+
     def away(self, limit: int = 3) -> list[dict[str, Any]]:
         """Runs that settled (terminal or approval-needed) since the previous call ended."""
         ended = self.get_meta("last_call_end")

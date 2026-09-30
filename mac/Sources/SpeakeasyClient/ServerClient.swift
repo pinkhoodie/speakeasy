@@ -83,6 +83,17 @@ public final class ServerClient: @unchecked Sendable {
     public func rewriteBrief() async throws -> VoiceBrief? {
         try? JSONDecoder().decode(VoiceBrief.self, from: try await data("/voice/brief/rewrite", method: "POST", body: Data("{}".utf8)))
     }
+    public func tune() async throws -> BriefTune { try JSONDecoder().decode(BriefTune.self, from: try await data("/voice/brief/tune")) }
+    public func startTune() async throws -> BriefTune {
+        try JSONDecoder().decode(BriefTune.self, from: try await data("/voice/brief/tune", method: "POST", body: Data("{}".utf8)))
+    }
+    public func applyTune(accept: [String]) async throws -> VoiceBrief? {
+        try? JSONDecoder().decode(VoiceBrief.self, from: try await data("/voice/brief/tune/apply", method: "POST",
+                                                                      body: try BriefTune.applyBody(accept: accept)))
+    }
+    public func dismissTune() async throws {
+        _ = try await data("/voice/brief/tune/dismiss", method: "POST", body: Data("{}".utf8))
+    }
     public func destinations() async throws -> [Destination] { Destination.list(try await data("/voice/destinations")) }
     public func destinationsWithSuggestion() async throws -> ([Destination], String?) {
         let raw = try await data("/voice/destinations")

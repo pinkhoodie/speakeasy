@@ -297,12 +297,19 @@ private struct BriefSettings: View {
     @State private var dirty = false
     @State private var draft = ServerSettings()
     @State private var busy = false
+    @State private var reviewing = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(stateLine).font(.callout).foregroundStyle(.secondary)
                 Spacer()
+                Button(app.tune?.state == "working" ? "Tuning…" : "Tune from my calls") {
+                    if app.tune?.state == "ready" { reviewing = true; return }
+                    Task { await app.startTune() }
+                }
+                .help("Your Hermes reads your recent calls and suggests edits to this brief. You approve each one.")
+                .disabled(!app.isPaired || app.tune?.state == "working" || (app.brief?.text ?? "").isEmpty)
                 Button("Rewrite") {
                     busy = true
                     Task { await app.rewriteBrief(); busy = false; dirty = false }
@@ -338,6 +345,41 @@ private struct BriefSettings: View {
         .padding([.top, .horizontal], 16)
         .onAppear { text = app.brief?.text ?? "" }
         .onReceive(app.$brief) { b in if !dirty { text = b?.text ?? "" } }
+        .task { await app.refreshTune() }
+        .task(id: app.tune?.state) {
+            // While Hermes reads the calls, check back every few seconds; open the review when it's ready.
+            guard app.tune?.state == "working" else { return }
+            while !Task.isCancelled, app.tune?.state == "working" {
+                try? await Task.sleep(for: .seconds(4))
+                await app.refreshTune()
+            }
+            if app.tune?.state == "ready" { reviewing = true }
+        }
+        .safeAreaInset(edge: .bottom) { tuneBanner }
+        .sheet(isPresented: $reviewing) { TuneReview().environmentObject(app) }
+    }
+
+    @ViewBuilder private var tuneBanner: some View {
+        if let tune = app.tune {
+            switch tune.state {
+            case "working":
+                Label("Reading your recent calls. This takes a minute or two.", systemImage: "hourglass")
+                    .font(.callout).foregroundStyle(.secondary).padding(.bottom, 8)
+            case "ready":
+                HStack {
+                    Label("\(tune.edits.count) suggested edit\(tune.edits.count == 1 ? "" : "s") from your calls",
+                          systemImage: "sparkles")
+                    Spacer()
+                    Button("Review") { reviewing = true }
+                }
+                .font(.callout).padding(.bottom, 8)
+            case "failed":
+                Label("Tuning didn't finish: \(tune.error ?? "unknown error")", systemImage: "exclamationmark.triangle")
+                    .font(.callout).foregroundStyle(.secondary).padding(.bottom, 8)
+            default:
+                EmptyView()
+            }
+        }
     }
 
     private var stateLine: String {
@@ -353,6 +395,103 @@ private struct BriefSettings: View {
         if brief.edited { parts.append("edited by you") }
         if let at = brief.updatedAt { parts.append("updated \(at.formatted(.relative(presentation: .named)))") }
         return parts.joined(separator: " · ")
+    }
+}
+
+// MARK: Tune from my calls
+
+/// Each suggested edit with the call moment behind it; nothing changes until the user applies it.
+struct TuneReview: View {
+    @EnvironmentObject var app: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var accepted: Set<String> = []
+    @State private var busy = false
+
+    var body: some View {
+        let tune = app.tune ?? BriefTune()
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Suggested edits to your voice brief").font(.headline)
+            if !tune.summary.isEmpty {
+                Text(tune.summary).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if tune.edits.isEmpty {
+                        Text("Nothing to change: your calls didn't show anything the brief should fix.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(tune.edits) { edit in
+                        TuneEditRow(edit: edit, on: Binding(
+                            get: { accepted.contains(edit.id) },
+                            set: { on in if on { accepted.insert(edit.id) } else { accepted.remove(edit.id) } }))
+                    }
+                    if !tune.productIssues.isEmpty {
+                        Divider().padding(.vertical, 4)
+                        Text("Not something your brief can fix").font(.subheadline.weight(.semibold))
+                        ForEach(Array(tune.productIssues.enumerated()), id: \.offset) { _, issue in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("• " + issue.what).fixedSize(horizontal: false, vertical: true)
+                                if let e = issue.evidence, !e.isEmpty {
+                                    Text(e).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Text("Your call transcripts went to the model your Hermes uses to make these suggestions.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("Dismiss all") {
+                    busy = true
+                    Task { await app.dismissTune(); busy = false; dismiss() }
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(accepted.isEmpty ? "Apply" : "Apply \(accepted.count)") {
+                    busy = true
+                    Task { await app.applyTune(Array(accepted)); busy = false; dismiss() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(accepted.isEmpty || busy)
+            }
+        }
+        .padding(20)
+        .frame(width: 540, height: 520)
+        .onAppear { accepted = Set((app.tune?.edits ?? []).map(\.id)) }
+    }
+}
+
+private struct TuneEditRow: View {
+    let edit: BriefTune.Edit
+    @Binding var on: Bool
+
+    var body: some View {
+        Toggle(isOn: $on) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.callout.weight(.semibold))
+                if let old = edit.old, !old.isEmpty {
+                    Text(old).strikethrough().foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if let new = edit.new, !new.isEmpty {
+                    Text(new).fixedSize(horizontal: false, vertical: true)
+                }
+                Text(edit.why + ((edit.evidence ?? "").isEmpty ? "" : " — \(edit.evidence!)"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .toggleStyle(.checkbox)
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+    }
+
+    private var title: String {
+        switch edit.kind {
+        case "add": return "Add to \(edit.section ?? "the brief")"
+        case "remove": return "Remove"
+        default: return "Change"
+        }
     }
 }
 
@@ -681,11 +820,13 @@ private struct AboutSettings: View {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 64, height: 64)
             Text("Speakeasy").font(.title2.weight(.semibold))
             Text("Version \(app.appVersion)").foregroundStyle(.secondary)
+            Link("What's new", destination: URL(string: "https://github.com/rungmc357/speakeasy/blob/main/CHANGELOG.md")!)
+                .font(.callout)
             updateRow
             if let version = app.pluginUpdateAvailable {
                 VStack(spacing: 4) {
                     Text("Hermes plugin update available: \(version)").font(.callout.weight(.semibold))
-                    Text("Running plugin: \(app.status?.version ?? "unknown"). Ask your agent to update Speakeasy on Hermes, then restart Hermes yourself when prompted. The Mac app is separate.")
+                    Text("Running plugin: \(app.status?.version ?? "unknown"). Ask your agent to update Speakeasy on Hermes; it loads without a restart. The Mac app is separate.")
                         .font(.caption).foregroundStyle(.secondary)
                     Button("Copy update request") { app.copyPluginUpdateRequest() }
                 }
