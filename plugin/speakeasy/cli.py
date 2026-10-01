@@ -345,7 +345,7 @@ def cmd_fast(home: Path, args) -> int:
                 return 2
             settings.patch({"fast_routing": {"jev": "" if value in {"off", ""} else value}})
         elif what == "home":
-            settings.patch({"fast_routing": {"home_place": value.title()[:80]}})
+            settings.patch({"fast_routing": {"home_place": raw.strip()[:80]}})
         elif what != "status":
             print("Usage: hermes voice fast [status | quick on|off | jev venice|openrouter|typesafe|off | home CITY]")
             return 2

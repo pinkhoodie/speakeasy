@@ -52,16 +52,32 @@ def place_in(question: str) -> str | None:
 
 
 def locate(place: str, fetch: Fetch = _get) -> dict[str, Any] | None:
-    data = fetch(f"{GEOCODE}?{urllib.parse.urlencode({'name': place, 'count': 1})}")
-    results = data.get("results") or []
+    """A place's coordinates. "Neighborhood, City" ("Riverside, Springfield") picks the match whose
+    region mentions the qualifier, or the one nearest the qualifier itself, not just the most populous
+    namesake elsewhere."""
+    coords = re.search(r"\((-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\)\s*$", place)
+    if coords:  # "Riverside, Springfield (40.7, -73.9)": exact, no lookup
+        name = place[:coords.start()].strip() or "home"
+        return {"name": name, "lat": float(coords[1]), "lon": float(coords[2]),
+                "country": "US" if -170 < float(coords[2]) < -50 and float(coords[1]) > 15 else ""}
+    head, _, qualifier = (part.strip() for part in place.partition(","))
+    data = fetch(f"{GEOCODE}?{urllib.parse.urlencode({'name': head or place, 'count': 10})}")
+    results = [r for r in data.get("results") or [] if "latitude" in r]
     if not results:
-        # "Brooklyn, NY" style: try the part before the comma
-        head = place.split(",")[0].strip()
-        if head and head != place:
-            return locate(head, fetch)
         return None
     r = results[0]
-    return {"name": r.get("name") or place, "lat": r["latitude"], "lon": r["longitude"],
+    if qualifier:
+        q = qualifier.lower()
+        named = [x for x in results if any(q in str(x.get(k) or "").lower()
+                                           for k in ("admin1", "admin2", "admin3", "admin4", "country", "country_code"))]
+        if named:
+            r = named[0]
+        else:
+            anchor = (fetch(f"{GEOCODE}?{urllib.parse.urlencode({'name': qualifier, 'count': 1})}").get("results") or [None])[0]
+            if anchor:
+                r = min(results, key=lambda x: (x["latitude"] - anchor["latitude"]) ** 2
+                        + (x["longitude"] - anchor["longitude"]) ** 2)
+    return {"name": (f"{r.get('name')}, {qualifier.title()}" if qualifier else r.get("name")) or place, "lat": r["latitude"], "lon": r["longitude"],
             "country": r.get("country_code") or ""}
 
 

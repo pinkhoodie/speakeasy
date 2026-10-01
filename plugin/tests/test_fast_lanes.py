@@ -169,3 +169,13 @@ def test_league_slate():
         return {}
     facts = scores.league_facts("any nfl games this week", "football/nfl", fetch=fake)
     assert len(facts) == 2 and "River Dome" in facts[1]["text"]
+
+
+
+def test_home_place_with_coordinates_skips_lookup():
+    from speakeasy import weather
+    def no_lookup(url):
+        assert "geocoding" not in url
+        return {}
+    where = weather.locate("Riverside, Sometown (40.7, -73.9)", fetch=no_lookup)
+    assert where == {"name": "Riverside, Sometown", "lat": 40.7, "lon": -73.9, "country": "US"}
