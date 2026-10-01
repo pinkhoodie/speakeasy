@@ -676,3 +676,13 @@ def stopped_notice(names: Names, status: str, request: str | None) -> str:
 
 def draft_notice(subject: str | None) -> str:
     return "Email draft waiting for your approval in Speakeasy" + (f": {notice_text(subject, 120)}" if subject else ".")
+
+
+def quick_note(spoken: str) -> str:
+    """A quick answer from one web search: say it as the answer, in your own words, briefly."""
+    return f"Answer from a quick web search (say it now, briefly, in your own words; offer to dig deeper only if asked): {spoken}"
+
+
+def quick_log(request: str, spoken: str) -> str:
+    """The voice channel's line for a quick answer (no thread)."""
+    return f"Quick answer: {request.strip()[:200]} → {spoken.strip()[:400]}"

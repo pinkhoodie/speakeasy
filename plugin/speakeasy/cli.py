@@ -76,6 +76,10 @@ def setup_parser(parser) -> None:
     routing.add_argument("--models", action="store_true", help="list every model of PROVIDER")
     home_ = sub.add_parser("home", help="Instant home control through Home Assistant: show, or turn on/off")
     home_.add_argument("state", nargs="?", choices=("on", "off", "status"), default="status")
+    fast_ = sub.add_parser("fast", help="Quick answers and optional Jev routing: show or change")
+    fast_.add_argument("what", nargs="?", default="status",
+                       help="status | quick on|off | jev venice|openrouter|typesafe|off")
+    fast_.add_argument("value", nargs="?", default="")
     tune_ = sub.add_parser("tune", help="Improve the voice brief from your recent calls (you review every edit)")
     tune_.add_argument("action", nargs="?", choices=("start", "show", "apply", "dismiss"), default="show")
     tune_.add_argument("ids", nargs="*", help="edit ids to apply (default: all)")
@@ -321,6 +325,39 @@ def cmd_home(home: Path, args) -> int:
         return 0
     finally:
         svc.close()
+
+
+def cmd_fast(home: Path, args) -> int:
+    """`hermes voice fast`: quick answers (one web search, no full agent) and optional Jev routing."""
+    from . import jev
+    from .settings import Settings, SettingsError
+    settings = Settings(home)
+    what, value = getattr(args, "what", "status"), (getattr(args, "value", "") or "").strip().lower()
+    try:
+        if what == "quick" and value in {"on", "off"}:
+            settings.patch({"fast_routing": {"quick_answers": value == "on"}})
+        elif what == "jev" and value in {"off", "", *jev.PROVIDERS}:
+            if value not in {"off", ""} and not jev.available(home, value):
+                key = jev.PROVIDERS[value]["key"]
+                print(f"No {key} in this Hermes profile's .env. Add it there first, then run this again.")
+                return 2
+            settings.patch({"fast_routing": {"jev": "" if value in {"off", ""} else value}})
+        elif what != "status":
+            print("Usage: hermes voice fast [status | quick on|off | jev venice|openrouter|typesafe|off]")
+            return 2
+    except SettingsError as exc:
+        print(f"Error: {exc}")
+        return 2
+    fast = settings.get()["fast_routing"]
+    print("Quick answers: simple public-fact questions (who owns, how tall, what time) are answered from one web "
+          "search in a few seconds instead of a full Hermes task; anything unclear still goes to Hermes.")
+    print(f"  Quick answers are {'on' if fast['quick_answers'] else 'off'}.")
+    print("\nJev (optional): TypeSafe's decision model sorts each request (home, quick answer, Hermes task) in "
+          "about half a second. Without it, only plainly-worded questions with no task running get a quick try.")
+    print(f"  Jev is {'on, via ' + jev.PROVIDERS[fast['jev']]['label'] if fast['jev'] else 'off'}.")
+    for p in jev.providers_status(home):
+        print(f"  {p['label']:<12} {'key found' if p['has_key'] else 'no ' + p['key_env']}")
+    return 0
 
 
 def cmd_tune(home: Path, args) -> int:
@@ -584,6 +621,8 @@ def handle(args) -> int:
         return cmd_home(home, args)
     if command == "tune":
         return cmd_tune(home, args)
+    if command == "fast":
+        return cmd_fast(home, args)
     store = _store(home)
     if command == "devices":
         devices = store.devices()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -21,6 +22,8 @@ from typing import Any, Callable
 
 from . import channels, continuity, router
 from . import home_control as home_control_mod
+from . import jev as jev_mod
+from . import quick as quick_mod
 from .settings import valid_delivery_target
 from .prompt import builder as P
 from .text import (ID_RE, MAX_TRANSCRIPT, TERMINAL, clean_transcript, delivery_text, derive_tool_status,
@@ -102,6 +105,8 @@ class Runtime:
     progress_call: Callable[..., str | None] | None = None
     # Instant home control (home_control.HomeControl); None or turned off = every request goes to Hermes.
     home: Any = None
+    # Quick answers (quick.answer); None = the real one. Tests swap in a fake.
+    quick_call: Callable[[str, str], str | None] | None = None
     # The local log of ended calls that "Tune from my calls" learns from (tune.CallLog); None = not kept.
     call_log: Any = None
 
@@ -138,8 +143,13 @@ class Runtime:
               chats: list[router.Chat] | None = None, call_so_far: str = "",
               replied_task_id: str | None = None) -> router.Decision:
         topics = [router.Topic(c.label, c.topic) for c in channels.opted_in(self.routable())]
+        provider = (self.settings().get("fast_routing") or {}).get("jev") or ""
+        place = None
+        if provider:
+            from . import jev
+            place = functools.partial(jev.placement, self.hermes_home, provider)
         return router.decide(request, tasks, marked, topics, self.route_call, chats=chats, call_so_far=call_so_far,
-                             replied_task_id=replied_task_id)
+                             replied_task_id=replied_task_id, jev_place=place)
 
     def explicit_channel(self, request: str) -> channels.Choice | None:
         return channels.explicit(request, self.routable(), P.clarify_channel)
@@ -823,6 +833,8 @@ class SidebandWorker:
         home_follow = isinstance(marked, str) and marked in self.home_tasks
         if (not marked or home_follow) and await self.home_control(delegation_id, revision, last_request):
             return
+        if not marked and await self.quick_answer(delegation_id, revision, last_request):
+            return
         candidates = await self.conversation_candidates(last_request)
         now = time.time()
         chats = [router.Chat(f"c{i + 1}", c.conv.where, c.snippets, c.voice_request,
@@ -949,6 +961,54 @@ class SidebandWorker:
         self.replied_task = delegation_id
         self.publish()
         await self.append("session.commentary.append", delegation_id, reply.spoken)
+        return True
+
+    async def quick_answer(self, delegation_id: str, revision: int, request: str) -> bool:
+        """A simple public-fact question ("how tall is…", "who owns…") answered in a few seconds from one
+        web search, without the full agent. Jev (optional) decides it is one; without Jev, only plain
+        questions qualify. Anything the search doesn't clearly answer goes to Hermes as usual."""
+        fast = self.rt.settings().get("fast_routing") or {}
+        if not fast.get("quick_answers", True) or not quick_mod.eligible(request):
+            return False
+        tasks = self.open_tasks()
+        if router.quick_intent(request, tasks, self.replied_task) is not None:
+            return False  # a status question, a yes to an offer, a repeat: not a lookup
+        provider = fast.get("jev") or ""
+        started = time.monotonic()
+        if provider:
+            lane, confidence, ms = await asyncio.to_thread(
+                jev_mod.route, self.rt.hermes_home, provider, request,
+                [t.request for t in tasks if t.status in ACTIVE_RUN_STATES])
+            logger.info("speakeasy: jev routed to %s (%.2f) in %d ms", lane or "unsure", confidence, ms)
+            if lane != jev_mod.QUICK:
+                return False
+        elif tasks or not quick_mod.QUESTION.search(request):
+            return False
+        today = time.strftime("%A, %B %d, %Y")
+        spoken = await asyncio.to_thread(self.rt.quick_call or quick_mod.answer, request, today)
+        if not spoken:
+            logger.info("speakeasy: quick answer passed to Hermes after %d ms", int((time.monotonic() - started) * 1000))
+            return False
+        logger.info("speakeasy: quick answer in %d ms", int((time.monotonic() - started) * 1000))
+        idem = self._idem(delegation_id, revision)
+        backend = BackendRun(delegation_id, revision, idem, status="completed")
+        with self.interaction.lock:
+            self.interaction.runs[delegation_id] = backend
+            self.interaction.latest_delegation_id = delegation_id
+        try:
+            self.store.reserve_run(idem, self.interaction.interaction_id, delegation_id, revision)
+            self.store.set_title(idem, short_title(request) or "Quick answer")
+            self.store.progress(idem, "request", request)
+            self.store.update_run(idem, None, "completed")
+            self.store.set_result(idem, split_result(spoken, ()))
+            self.store.progress(idem, "result", spoken)
+        except Exception:
+            logger.warning("speakeasy: could not record the quick-answer card")
+        self.notices.post(f"quick:{idem}", P.quick_log(request, spoken))
+        self.handoff_at.pop(delegation_id, None)
+        self.replied_task = delegation_id
+        self.publish()
+        await self.append("session.commentary.append", delegation_id, P.quick_note(spoken))
         return True
 
     async def show_me(self, delegation_id: str, request: str, task_id: str | None = None,

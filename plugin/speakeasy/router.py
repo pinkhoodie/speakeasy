@@ -631,7 +631,8 @@ def fallback_decision(request: str) -> Decision:
 def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topics: list[Topic] | None = None,
            call: Callable[[list[dict[str, str]]], str | None] | None = None,
            timeout: float = ROUTE_TIMEOUT_S, chats: list[Chat] | None = None,
-           call_so_far: str = "", replied_task_id: str | None = None) -> Decision:
+           call_so_far: str = "", replied_task_id: str | None = None,
+           jev_place: Callable[..., dict[str, Any] | None] | None = None) -> Decision:
     """Route one handoff. A task id the voice model marked wins outright (no model call)."""
     request = (request or "").strip()
     topics = topics or []
@@ -648,6 +649,16 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
         return Decision([Part("follow_up", request, tail.task_id)], None, "fragment")
     started = time.monotonic()
     decision = None
+    if jev_place is not None and not open_tasks:
+        # Jev (optional) places a new task in well under a second; anything it isn't sure of goes to the
+        # routing model below, as before. Open tasks always go to the model (follow-up judgement).
+        placed = jev_place(request, [(t.label, t.topic) for t in topics],
+                           [(c.ref, c.label + ": " + " / ".join(c.lines[:3])) for c in chats or []])
+        if placed is not None:
+            latency = int((time.monotonic() - started) * 1000)
+            logger.info("speakeasy: jev placed the request in %d ms", latency)
+            return Decision([Part(NEW, request)], placed["channel"], "jev", latency,
+                            conversation=placed["conversation"], show=placed["show"])
     if chats:
         timeout = max(timeout, CHAT_ROUTE_TIMEOUT_S)
     if needs_model(request, open_tasks, topics, chats):

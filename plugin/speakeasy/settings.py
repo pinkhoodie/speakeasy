@@ -38,6 +38,10 @@ DEFAULTS: dict[str, Any] = {
     # Instant home control through Home Assistant (offered when Hermes has it set up). entities:
     # the devices it may use (None = not chosen yet: lights, thermostats and fans).
     "home_control": {"enabled": False, "entities": None},
+    # Fast lanes. quick_answers: simple public-fact questions answered from one web search, without the
+    # full agent. jev: "" (off) or a provider of TypeSafe's Jev decision model (venice | openrouter |
+    # typesafe) that sorts each request in well under a second; the key comes from the profile .env.
+    "fast_routing": {"quick_answers": True, "jev": ""},
     "image_roots": [],
     # Written by `hermes voice setup`: the URL other devices use to reach this server (a tailnet
     # HTTPS name when Tailscale was imported), reused by `hermes voice pair`.
@@ -112,6 +116,11 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
     s["delivery"] = validate_delivery(s["delivery"])
     s["home_control"] = validate_home_control(s["home_control"])
     s["server"] = validate_server(s["server"])
+    fast = s["fast_routing"]
+    if not isinstance(fast.get("quick_answers"), bool):
+        raise SettingsError("fast_routing.quick_answers must be true or false")
+    if fast.get("jev") not in {"", "venice", "openrouter", "typesafe"}:
+        raise SettingsError("fast_routing.jev must be one of: venice, openrouter, typesafe (or empty for off)")
     for group, keys in (("continuity", ("enabled",)), ("speech", ("progress",)), ("brief", ("auto_refresh", "include_recent_voice")),
                         ("onboarding", ("names_set", "delivery_set", "home_offered"))):
         for key in keys:

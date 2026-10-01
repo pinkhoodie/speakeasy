@@ -2,6 +2,13 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.32
+
+- **Quick answers in a couple of seconds.** Simple public questions ("how tall is…", "who owns…", "what time is sunset") are answered from one web search instead of a full Hermes task. Anything the search doesn't clearly answer still goes to Hermes, so it never guesses.
+- **Sports scores, instantly.** "Did the Mets win?", "when do the Knicks play next?" come straight from live scoreboard data in about a second and a half: final score, who won, home or away, next game.
+- **Optional Jev routing.** Connect TypeSafe's Jev through Venice, OpenRouter or TypeSafe and every request is sorted (home, quick answer, Hermes task) in about half a second, instead of the several seconds the routing model takes. Off by default; `hermes voice fast jev venice` turns it on. Without Jev, plainly worded questions still get the quick lane.
+- `hermes voice fast` shows and changes all of this.
+
 ## 2026-10-01 — plugin 0.2.31
 
 **What it says is what happens**
