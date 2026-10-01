@@ -2,6 +2,12 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.36 — Every token price is live
+
+- **Any token or stock by name.** "how's the Zephyr token today", "where's Aerodrome at", "Snowflake shares?" now read the live price and show a price card, not just the handful of big names. Tokens come from CoinGecko, with Coinbase as a backup when CoinGecko is busy.
+- **No more stale prices.** If a price can't be read live, the question goes to a full task that looks it up properly, instead of reading an old number from a web search.
+- **Tiny prices read right:** $0.0000044, not $0.00.
+
 ## Mac 0.2.14 — Answers you can see
 
 - **Cards in the panel.** Quick answers and tasks now show a card next to the spoken answer: a stock with its day chart, the weather with hourly and 7-day forecasts, a game with both teams' logos, a place with its map, a day's schedule, a flight, a package's tracking, a recipe, a side-by-side comparison, and more (41 kinds). The newest one appears on the call screen while it's being said and stays in the task.

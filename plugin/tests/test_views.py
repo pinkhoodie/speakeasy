@@ -33,7 +33,7 @@ def test_clock_and_math_views():
 
 def test_market_subjects():
     assert markets.subject("where is acme at") is None
-    assert markets.subject("how is eth doing today") == ("coin", "ethereum")
+    assert markets.subject("how is eth doing today") == ("coin", "ETH")
     assert markets.subject("what did nvidia close at") == ("stock", "NVDA")
     assert markets.subject("how tall is the tower") is None
 

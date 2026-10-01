@@ -71,6 +71,8 @@ def facts(question: str, home_place: str = "") -> list[dict[str, Any]]:
         found = markets.facts_from(quote)
         found[0]["view"] = quote
         return found
+    if markets.is_price_question(question):
+        return []  # no live price: Hermes looks it up properly instead of reading an old snippet aloud
     return scores.facts(question) or weather.facts(question, home_place) or search(question)
 
 
