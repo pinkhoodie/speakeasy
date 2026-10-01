@@ -363,14 +363,15 @@ struct VoicePanelView: View {
                 }
                 let reviewing = Set(model.pinnedReviews.map(\.taskID))
                 if let task = model.state.tasks.last(where: { !reviewing.contains($0.id) &&
-                    (!$0.info.products.isEmpty || !$0.info.cards.isEmpty || !$0.info.images.isEmpty) }) {
+                    (!$0.info.products.isEmpty || !$0.info.cards.isEmpty || !$0.info.images.isEmpty || !$0.info.views.isEmpty) }) {
                     Button {
                         model.onSelectTask(task.id)
                     } label: {
                         HStack(spacing: 7) {
                             Image(systemName: "square.stack")
-                            let count = task.info.products.isEmpty ? task.info.cards.count + task.info.images.count
-                                                                   : task.info.products.count + task.info.images.count
+                            let count = (task.info.products.isEmpty ? task.info.cards.count + task.info.images.count
+                                                                    : task.info.products.count + task.info.images.count)
+                                + task.info.views.count
                             Text("\(count) \(count == 1 ? "card" : "cards") · \(task.name)").lineLimit(1)
                             Spacer(minLength: 0)
                             Image(systemName: "chevron.up")
@@ -387,6 +388,19 @@ struct VoicePanelView: View {
             if let approval = model.state.approval, !(model.workExpanded || model.state.workOnly) {
                 ApprovalRow(approval: approval, busy: model.busy, onChoice: model.onApproval)
                     .padding(.horizontal, 12).padding(.bottom, 12)
+            }
+            if !(model.workExpanded || model.state.workOnly), let pinned = model.pinnedViews {
+                VStack(spacing: 8) {
+                    ForEach(pinned.views.prefix(2)) { card in ViewCardView(card) }
+                }
+                .overlay(alignment: .topTrailing) {
+                    Button { model.dismissPinnedViews(pinned.taskID) } label: {
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).padding(6)
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Hide this card")
+                }
+                .padding(.horizontal, 12).padding(.bottom, 12)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             if !(model.workExpanded || model.state.workOnly) {
                 ForEach(model.pinnedDrafts) { draft in
@@ -977,6 +991,11 @@ struct WorkDetailView: View {
                                     }.buttonStyle(.plain)
                                 }
                             }
+                        }
+                    }
+                    if let views = info?.views, !views.isEmpty {
+                        VStack(spacing: 8) {
+                            ForEach(views) { card in ViewCardView(card) }
                         }
                     }
                     if let full = info?.result?.full ?? info?.result?.spoken {

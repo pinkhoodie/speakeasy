@@ -83,6 +83,18 @@ public final class VoicePanelModel: ObservableObject {
         state.pendingDrafts.filter { displayedStatus(of: $0) == .pending || draftBusy.contains($0.draftID) }
     }
 
+    // MARK: Answer cards (price, weather, game…)
+    /// Tasks whose cards the user closed in the call panel (they stay in the task itself).
+    @Published public var dismissedViewTasks: Set<String> = []
+    public func dismissPinnedViews(_ taskID: String) { dismissedViewTasks.insert(taskID) }
+    /// The newest task with cards, shown in the call panel while it's fresh: a quick answer's card
+    /// appears as it is spoken and stays until closed or until it's three minutes old.
+    public var pinnedViews: (taskID: String, views: [ViewCard])? {
+        guard let task = state.tasks.last(where: { !$0.info.views.isEmpty && !dismissedViewTasks.contains($0.id) }) else { return nil }
+        if let at = task.info.updatedAt, Date().timeIntervalSince(at) > 180 { return nil }
+        return (task.id, task.info.views)
+    }
+
     // MARK: Image review cards
     /// Dismiss a review card (run id); its images stay inside the task.
     public var onDismissReview: (String) -> Void = { _ in }

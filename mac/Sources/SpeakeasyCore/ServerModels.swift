@@ -61,9 +61,12 @@ public struct WorkResult: Equatable, Sendable {
     public var label: String?
     public var products: [ProductCard]
     public var images: [ImageCard]
+    /// Visual cards for the answer (a price chart, the weather, a game…), drawn above the text.
+    public var views: [ViewCard]
     public init(spoken: String?, full: String?, label: String? = nil, products: [ProductCard] = [],
-                images: [ImageCard] = []) {
+                images: [ImageCard] = [], views: [ViewCard] = []) {
         self.spoken = spoken; self.full = full; self.label = label; self.products = products; self.images = images
+        self.views = views
     }
 }
 
@@ -115,6 +118,7 @@ public struct WorkInfo: Equatable, Sendable {
     public var cards: [ResultCard] { ResultCard.links(in: result?.full ?? result?.spoken ?? "") }
     public var products: [ProductCard] { result?.products ?? [] }
     public var images: [ImageCard] { result?.images ?? [] }
+    public var views: [ViewCard] { result?.views ?? [] }
 
     /// Progress steps worth showing: everything except the raw request fragment.
     public var steps: [WorkEventItem] { events.filter { $0.kind != "request" } }
@@ -154,10 +158,12 @@ public struct WorkInfo: Equatable, Sendable {
             let products = cards.compactMap { ($0.element as? [String: Any])?["kind"] as? String == "image"
                 ? nil : ProductCard(json: $0.element, number: $0.offset + 1) }
             let images = cards.compactMap { ImageCard(json: $0.element, number: $0.offset + 1) }
+            let views = ViewCard.list(json: raw["views"])
             let value = WorkResult(spoken: nonEmpty(raw["spoken"]), full: nonEmpty(raw["full"]),
-                                   label: nonEmpty(raw["label"]), products: products, images: images)
+                                   label: nonEmpty(raw["label"]), products: products, images: images, views: views)
             // Cards alone are still a result: never drop cards because the text is empty.
-            result = (value.spoken == nil && value.full == nil && products.isEmpty && images.isEmpty) ? nil : value
+            result = (value.spoken == nil && value.full == nil && products.isEmpty && images.isEmpty && views.isEmpty)
+                ? nil : value
         } else {
             result = nil
         }
