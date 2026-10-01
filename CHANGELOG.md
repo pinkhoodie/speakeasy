@@ -2,6 +2,22 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## 2026-10-01 — plugin 0.2.31
+
+**What it says is what happens**
+- When a task is running in its own chat thread, whatever you say about it on the call now goes into that thread, as if you'd typed it there: answering its question ("the 4:15 works"), adding something, or telling it to hold off. The voice only says it passed something on after it actually got there, and tells you plainly when it couldn't.
+- The task card follows a thread task's progress ("found Thursday open, pulling times") instead of switching to "Status unconfirmed" after a minute and a half.
+- "Show me the options when you have them" reaches the task as a request for a picture, instead of getting "there's no picture to show".
+- A new subject that starts with "and also" becomes its own task instead of being added to whatever you asked just before. A single question, even a long one, stays one task.
+- The first-call tour only plays on your very first call. A new Mac, a reinstall or an update no longer replays it.
+
+**More visual**
+- When an answer is something to look at or choose from, like open times, options, a place or an order summary, the task sends a screenshot with it and the picture opens in the app during the call.
+
+**Home control**
+- Short follow-ups right after a home command ("turn them back on") and short names for devices ("the pendants") stay on the instant path instead of going the slow way through Hermes.
+- A request that was heard as two pieces ("Bedroom lamps at forty percent" … "purple") is handled as one sentence.
+
 ## 2026-09-30 — Mac app 0.2.13
 
 **Choose where Speakeasy lives**

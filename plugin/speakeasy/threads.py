@@ -31,6 +31,8 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 ROUTE_PREFIX = "speakeasy-"
+THREAD_ROUTE_PREFIX = "speakeasy-t-"   # one per thread a running task lives in (messages into it)
+MAX_THREAD_ROUTES = 24
 EVENT = "speakeasy.task"
 THREAD_PLATFORMS = {"discord", "telegram", "slack", "matrix"}
 SUBSCRIPTIONS = "webhook_subscriptions.json"
@@ -185,7 +187,9 @@ def sync_routes(hermes_home: Path, channels: list[dict[str, Any]], *, supported:
             name = route_name(target)
             wanted[name] = route_for(target, channel["label"], owner, key)
             made[target] = name
-    kept = {k: v for k, v in current.items() if not str(k).startswith(ROUTE_PREFIX)}
+    # Per-thread routes (messages into a running task's thread) are managed by ``thread_route``.
+    kept = {k: v for k, v in current.items()
+            if not str(k).startswith(ROUTE_PREFIX) or str(k).startswith(THREAD_ROUTE_PREFIX)}
     merged = {**kept, **wanted}
     if merged != current:
         tmp = path.with_suffix(".json.speakeasy-tmp")
@@ -230,6 +234,128 @@ def open_thread(base: str, key: str, target: str, *, message: str, title: str, d
     if status != 202 or reply.get("status") != "accepted" or not SAFE_ID_RE.fullmatch(thread_id):
         raise ThreadError("Hermes did not confirm a new thread")
     return Opened(route, thread_id, target.split(":", 1)[0])
+
+
+# -- messages into an existing thread ----------------------------------------------------------
+
+def thread_owner(state_db: Path, platform: str, thread_id: str) -> tuple[str, str, str] | None:
+    """(user_id, user_name, parent_chat_id) of the person whose thread this is, from the thread's
+    own session. Read-only."""
+    try:
+        db = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = db.execute("SELECT origin_json FROM sessions WHERE source=? AND thread_id=? AND origin_json IS NOT NULL "
+                          "ORDER BY started_at DESC LIMIT 5", (platform, str(thread_id))).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        db.close()
+    for (raw,) in rows:
+        try:
+            origin = json.loads(raw or "{}")
+        except ValueError:
+            continue
+        user = str(origin.get("user_id") or "") if isinstance(origin, dict) else ""
+        if user and SAFE_ID_RE.fullmatch(user):
+            parent = str(origin.get("parent_chat_id") or origin.get("chat_id") or "")
+            return user, str(origin.get("user_name") or "")[:60], parent
+    return None
+
+
+def thread_route_for(platform: str, thread_id: str, owner: tuple[str, str, str], key: str) -> dict[str, Any]:
+    """A route whose messages arrive in ``thread_id`` exactly like a message typed there, so a running
+    turn takes it the way it takes typed text (Hermes' busy-input mode: steer or queue) and an idle
+    thread starts a turn with its history. Session keys must byte-match the adapter's inbound
+    source: Discord keys an in-thread message on the thread's own id; the others on the parent chat."""
+    user_id, user_name, parent = owner
+    if platform == "discord":
+        chat_id, chat_type = str(thread_id), "thread"
+    else:
+        chat_id, chat_type = parent, "group"
+    return {
+        "description": "Speakeasy: voice messages into a running task's thread",
+        "enabled": True, "events": [EVENT], "secret": key, "prompt": "{message}", "deliver": "log",
+        "source_platform": platform, "source_chat_id": chat_id, "source_chat_type": chat_type,
+        "source_thread_id": str(thread_id), "source_chat_name": "voice",
+        "source_user_id": user_id, "source_user_name": user_name or "voice", "created": time.time(),
+    }
+
+
+def ensure_thread_route(hermes_home: Path, platform: str, thread_id: str) -> str | None:
+    """Make sure a route into this thread exists; returns its name (None when the owner is unknown)."""
+    hermes_home = Path(hermes_home)
+    name = THREAD_ROUTE_PREFIX + hashlib.sha256(f"{platform}:{thread_id}".encode()).hexdigest()[:12]
+    path = hermes_home / SUBSCRIPTIONS
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+        current = current if isinstance(current, dict) else {}
+    except (OSError, ValueError):
+        current = {}
+    if name in current:
+        return name
+    owner = thread_owner(hermes_home / "state.db", platform, thread_id)
+    if owner is None or (platform != "discord" and not owner[2]):
+        return None
+    routes = sorted(((k, v) for k, v in current.items() if str(k).startswith(THREAD_ROUTE_PREFIX)),
+                    key=lambda kv: (kv[1] or {}).get("created", 0) if isinstance(kv[1], dict) else 0)
+    for old, _ in routes[:max(0, len(routes) - MAX_THREAD_ROUTES + 1)]:
+        current.pop(old, None)
+    current[name] = thread_route_for(platform, thread_id, owner, secret(hermes_home))
+    tmp = path.with_suffix(".json.speakeasy-tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(current, fh, indent=2)
+    os.replace(tmp, path)
+    return name
+
+
+def post_to_route(base: str, key: str, route: str, *, message: str, delivery_id: str,
+                  opener: Callable[..., Any] = urllib.request.urlopen, timeout: float = 10) -> bool:
+    """Signed POST of one message to a route; True only when Hermes accepted it (202)."""
+    body = json.dumps({"event_type": EVENT, "message": message}).encode()
+    req = urllib.request.Request(f"{base.rstrip('/')}/webhooks/{route}", data=body, method="POST")
+    stamp = str(int(time.time()))
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Request-ID", delivery_id)
+    req.add_header("X-Webhook-Timestamp", stamp)
+    req.add_header("X-Webhook-Signature-V2", hmac.new(key.encode(), stamp.encode() + b"." + body,
+                                                      hashlib.sha256).hexdigest())
+    try:
+        with opener(req, timeout=timeout) as response:
+            status = getattr(response, "status", 200)
+            reply = json.loads(response.read(20_000) or b"{}")
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return False
+    return status == 202 and isinstance(reply, dict) and reply.get("status") == "accepted"
+
+
+def session_activity(state_db: Path, session_id: str, after_id: int = 0) -> list[tuple[int, str, str]]:
+    """New rows in a thread's session since ``after_id``: (id, kind, text) where kind is
+    ``commentary`` (assistant text written while it keeps working) or ``tool`` (a tool result, for
+    pictures it took or looked at). Read-only, newest 40 at most."""
+    try:
+        db = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = db.execute("SELECT id, role, coalesce(content,''), coalesce(tool_calls,'') FROM messages "
+                          "WHERE session_id=? AND id>? AND role IN ('assistant','tool') ORDER BY id DESC LIMIT 40",
+                          (session_id, int(after_id))).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        db.close()
+    out = []
+    for row_id, role, content, calls in reversed(rows):
+        if role == "assistant" and content.strip() and calls not in ("", "[]", "null"):
+            out.append((row_id, "commentary", content))
+        elif role == "tool" and content:
+            out.append((row_id, "tool", content[:4000]))
+        else:
+            out.append((row_id, "other", ""))
+    return out
 
 
 # -- following the thread's first answer ---------------------------------------------------------
@@ -287,15 +413,27 @@ def session_title(state_db: Path, session_id: str) -> str | None:
 def wait_for_answer(state_db: Path, opened: Opened, timeout_s: float, poll_s: float = 3.0,
                     sleep: Callable[[float], None] = time.sleep,
                     on_session: Callable[[str], None] | None = None,
-                    on_title: Callable[[str], None] | None = None) -> str | None:
+                    on_title: Callable[[str], None] | None = None,
+                    on_activity: Callable[[str, str], None] | None = None) -> str | None:
     """Poll until the thread's first turn finishes; None on timeout (the answer still lands in the
-    thread, only the call doesn't hear it)."""
-    waited, session_id, title = 0.0, None, None
+    thread, only the call doesn't hear it). ``on_activity(kind, text)`` hears the turn's progress
+    as it happens: its commentary and tool results (so the panel and the voice can follow along)."""
+    waited, session_id, title, seen, heard = 0.0, None, None, 0, set()
     while waited <= timeout_s:
         if session_id is None:
             session_id = thread_session(state_db, opened.platform, opened.thread_id)
             if session_id and on_session:
                 on_session(session_id)
+        if session_id and on_activity:
+            for row_id, kind, text in session_activity(state_db, session_id, seen):
+                seen = max(seen, row_id)
+                fingerprint = hashlib.sha256(f"{kind}\0{text}".encode()).hexdigest()
+                if kind != "other" and fingerprint not in heard:  # compression can copy rows
+                    heard.add(fingerprint)
+                    try:
+                        on_activity(kind, text)
+                    except Exception:
+                        logger.debug("speakeasy: thread activity callback failed", exc_info=True)
         if session_id:
             if on_title:
                 named = session_title(state_db, session_id)
@@ -377,6 +515,23 @@ class ThreadRunner:
         return opened
 
     def wait(self, opened: Opened, on_session: Callable[[str], None],
-             on_title: Callable[[str], None] | None = None) -> str | None:
+             on_title: Callable[[str], None] | None = None,
+             on_activity: Callable[[str, str], None] | None = None) -> str | None:
         return wait_for_answer(self.home / "state.db", opened, self.answer_timeout_s,
-                               on_session=on_session, on_title=on_title)
+                               on_session=on_session, on_title=on_title, on_activity=on_activity)
+
+    def post(self, platform: str, thread_id: str, *, message: str, delivery_id: str) -> bool:
+        """Put a message into an existing thread as if typed there. True only once Hermes accepted it."""
+        if platform not in THREAD_PLATFORMS or not SAFE_ID_RE.fullmatch(str(thread_id)):
+            return False
+        base = webhook_base(self.home)
+        if base is None or not capability(self.home, self.source_supported())["supported"]:
+            return False
+        route = ensure_thread_route(self.home, platform, str(thread_id))
+        if route is None:
+            return False
+        for attempt in range(3):  # Hermes hot-reloads new routes on the next request
+            if post_to_route(base, secret(self.home), route, message=message, delivery_id=f"{delivery_id}-{attempt}"):
+                return True
+            time.sleep(0.4)
+        return False

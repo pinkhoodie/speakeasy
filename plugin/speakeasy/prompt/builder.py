@@ -262,6 +262,10 @@ VISUAL_RESULTS_RULE = (
     "When the task creates or edits anything visual (a design, UI, chart, page, image or diagram), render or screenshot "
     "the finished result and include it as MEDIA:<absolute path> in your answer so {user_name} can review it in the app; "
     "when {user_name} asks to see what you are looking at, include a screenshot of it the same way. "
+    "Be visual without being asked: {user_name} is often listening, not reading, so when the answer is something to "
+    "look at or choose from (open times or slots, options, a place, a product, a page, a booking or order summary, a "
+    "chart, a before/after), include one screenshot or picture of it as MEDIA:<absolute path>. A browser screenshot "
+    "of the page you're on is ideal. One picture per answer, never for plain facts. "
 )
 
 EMAIL_DRAFT_RULE = (
@@ -366,6 +370,7 @@ def thread_task_message(names: Names, request: str, summary: str, context: str) 
                 "{user_name} to confirm here in the thread.", names,
                 possessive_approval=f"{names.possessive} explicit approval")
             + "\n\n" + render(COPYABLE_RULE, names)
+            + "\n\n" + render(VISUAL_RESULTS_RULE, names)
             + "\n\n" + render(THREAD_EMAIL_DRAFT_RULE, names))
 
 
@@ -606,7 +611,22 @@ def lost_track_note(names: Names) -> str:
 
 
 def added_to_task_note(earlier: str) -> str:
-    return f"Added that to the task already working on: {earlier}. It will come back as one answer."
+    return (f"Delivered: what they just said reached the task already working on: {earlier}. You may now say you "
+            "passed it on, in a few words. It will come back as one answer.")
+
+
+def not_delivered_note(earlier: str) -> str:
+    """Spoken when a follow-up could not reach a running task. Never claim it was passed on."""
+    return (f"I couldn't get that through to the task working on {earlier}. It's still running; "
+            "say it again in a moment, or type it in its thread.")
+
+
+def thread_follow_up(names: Names, request: str, show: bool = False) -> str:
+    """What a follow-up said on the call looks like when it lands in the task's own thread."""
+    return (render("[Voice, from {user_name}, relayed by Speakeasy] ", names) + request
+            + (" (They want to SEE this: share a screenshot or picture of it as MEDIA:<absolute path>.)" if show else "")
+            + render(" This is about the task in this thread: apply it to that work now. If it answers a question "
+                     "you asked {user_name}, act on the answer.", names))
 
 
 def continuing_in_note(where: str) -> str:

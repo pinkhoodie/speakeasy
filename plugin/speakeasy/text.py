@@ -82,6 +82,23 @@ def valid_short_status(value: Any) -> str | None:
     return text.rstrip(".!?")
 
 
+def thread_commentary(text: Any) -> str | None:
+    """What a thread task wrote while it kept working, as one display line: its first plain
+    sentence or two, without the "Voice:" echo line, markdown, commands or anything secret-looking."""
+    if not isinstance(text, str):
+        return None
+    lines = [line.strip() for line in text.splitlines()
+             if line.strip() and not re.match(r"(?i)^(?:voice|status|detail|done|spoken):", line.strip())
+             and not line.strip().startswith("```")]
+    body = re.sub(r"[*_`#>]+", "", " ".join(lines))
+    body = re.sub(r"\s+", " ", body).strip()
+    if not body:
+        return None
+    sentences = re.split(r"(?<=[.!?])\s+", body)
+    line = " ".join(sentences[:2]) if len(sentences[0]) < 60 else sentences[0]
+    return safe_user_text(line[:240], 240)
+
+
 def interim_progress(event: dict[str, Any]) -> tuple[str, str] | None:
     """Parse only explicitly user-facing STATUS/DETAIL commentary; never summarize tools."""
     short_status = event.get("short_status")

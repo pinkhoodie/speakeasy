@@ -222,6 +222,10 @@ class VoiceService:
                 or resume_from is not None and not (isinstance(resume_from, str) and ID_RE.fullmatch(resume_from))):
             raise ServiceError(400, "body must contain only an SDP offer, an optional resume_from and tour")
         tour = _tour(body.get("tour")) if "tour" in body and not resume_from else None
+        if tour is not None and self.store.get_meta("last_call_end") is not None:
+            # The app asks per Mac (a new Mac, a reinstall or an update all look like a first call
+            # there); the server knows whether this person has called before, and decides.
+            tour = None
         source = self.resumable(resume_from) if resume_from else None
         sdp = body["sdp"]
         # SDP is a wire format: its final CRLF is significant. Never strip it.

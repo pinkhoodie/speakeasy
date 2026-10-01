@@ -360,6 +360,26 @@ class StateStore:
                    AND status_source IS 'authored')""",
                 (safe_status, safe_detail, now, now, now, key, safe_status, safe_detail))
 
+    def touch(self, key: str) -> None:
+        """The task just showed it is alive (a thread task's tool step): keep it from looking stale."""
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET updated=? WHERE idem_key=? AND status NOT IN "
+                             "('completed','failed','cancelled','interrupted')", (time.time(), key))
+
+    def thread_progress(self, key: str, detail: str) -> None:
+        """A thread task's own words while it works (it has no Hermes run id, so ``user_progress``,
+        which is bound to one exact run, never applied and the card read "Status unconfirmed")."""
+        safe_detail = safe_user_text(detail, 500)
+        if not safe_detail:
+            return
+        now = time.time()
+        with self._lock, self._db:
+            self._db.execute(
+                """UPDATE runs SET detail=?, progress_updated=?, updated=?,
+                   short_status=CASE WHEN status_source='authored' THEN short_status ELSE 'Working in the thread' END,
+                   status_source=CASE WHEN status_source='authored' THEN status_source ELSE 'system' END
+                   WHERE idem_key=? AND run_id IS NULL""", (safe_detail, now, now, key))
+
     def handoff_status(self, key: str, short_status: str, detail: str) -> bool:
         """What the task was handed, shown until the run reports anything itself. Never overwrites
         a status the run (or a tool) already set; real progress replaces it as usual."""

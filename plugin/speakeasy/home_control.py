@@ -79,6 +79,22 @@ HOME_WORDS = re.compile(
     r"volume|music|speakers?|tv|scene|warmer|colder|cooler|hotter)\b")
 
 
+# A short request that only makes sense after a home command: "turn them back on", "a bit dimmer".
+FOLLOW_ON = re.compile(r"(?i)\b(?:them|those|these|it|that|again|back on|back off|on|off|more|less|bit|little|"
+                       r"brighter|dimmer|warmer|cooler|up|down|percent|half|all the way)\b")
+
+
+def distinctive_words(devices: list["Device"]) -> set[str]:
+    """Words that pick out a device on their own: in a device name, 4+ letters, not a room or kind
+    word shared by many devices, and not generic."""
+    counts: dict[str, int] = {}
+    for d in devices:
+        for w in set(re.findall(r"[a-z0-9]+", d.name.lower())):
+            counts[w] = counts.get(w, 0) + 1
+    limit = max(2, len(devices) // 4)
+    return {w for w, n in counts.items() if len(w) >= 4 and n <= limit and w not in GENERIC and w not in KIND_WORDS}
+
+
 class HomeAssistantError(Exception):
     def __init__(self, kind: str, status: int | None = None, sent: bool = False):
         super().__init__(kind)
@@ -519,18 +535,25 @@ class HomeControl:
         return [device_from_state(s) for s in snap.states if s.get("entity_id") in selected and offerable(s)][:MAX_DEVICES]
 
     # the call path
-    def wants(self, request: str, devices: list[Device]) -> bool:
-        """Worth asking the planner: mentions home things (or a chosen device by name), no timing."""
+    def wants(self, request: str, devices: list[Device], following: bool = False) -> bool:
+        """Worth asking the planner: mentions home things, a chosen device by name or by the
+        distinctive word of its name ("the sconces" for "Hallway Brass Sconces"), or, right after
+        a home command, a short follow-up that leans on it ("turn them back on", "a bit more"). No timing."""
         text = (request or "").strip()
         if not text or len(text) > MAX_REQUEST or TIMING.search(text):
             return False
         if HOME_WORDS.search(text):
             return True
         low = text.lower()
-        return any(len(d.name) >= 3 and re.search(r"\b" + re.escape(d.name.lower()) + r"\b", low) for d in devices)
+        if any(len(d.name) >= 3 and re.search(r"\b" + re.escape(d.name.lower()) + r"\b", low) for d in devices):
+            return True
+        said = set(re.findall(r"[a-z0-9]+", low))
+        if said & distinctive_words(devices):
+            return True
+        return following and len(said) <= 8 and bool(FOLLOW_ON.search(text))
 
-    def respond(self, request: str, notes: list[str] | None = None, answering: tuple[str, str] | None = None
-                ) -> Reply | None:
+    def respond(self, request: str, notes: list[str] | None = None, answering: tuple[str, str] | None = None,
+                following: bool = False) -> Reply | None:
         """The spoken result, or None to hand the request to Hermes unchanged.
 
         ``notes``: answers given earlier on this call. ``answering``: (original request, question) when
@@ -551,7 +574,7 @@ class HomeControl:
                 return None
             request = (f"{original}\n(I asked: {question} They answered: {request}. The answer only fills in what I "
                        "asked; keep every other part of the original request, including which devices, unchanged.)")
-        elif not self.wants(request, devices):
+        elif not self.wants(request, devices, following=following):
             return None
         may_ask = not answering
         started = time.monotonic()

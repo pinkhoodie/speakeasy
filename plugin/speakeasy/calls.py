@@ -25,9 +25,30 @@ from .settings import valid_delivery_target
 from .prompt import builder as P
 from .text import (ID_RE, MAX_TRANSCRIPT, TERMINAL, clean_transcript, delivery_text, derive_tool_status,
                    interim_progress, live_images_in, notice_text, safe_user_text, short_title, split_result,
-                   vetted_live_ref)
+                   thread_commentary, vetted_live_ref)
 
 logger = logging.getLogger(__name__)
+
+
+def whole_request(context: str) -> str:
+    """The user's last request, whole. Speech often lands as two transcript lines with nothing said
+    in between ("Bedroom lamps at forty percent" / "purple"); handing on only the last scrap lost the
+    rest. Consecutive user lines at the end are joined when the final one is short."""
+    lines = context.splitlines()
+    picked: list[str] = []
+    for line in reversed(lines):
+        if line.startswith("User: "):
+            picked.append(line[6:].strip())
+            if len(picked) >= 3 or len(picked[0].split()) > 4:
+                break
+            continue
+        if line.startswith("Assistant: ") or picked:
+            break
+    if not picked:
+        return ""
+    if len(picked[0].split()) > 4:
+        return picked[0]
+    return " ".join(reversed(picked)).strip()
 
 TASK_SESSION_PREFIX = "speakeasy_task_"
 LOCAL_RUN_PREFIX = "lr_"   # ids for tasks Hermes ran without a run id (thread tasks)
@@ -793,8 +814,7 @@ class SidebandWorker:
             self.publish()
             await self.append("session.commentary.append", delegation_id, P.NO_TRANSCRIPT_SPOKEN)
             return
-        last_request = next((line[6:].strip() for line in reversed(context.splitlines())
-                             if line.startswith("User: ")), "")
+        last_request = whole_request(context)
         if router.is_show_me(last_request) and await self.show_me(delegation_id, last_request):
             return
         with self.interaction.lock:
@@ -830,7 +850,10 @@ class SidebandWorker:
             # it for a screenshot); otherwise the work that answers must come back with a picture.
             if part.kind == "follow_up" and part.task_id and await self.show_me(
                     delegation_id, last_request, task_id=part.task_id, only_if_visible=True):
-                return
+                if router.only_looking(last_request):
+                    return
+                # "A picture of that page. OK, the 4:15 then": the picture opened, and the rest is
+                # an instruction for the task, which must still reach it.
             self.wants_show.add(delegation_id)
         if part.kind == "follow_up" and part.task_id:
             await self.follow_up(delegation_id, revision, context, part)
@@ -879,7 +902,11 @@ class SidebandWorker:
         if pending and time.monotonic() - pending[2] <= home_control_mod.ASK_WINDOW_S:
             answering = (pending[0], pending[1])
         try:
-            reply = await asyncio.to_thread(home.respond, request, list(self.home_notes), answering)
+            following = bool(self.home_notes) and self.replied_task in self.home_tasks
+            try:
+                reply = await asyncio.to_thread(home.respond, request, list(self.home_notes), answering, following)
+            except TypeError:  # a test double without the newer argument
+                reply = await asyncio.to_thread(home.respond, request, list(self.home_notes), answering)
         except Exception as exc:  # the fast path must never break a request
             logger.warning("speakeasy: home control failed, using Hermes (%s)", type(exc).__name__)
             return False
@@ -966,6 +993,8 @@ class SidebandWorker:
             self.show_action(run.run_id, target.task_id, kind)
             await self.append("session.commentary.append", delegation_id, P.SHOW_ME_ON_SCREEN)
             return True
+        if running and not run.run_id:
+            return False  # a thread task: the request goes into its thread (see message_thread_task)
         if running and run.run_id:
             accepted = await asyncio.to_thread(self.hermes.steer, run.run_id, P.SCREENSHOT_STEER)
             if accepted:
@@ -1072,6 +1101,8 @@ class SidebandWorker:
             return
         earlier = notice_text(self.store.request_text(key), 200) or "an earlier request"
         placed = self.store.continued_for(key)
+        if status in ACTIVE_RUN_STATES and not run_id and await self.message_thread_task(delegation_id, target, part.request):
+            return
         opening_thread = placed is None and not run_id and status in ACTIVE_RUN_STATES and target.deliver_to
         waited = 0.0
         while opening_thread and placed is None and waited < THREAD_OPEN_WAIT_S:
@@ -1101,6 +1132,45 @@ class SidebandWorker:
         await self.start_task(delegation_id, revision, context, f"{part.request} (following up: {earlier})",
                               focus=focus, session_id=self.store.session_for(key), replaces=target.delegation_id,
                               deliver_to=target.deliver_to)
+
+    async def message_thread_task(self, delegation_id: str, target: BackendRun, request: str) -> bool:
+        """A task running in a chat thread: put what was just said into that thread, exactly as if it
+        were typed there, so the running turn takes it now (Hermes steers it in, or queues it right
+        after). The voice is told it was added only once Hermes accepted the message; when it could
+        not be delivered it is told that plainly. False: not a thread task (the caller carries on)."""
+        key = target.idem_key
+        placed = None
+        waited = 0.0
+        while waited <= THREAD_OPEN_WAIT_S:
+            placed = self.store.continued_for(key) or {}
+            if placed.get("thread_id") or not target.deliver_to:
+                break
+            await asyncio.sleep(1.0)  # a thread that is still being opened: its id lands in seconds
+            waited += 1.0
+        platform, thread_id = (placed or {}).get("platform"), (placed or {}).get("thread_id")
+        runner = self.rt.threads
+        if not platform or not thread_id or runner is None or not hasattr(runner, "post"):
+            return False
+        earlier = notice_text(self.store.request_text(key), 200) or "the task"
+        wants_picture = router.wants_to_see(request)
+        message = P.thread_follow_up(self.names, request, show=wants_picture)
+        delivered = await asyncio.to_thread(runner.post, platform, str(thread_id), message=message,
+                                            delivery_id=f"{key[:40]}-{secrets.token_hex(4)}")
+        self.handoff_at.pop(delegation_id, None)
+        if not delivered:
+            logger.info("speakeasy: could not deliver a follow-up into a running task's thread")
+            await self.append("session.commentary.append", delegation_id, P.not_delivered_note(earlier))
+            return True
+        if wants_picture:
+            with self.interaction.lock:
+                self.show_pending.add(key)
+        self.store.progress(key, "milestone", f"You added: {notice_text(request, 200)}")
+        with self.interaction.lock:
+            self.interaction.latest_delegation_id = target.delegation_id
+        self.publish()
+        logger.info("speakeasy: follow-up delivered into a running task's thread")
+        await self.append("session.thinking.append", delegation_id, P.added_to_task_note(earlier))
+        return True
 
     def _register(self, task_id: str, backend: BackendRun, replaces: str | None = None) -> str | None:
         replaced_key = None
@@ -1337,9 +1407,21 @@ class SidebandWorker:
             self.store.set_title(idem, title)
             self.publish()
 
+        loop = asyncio.get_running_loop()
+
+        def on_activity(kind: str, text: str) -> None:
+            # The thread's turn is visible to the call as it happens: what it writes while working
+            # becomes the task's live status, and pictures it takes or looks at reach the panel.
+            event = ({"event": "message.interim", "text": text} if kind == "commentary"
+                     else {"event": "tool.completed", "tool": "thread", "preview": text})
+            asyncio.run_coroutine_threadsafe(self.thread_activity(backend, kind, text, event), loop)
+
         LIVE_THREAD_WAITS[idem] = time.monotonic()
         try:
-            answer = await asyncio.to_thread(self.rt.threads.wait, opened, on_session, on_title)
+            try:
+                answer = await asyncio.to_thread(self.rt.threads.wait, opened, on_session, on_title, on_activity)
+            except TypeError:  # an older runner without progress
+                answer = await asyncio.to_thread(self.rt.threads.wait, opened, on_session, on_title)
         except Exception as exc:
             answer, backend.error = None, type(exc).__name__
         finally:
@@ -1357,6 +1439,31 @@ class SidebandWorker:
                                                  if channel.target.count(":") == 1 else None,
                                                  "pointer_target": None if channel.target == self.notices.target()
                                                  else f"{opened.platform}:{opened.thread_id}"})
+
+    async def thread_activity(self, backend: BackendRun, kind: str, text: str, event: dict[str, Any]) -> None:
+        """One step a thread task reported: keep its card live and the voice's picture of it current."""
+        try:
+            if backend.status in TERMINAL:
+                return
+            self._see_images(backend, event)
+            if kind != "commentary":
+                self.store.touch(backend.idem_key)  # alive: never "Status unconfirmed" while it works
+                self.publish()
+                return
+            progress = interim_progress(event)
+            detail = progress[1] if progress else thread_commentary(text)
+            if not detail:
+                return
+            if progress:
+                self.store.user_progress(backend.idem_key, *progress)
+            self.store.thread_progress(backend.idem_key, detail)
+            self.store.progress(backend.idem_key, "milestone", detail)
+            self.record_activity(backend, detail)
+            self.publish()
+            if not await self.maybe_speak_progress(backend, detail):
+                await self.maybe_note_status(backend, detail)
+        except Exception:
+            logger.debug("speakeasy: thread progress update failed", exc_info=True)
 
     async def reconcile_stream_end(self, backend: BackendRun, cause: Exception | None = None) -> None:
         if not backend.run_id:
@@ -1415,7 +1522,8 @@ class SidebandWorker:
             with self.interaction.lock:
                 asked = backend.idem_key in self.show_pending
                 self.show_pending.discard(backend.idem_key)
-            if asked:  # "show me" asked for this screenshot: open it as soon as it arrives
+            shared = source == "generated" and self.call_connected()  # the task chose to share it
+            if asked or shared:  # open it as soon as it arrives
                 self.show_action(backend.run_id, backend.delegation_id, "live")
 
     async def _handle_hermes_event(self, backend: BackendRun, event: dict[str, Any]) -> None:
@@ -1485,8 +1593,10 @@ class SidebandWorker:
             with self.interaction.lock:
                 wanted = idem in self.show_pending
                 self.show_pending.discard(idem)
-            if wanted and (self.store.work(idem_key=idem) or {}).get("review"):
-                self.show_action(backend.run_id, backend.delegation_id, "review")  # they asked to see it
+            if (wanted or self.call_connected()) and (self.store.work(idem_key=idem) or {}).get("review"):
+                # They asked to see it, or the answer came with a picture while they're on the call:
+                # put it up instead of waiting to be asked.
+                self.show_action(backend.run_id, backend.delegation_id, "review")
             head = self.interaction.head()
             with head.lock:
                 latest = head.runs.get(head.latest_delegation_id or "")

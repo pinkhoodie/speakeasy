@@ -87,7 +87,7 @@ _AGREE = re.compile(
     r"(?i)^(?:(?:uh|um|oh|okay|ok|yeah|yes)[,.]? )*(?:yes|yeah|yep|yup|sure|go|go ahead|do it|do that|"
     r"sounds good|let's do it|let's do that|please do|yes please|go for it|perfect|okay|ok|that works|"
     r"that's fine|fine|cool|great)(?:[,.]? (?:please|thanks|do it|go ahead|go for it|let's go))?[.!?]*$")
-REPEAT_WINDOW_S = 12
+REPEAT_WINDOW_S = 30  # a slow answer gets repeated: never run it twice
 
 
 def _norm(text: str) -> list[str]:
@@ -132,19 +132,38 @@ _FRAGMENT_START = re.compile(
     r"will (?:i|we|it|they|he|she)|would (?:i|we|it)|can (?:i|we|it)|do (?:i|we|they)|does (?:it|he|she)|did (?:i|we|it|they))\b")
 
 
+_JOINER = re.compile(r"(?i)^(?:(?:and|or|plus|also|oh|so|like)[,\s]+)+")
+_FILLER = set("""a an the i me my we you your it its is are am was be do does did will would can could
+gonna going to of for on in at with about that this what how when where who why just still right now
+yet so and or but also oh like um uh okay ok yeah hey there their they them he she his her get got
+should shall might must someone something anyone anything one any some more maybe""".split())
+
+
+def _content(words: list[str]) -> set[str]:
+    return {w for w in (x.lower().strip("'") for x in words) if len(w) >= 3 and w not in _FILLER}
+
+
 def continues_newest(request: str, tasks: list[OpenTask]) -> OpenTask | None:
     """The newest task, when this request is a short tail of it: said within seconds, while it
-    runs, and too thin to stand alone ("...gonna win?" after "How's my league team doing").
+    runs, too thin to stand alone ("...gonna win?" after "How's my league team doing"), and about
+    the same thing. Decided by topic, not timing: "and also, are we pulling the new model?" right
+    after a deploy question starts with a joiner but brings its own subject, so it is a new task.
     """
     if not tasks:
         return None
     newest = tasks[-1]
     if newest.status not in {"admitting", "working", "running"} or newest.age_s is None:
         return None
-    words = re.findall(r"[A-Za-z0-9']+", request)
+    words = re.findall(r"[A-Za-z0-9.']+", request)
     if newest.age_s > FRAGMENT_WINDOW_S or not words or len(words) > 7:
         return None
-    return newest if _FRAGMENT_START.search(request.strip()) else None
+    if not _FRAGMENT_START.search(request.strip()):
+        return None
+    rest = re.findall(r"[A-Za-z0-9.']+", _JOINER.sub("", request.strip()))
+    new_subject = _content(rest) - _content(re.findall(r"[A-Za-z0-9.']+", newest.request))
+    if len(new_subject) >= 3 or any(w[:1].isdigit() or (len(w) <= 4 and w.isupper()) for w in rest if w.lower() in new_subject):
+        return None  # its own subject (or a named thing): a new task, whatever word it started with
+    return newest
 
 
 def route(request: str, tasks: list[OpenTask], marked_task_id: Any = None) -> list[Part]:
@@ -192,6 +211,32 @@ _SHOW_ME = re.compile(
     r"what you(?:'re| are)? (?:looking at|seeing|doing|made)))?|"
     r"(?:pull|bring) (?:it|that|them) up|put (?:it|that) on (?:my|the) screen"
     r")(?:[,\s]+(?:please|now|then|so far|for me))*[\s.!?]*$")
+
+
+_ACTION = re.compile(r"(?i)\b(?:take|book|grab|pick|choose|go with|use|do|make|send|buy|order|cancel|stop|hold|"
+                     r"wait|pause|skip|change|switch|move|add|remove|delete|confirm|reserve|schedule|set|turn|"
+                     r"try|keep|continue|finish|yes|yeah|yep|sure|no|nope)\b")
+
+
+def wants_to_see(request: str) -> bool:
+    """The request asks for something visual (alone or alongside an instruction)."""
+    return bool(_VISUAL.search(request or ""))
+
+
+def only_looking(request: str) -> bool:
+    """True when the request is only a look ("show me", "a picture of that page"), with no
+    instruction riding along. "A picture of that page. OK, the 4:15 then" is False: the 4:15 part
+    is an answer the task is waiting for and must reach it."""
+    clauses = [c.strip() for c in re.split(r"[.!?;]+|,\s*(?=(?:yeah|yes|and|ok|okay|then|so)\b)", request or "") if c.strip()]
+    if not clauses:
+        return True
+    for clause in clauses:
+        if is_show_me(clause):
+            continue
+        if _VISUAL.search(clause) and not _ACTION.search(clause) and len(clause.split()) <= 6:
+            continue
+        return False
+    return True
 
 
 def is_show_me(request: str) -> bool:
@@ -291,9 +336,14 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
             "correcting it, pushing back, answering its question: \"no, Hermes can\", \"you're missing a couple\", "
             "\"that's wrong\") is a follow-up to the task that answer came from, never a new task or conversation. People pause mid-thought: a short fragment said seconds after "
             "a task started that only makes sense as the end of that request (\"...and am I gonna win?\") is a "
-            "follow-up to it, never a new task. parts: when not a follow-up, the request as 1 to 4 independent, "
-            "self-contained asks (split only clearly separate asks; keep one ask whole; each part must make sense "
-            "alone). channel: the label of the channel whose description clearly fits, else null. "
+            "follow-up to it, never a new task. Decide by topic, never by timing: a request that starts with "
+            "\"and\", \"also\" or \"oh\" but brings a different subject (\"and also, are we pulling the new model?\" "
+            "while a deploy runs) is NEW work, not a follow-up. An answer to a question a task asked (a time, a "
+            "choice, yes/no) is a follow-up to that task. \"Hold off\", \"wait\", \"stop\" go to the task they are "
+            "about, usually the one just discussed. parts: when not a follow-up, the request as 1 to 4 independent, "
+            "self-contained asks. Split only clearly separate asks about different things; one question with "
+            "several details about the same thing (storage used, what's taking space, what to delete) is ONE "
+            "part; each part must make sense alone). channel: the label of the channel whose description clearly fits, else null. "
             "conversation: when the request is not a follow-up to an open task but continues work already going "
             "on in one of the existing conversations (same project, same bug, same thing being built, or it "
             "says 'that thread', 'where we were working on', 'keep going on'), that conversation's ref; judge by "
