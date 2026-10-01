@@ -31,7 +31,8 @@ SYSTEM = ("Answer a spoken question in one or two short plain sentences, using o
           "No lists, links or markdown; it will be read aloud. Say times in the user's local time if you can tell it, "
           "and say plainly when a team didn't play or its season is over. For a game question, \"last night\" or "
           "\"yesterday\" means the most recent finished game unless the dates clearly show it wasn't that recent; "
-          "give the final score and who won. If the results don't clearly and currently answer "
+          "give the final score and who won. For weather, give the conditions and high/low for the day asked "
+          "(today if none), and mention rain only when the chance is meaningful. If the results don't clearly and currently answer "
           f"it, or they disagree, reply exactly {UNSURE}.")
 
 
@@ -61,16 +62,21 @@ def answer_messages(question: str, results: list[dict[str, str]], today: str) ->
             {"role": "user", "content": f"Today is {today}. Question: {question[:400]}\nResults:\n{lines}"}]
 
 
+def facts(question: str, home_place: str = "") -> list[dict[str, str]]:
+    """Best source first: live sports data, then the weather feed, then one web search."""
+    from . import scores, weather
+    return scores.facts(question) or weather.facts(question, home_place) or search(question)
+
+
 def answer(question: str, today: str, searcher: Callable[[str], list[dict[str, str]]] | None = None,
-           writer: Callable[[list[dict[str, str]]], str | None] | None = None) -> str | None:
-    """A one-or-two-sentence spoken answer, or None (then Hermes takes it)."""
+           writer: Callable[[list[dict[str, str]]], str | None] | None = None,
+           results: list[dict[str, str]] | None = None) -> str | None:
+    """A one-or-two-sentence spoken answer, or None (then Hermes takes it). ``results`` lets a caller
+    fetch the facts in parallel with routing and hand them in."""
     if not eligible(question):
         return None
-    if searcher is None:
-        from . import scores
-        results = scores.facts(question) or search(question)
-    else:
-        results = searcher(question)
+    if results is None:
+        results = (searcher or facts)(question)
     if len(results) < 2:
         return None
     if writer is None:

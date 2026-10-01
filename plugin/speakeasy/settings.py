@@ -41,7 +41,8 @@ DEFAULTS: dict[str, Any] = {
     # Fast lanes. quick_answers: simple public-fact questions answered from one web search, without the
     # full agent. jev: "" (off) or a provider of TypeSafe's Jev decision model (venice | openrouter |
     # typesafe) that sorts each request in well under a second; the key comes from the profile .env.
-    "fast_routing": {"quick_answers": True, "jev": ""},
+    # home_place: a city for weather questions that don't name one ("what's the weather tomorrow").
+    "fast_routing": {"quick_answers": True, "jev": "", "home_place": ""},
     "image_roots": [],
     # Written by `hermes voice setup`: the URL other devices use to reach this server (a tailnet
     # HTTPS name when Tailscale was imported), reused by `hermes voice pair`.
@@ -121,6 +122,8 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
         raise SettingsError("fast_routing.quick_answers must be true or false")
     if fast.get("jev") not in {"", "venice", "openrouter", "typesafe"}:
         raise SettingsError("fast_routing.jev must be one of: venice, openrouter, typesafe (or empty for off)")
+    if not isinstance(fast.get("home_place", ""), str) or len(fast.get("home_place", "")) > 80:
+        raise SettingsError("fast_routing.home_place must be a city name")
     for group, keys in (("continuity", ("enabled",)), ("speech", ("progress",)), ("brief", ("auto_refresh", "include_recent_voice")),
                         ("onboarding", ("names_set", "delivery_set", "home_offered"))):
         for key in keys:

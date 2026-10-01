@@ -1,0 +1,117 @@
+"""Weather for quick answers: Open-Meteo forecast data (free, no key), about half a second.
+
+"What's the weather tomorrow", "will it rain in Lisbon this weekend", "how cold is it in Chicago".
+Returns facts in the same shape as search results; the quick-answer writer turns them into a sentence.
+A question with no place uses the user's home place (settings ``fast_routing.home_place``, a city
+name). Without a place or a home place, it returns [] and the normal web search runs.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import urllib.parse
+import urllib.request
+from datetime import date, datetime, timedelta
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+
+FORECAST = "https://api.open-meteo.com/v1/forecast"
+GEOCODE = "https://geocoding-api.open-meteo.com/v1/search"
+TIMEOUT_S = 2.0
+WEATHER_WORDS = re.compile(r"(?i)\b(?:weather|forecast|rain|raining|rainy|snow|snowing|sunny|cloudy|umbrella|jacket|"
+                           r"temperature|how (?:hot|cold|warm)|humid|humidity|windy|wind|storm|thunder|degrees)\b")
+NOT_WEATHER = re.compile(r"(?i)\b(?:thermostat|ac|a/c|air conditioning|heater|heating|inside|indoors|in here|"
+                         r"living room|bedroom|kitchen)\b")
+PLACE = re.compile(r"(?i)\b(?:in|for|at|around|over in|out in)\s+(?P<place>(?!the morning|the evening|the afternoon|"
+                   r"the weekend|this|next|tomorrow|today|tonight)[a-z][a-z .'\-]{1,40}?)(?=\s+(?:today|tonight|"
+                   r"tomorrow|this|next|on|over|right now|now|later|during)\b|[?.!,]|$)")
+CODES = {0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast", 45: "foggy", 48: "foggy",
+         51: "light drizzle", 53: "drizzle", 55: "heavy drizzle", 56: "freezing drizzle", 57: "freezing drizzle",
+         61: "light rain", 63: "rain", 65: "heavy rain", 66: "freezing rain", 67: "freezing rain",
+         71: "light snow", 73: "snow", 75: "heavy snow", 77: "snow grains", 80: "rain showers", 81: "rain showers",
+         82: "heavy rain showers", 85: "snow showers", 86: "heavy snow showers", 95: "thunderstorms",
+         96: "thunderstorms with hail", 99: "thunderstorms with hail"}
+Fetch = Callable[[str], Any]
+
+
+def _get(url: str) -> Any:
+    req = urllib.request.Request(url, headers={"User-Agent": "curl/8.7.1", "Accept": "*/*"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT_S) as response:
+        return json.loads(response.read(500_000) or b"{}")
+
+
+def is_weather(question: str) -> bool:
+    return bool(WEATHER_WORDS.search(question)) and not NOT_WEATHER.search(question)
+
+
+def place_in(question: str) -> str | None:
+    m = PLACE.search(question)
+    return m["place"].strip(" .") if m else None
+
+
+def locate(place: str, fetch: Fetch = _get) -> dict[str, Any] | None:
+    data = fetch(f"{GEOCODE}?{urllib.parse.urlencode({'name': place, 'count': 1})}")
+    results = data.get("results") or []
+    if not results:
+        # "Brooklyn, NY" style: try the part before the comma
+        head = place.split(",")[0].strip()
+        if head and head != place:
+            return locate(head, fetch)
+        return None
+    r = results[0]
+    return {"name": r.get("name") or place, "lat": r["latitude"], "lon": r["longitude"],
+            "country": r.get("country_code") or ""}
+
+
+def facts(question: str, home_place: str = "", fetch: Fetch = _get) -> list[dict[str, str]]:
+    if not is_weather(question):
+        return []
+    place = place_in(question) or home_place
+    if not place:
+        return []
+    try:
+        where = locate(place, fetch)
+        if where is None:
+            return []
+        fahrenheit = where["country"] in {"US", "LR", "MM", "BS", "BZ", "KY", "PW"}
+        unit = "°F" if fahrenheit else "°C"
+        params = {"latitude": where["lat"], "longitude": where["lon"], "timezone": "auto", "forecast_days": 7,
+                  "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,precipitation",
+                  "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,"
+                           "sunrise,sunset",
+                  "hourly": "temperature_2m,precipitation_probability,weather_code",
+                  "temperature_unit": "fahrenheit" if fahrenheit else "celsius",
+                  "wind_speed_unit": "mph" if fahrenheit else "kmh"}
+        data = fetch(f"{FORECAST}?{urllib.parse.urlencode(params)}")
+    except Exception as exc:
+        logger.info("speakeasy: weather lookup failed (%s)", type(exc).__name__)
+        return []
+    cur, daily, hourly = data.get("current") or {}, data.get("daily") or {}, data.get("hourly") or {}
+    if not cur or not daily.get("time"):
+        return []
+    wind = "mph" if fahrenheit else "km/h"
+    out = [{"title": f"Weather in {where['name']}",
+            "text": (f"Now ({cur.get('time', '').replace('T', ' ')} local): {round(cur['temperature_2m'])}{unit}, "
+                     f"feels like {round(cur.get('apparent_temperature', cur['temperature_2m']))}{unit}, "
+                     f"{CODES.get(cur.get('weather_code'), 'mixed')}, wind {round(cur.get('wind_speed_10m', 0))} {wind}.")}]
+    today = date.fromisoformat(daily["time"][0])
+    for i, day in enumerate(daily["time"]):
+        d = date.fromisoformat(day)
+        label = "Today" if d == today else "Tomorrow" if d == today + timedelta(days=1) else f"{d:%A}"
+        rise = (daily.get("sunrise") or [""] * 7)[i][11:16]
+        sets = (daily.get("sunset") or [""] * 7)[i][11:16]
+        out.append({"title": f"{label}, {d:%B} {d.day}",
+                    "text": (f"{CODES.get(daily['weather_code'][i], 'mixed')}, high {round(daily['temperature_2m_max'][i])}"
+                             f"{unit}, low {round(daily['temperature_2m_min'][i])}{unit}, chance of rain "
+                             f"{daily['precipitation_probability_max'][i] or 0}%, sunrise {rise}, sunset {sets}.")})
+    # The rest of today, every three hours (for "will it rain tonight", "later").
+    now_key = cur.get("time", "")[:13]
+    hours = [(t, hourly["temperature_2m"][i], hourly["precipitation_probability"][i], hourly["weather_code"][i])
+             for i, t in enumerate(hourly.get("time") or []) if t[:13] >= now_key][:24:3]
+    if hours:
+        out.append({"title": "Next 24 hours", "text": "; ".join(
+            f"{datetime.fromisoformat(t):%-I %p} {round(temp)}{unit} {CODES.get(code, 'mixed')} rain {p or 0}%"
+            for t, temp, p, code in hours)})
+    return out

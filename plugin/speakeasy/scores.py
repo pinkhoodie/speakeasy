@@ -7,13 +7,14 @@ search runs instead. The feed is unofficial: any failure is just "no facts", nev
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import re
 import threading
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -122,12 +123,62 @@ def _game_line(event: dict[str, Any], team_id: str) -> str:
     return f"Scheduled for {when}: " + " vs ".join(n for n, _, _, _ in sides) + (f" at {venue}." if venue else ".")
 
 
+LEAGUE_WORDS = [
+    (re.compile(r"(?i)\b(?:monday|thursday|sunday) night football\b|\bnfl\b|\bpro football\b"), "football/nfl"),
+    (re.compile(r"(?i)\bnba\b|\bpro basketball\b"), "basketball/nba"),
+    (re.compile(r"(?i)\bwnba\b"), "basketball/wnba"),
+    (re.compile(r"(?i)\bmlb\b|\bbaseball\b|\bworld series\b|\bwild ?card\b"), "baseball/mlb"),
+    (re.compile(r"(?i)\bnhl\b|\bhockey\b|\bstanley cup\b"), "hockey/nhl"),
+    (re.compile(r"(?i)\bcollege football\b"), "football/college-football"),
+    (re.compile(r"(?i)\bpremier league\b"), "soccer/eng.1"),
+    (re.compile(r"(?i)\bmls\b"), "soccer/usa.1"),
+]
+NIGHT_GAME = re.compile(r"(?i)\b(monday|thursday|sunday) night football\b")
+
+
+def league_in(question: str) -> str | None:
+    for pattern, league in LEAGUE_WORDS:
+        if pattern.search(question):
+            return league
+    return None
+
+
+def league_facts(question: str, league: str, fetch: Fetch = _get) -> list[dict[str, str]]:
+    """A league's games from yesterday through the next week ("who's playing Monday night football",
+    "any NBA games tonight", "who won the baseball games last night")."""
+    today = datetime.now().astimezone().date()
+    # One scoreboard call per day (the feed rejects date ranges), fetched in parallel.
+    days = [today + timedelta(days=n) for n in range(-1, 8)]
+    def one(day):
+        try:
+            return fetch(f"{BASE}/{league}/scoreboard?dates={day:%Y%m%d}").get("events") or []
+        except Exception as exc:
+            logger.info("speakeasy: scoreboard lookup failed (%s)", type(exc).__name__)
+            return []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(days)) as pool:
+        found = [e for batch in pool.map(one, days) for e in batch]
+    unique = {e.get("id"): e for e in found if e.get("id")}
+    events = sorted(unique.values(), key=lambda e: e.get("date") or "")
+    night = NIGHT_GAME.search(question)
+    if night:
+        weekday = night[1].capitalize()
+        events = [e for e in events if _local(e.get("date") or "").startswith(weekday)
+                  and int(datetime.fromisoformat((e.get("date") or "").replace("Z", "+00:00")).astimezone().hour) >= 18]
+    out = [{"title": f"{LEAGUES[league]} games", "text": f"Right now it is {datetime.now().astimezone():%A, %B %d, %-I:%M %p} local time."}]
+    for e in events[:12]:
+        out.append({"title": f"{LEAGUES[league]} game", "text": _game_line(e, "")})
+    if len(out) == 1:
+        out.append({"title": f"{LEAGUES[league]} schedule", "text": "No games found from yesterday through the next seven days."})
+    return out
+
+
 def facts(question: str, fetch: Fetch = _get) -> list[dict[str, str]]:
-    """Search-result-shaped facts for a team's games, or [] (then the web search runs)."""
+    """Search-result-shaped facts for a team's games (or a league's slate), or [] (then the web search runs)."""
     try:
         hit = match(question, fetch)
         if hit is None:
-            return []
+            league = league_in(question)
+            return league_facts(question, league, fetch) if league and GAME_WORDS.search(question + " game") else []
         league, team = hit
         events: list[dict[str, Any]] = []
         for season_type in (2, 3):  # regular season, then postseason

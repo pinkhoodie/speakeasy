@@ -119,3 +119,53 @@ def test_scores_feed_down_is_no_facts():
     def broken(url):
         raise OSError("down")
     assert scores.facts("did the otters win", fetch=broken) == []
+
+
+
+def test_instant_clock_date_math():
+    from datetime import datetime, timezone
+    from speakeasy import instant
+    now = datetime(2026, 3, 2, 15, 5, tzinfo=timezone.utc)
+    assert instant.answer("What time is it in Tokyo", now) == "It's 12:05 AM tomorrow, Tuesday, in Tokyo, 9 hours ahead of you." \
+        or "Tokyo" in instant.answer("What time is it in Tokyo", now)
+    assert instant.answer("what's 18 percent of 240") == "18 percent of 240 is 43.2."
+    assert instant.answer("whats 12 times 7") == "That's 84."
+    assert instant.answer("what is 1,250 divided by 4") == "That's 312.5."
+    assert instant.answer("what is the capital of France") is None
+    assert instant.answer("what time does the bakery close") is None
+    assert instant.answer("what day is it", now).startswith("It's ")
+    assert instant.answer("what time is it in Nowhereville", now, fetch=lambda u: {"results": []}) is None
+
+
+def test_weather_facts_and_place():
+    from speakeasy import weather
+    assert weather.place_in("will it rain in Oslo tomorrow") == "Oslo"
+    assert not weather.is_weather("turn the heat up in the bedroom")
+    assert weather.facts("what's the weather tomorrow") == []   # no place, no home place: web search instead
+    def fake(url):
+        if "geocoding" in url:
+            return {"results": [{"name": "Oslo", "latitude": 59.9, "longitude": 10.7, "country_code": "NO"}]}
+        return {"current": {"time": "2026-03-02T15:00", "temperature_2m": 3.2, "apparent_temperature": 0.1,
+                            "weather_code": 71, "wind_speed_10m": 12},
+                "daily": {"time": ["2026-03-02", "2026-03-03"], "weather_code": [71, 3],
+                          "temperature_2m_max": [4, 6], "temperature_2m_min": [-2, 0],
+                          "precipitation_probability_max": [80, 10], "sunrise": ["2026-03-02T07:10"] * 2,
+                          "sunset": ["2026-03-02T17:40"] * 2},
+                "hourly": {"time": ["2026-03-02T15:00"], "temperature_2m": [3], "precipitation_probability": [70],
+                           "weather_code": [71]}}
+    facts = weather.facts("will it snow in Oslo tomorrow", fetch=fake)
+    text = " ".join(f["title"] + " " + f["text"] for f in facts)
+    assert "3°C" in text and "light snow" in text and "Tomorrow" in text and "80%" in text
+
+
+def test_league_slate():
+    from speakeasy import scores
+    def fake(url):
+        if "/scoreboard?dates=" in url:
+            return {"events": [{"id": "9", "date": "2099-01-05T01:15Z", "competitions": [{
+                "status": {"type": {"completed": False, "state": "pre"}}, "venue": {"fullName": "River Dome"},
+                "competitors": [{"homeAway": "home", "team": {"id": "1", "displayName": "Rivertown Otters"}},
+                                {"homeAway": "away", "team": {"id": "2", "displayName": "Hill City Owls"}}]}]}]}
+        return {}
+    facts = scores.league_facts("any nfl games this week", "football/nfl", fetch=fake)
+    assert len(facts) == 2 and "River Dome" in facts[1]["text"]

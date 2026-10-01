@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from . import channels, continuity, router
 from . import home_control as home_control_mod
+from . import instant as instant_mod
 from . import jev as jev_mod
 from . import quick as quick_mod
 from .settings import valid_delivery_target
@@ -964,28 +965,43 @@ class SidebandWorker:
         return True
 
     async def quick_answer(self, delegation_id: str, revision: int, request: str) -> bool:
-        """A simple public-fact question ("how tall is…", "who owns…") answered in a few seconds from one
-        web search, without the full agent. Jev (optional) decides it is one; without Jev, only plain
-        questions qualify. Anything the search doesn't clearly answer goes to Hermes as usual."""
+        """A simple public question answered in seconds, without the full agent. Clock, date and arithmetic
+        are computed here instantly; sports, weather and other facts come from one lookup (started while
+        Jev, if on, is still deciding) plus one short sentence. Anything not clearly answered goes to
+        Hermes as usual."""
         fast = self.rt.settings().get("fast_routing") or {}
         if not fast.get("quick_answers", True) or not quick_mod.eligible(request):
             return False
         tasks = self.open_tasks()
         if router.quick_intent(request, tasks, self.replied_task) is not None:
             return False  # a status question, a yes to an offer, a repeat: not a lookup
-        provider = fast.get("jev") or ""
         started = time.monotonic()
-        if provider:
-            lane, confidence, ms = await asyncio.to_thread(
-                jev_mod.route, self.rt.hermes_home, provider, request,
-                [t.request for t in tasks if t.status in ACTIVE_RUN_STATES])
-            logger.info("speakeasy: jev routed to %s (%.2f) in %d ms", lane or "unsure", confidence, ms)
-            if lane != jev_mod.QUICK:
+        spoken = await asyncio.to_thread(instant_mod.answer, request)
+        if not spoken:
+            provider = fast.get("jev") or ""
+            if not provider and (tasks or not quick_mod.QUESTION.search(request)):
                 return False
-        elif tasks or not quick_mod.QUESTION.search(request):
-            return False
-        today = time.strftime("%A, %B %d, %Y")
-        spoken = await asyncio.to_thread(self.rt.quick_call or quick_mod.answer, request, today)
+            lookup = None
+            if self.rt.quick_call is None:
+                lookup = asyncio.ensure_future(asyncio.to_thread(quick_mod.facts, request, fast.get("home_place") or ""))
+            if provider:
+                lane, confidence, ms = await asyncio.to_thread(
+                    jev_mod.route, self.rt.hermes_home, provider, request,
+                    [t.request for t in tasks if t.status in ACTIVE_RUN_STATES])
+                logger.info("speakeasy: jev routed to %s (%.2f) in %d ms", lane or "unsure", confidence, ms)
+                if lane != jev_mod.QUICK:
+                    if lookup is not None:
+                        lookup.cancel()
+                    return False
+            today = time.strftime("%A, %B %d, %Y")
+            if lookup is None:
+                spoken = await asyncio.to_thread(self.rt.quick_call, request, today)
+            else:
+                try:
+                    results = await lookup
+                except Exception:
+                    results = []
+                spoken = await asyncio.to_thread(quick_mod.answer, request, today, None, None, results)
         if not spoken:
             logger.info("speakeasy: quick answer passed to Hermes after %d ms", int((time.monotonic() - started) * 1000))
             return False
