@@ -147,6 +147,33 @@ def clock(question: str, now: datetime | None = None, fetch: Fetch = _get) -> st
     return None
 
 
+def view(question: str, now: datetime | None = None, fetch: Fetch = _get) -> dict[str, Any] | None:
+    """The card for an instant answer: a clock pair (there + here) or the arithmetic."""
+    text = (question or "").strip()
+    m = TIME_IN.match(text)
+    if m:
+        local = (now or datetime.now()).astimezone()
+        place = (m["place"] or "").strip()
+        here = {"place": "Here", "time": _clock(local), "day": f"{local:%A}", "zone": local.tzname() or "", "here": True}
+        if not place or place in {"here", "my time"}:
+            return {"kind": "clock", "zones": [here]}
+        zone = zone_for(place, fetch)
+        if zone is None:
+            return None
+        there = local.astimezone(ZoneInfo(zone[0]))
+        diff = (there.utcoffset() - local.utcoffset()).total_seconds() / 3600
+        offset = "same time" if abs(diff) < 0.01 else f"{'+' if diff > 0 else '−'}{number(abs(diff))}h"
+        return {"kind": "clock", "zones": [{"place": zone[1], "time": _clock(there), "day": f"{there:%A}",
+                                            "offset": offset, "zone": there.tzname() or ""}, here]}
+    spoken = arithmetic(text)
+    if spoken:
+        m2 = PERCENT.match(text)
+        expr = f"{m2['p']}% of {m2['n']}" if m2 else (ARITH.match(text)["expr"].strip() if ARITH.match(text) else text)
+        result = spoken.replace("That's ", "").rstrip(".").split(" is ")[-1]
+        return {"kind": "math", "expression": expr, "result": result}
+    return None
+
+
 def answer(question: str, now: datetime | None = None, fetch: Fetch = _get) -> str | None:
     text = (question or "").strip()
     if not text or len(text) > 160:

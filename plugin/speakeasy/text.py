@@ -477,6 +477,8 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
     output, drafts = extract_email_drafts(output)
     output, _ = saved_data_images(output, image_roots)
     output, cards = product_cards(output)
+    from .views import extract as extract_views
+    output, views = extract_views(output)
     output, images, media_tags = media_images(output, image_roots)
     cards = (cards + images)[:MAX_CARDS]
     full = safe_full_text(output)
@@ -494,6 +496,8 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
     result: dict[str, Any] = {"spoken": spoken, "full": full or spoken}
     if cards:
         result["cards"] = cards
+    if views:
+        result["views"] = views
     if media_tags:
         result["_media"] = media_tags[:MAX_CARDS]
     if drafts:

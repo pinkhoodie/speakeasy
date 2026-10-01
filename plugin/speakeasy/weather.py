@@ -34,6 +34,11 @@ CODES = {0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast", 45: "
          82: "heavy rain showers", 85: "snow showers", 86: "heavy snow showers", 95: "thunderstorms",
          96: "thunderstorms with hail", 99: "thunderstorms with hail"}
 Fetch = Callable[[str], Any]
+# WMO weather code -> a symbol name the apps map to their own icons (SF Symbols on Apple platforms).
+ICONS = {0: "sun", 1: "sun", 2: "cloud_sun", 3: "cloud", 45: "fog", 48: "fog", 51: "drizzle", 53: "drizzle",
+         55: "drizzle", 56: "sleet", 57: "sleet", 61: "rain", 63: "rain", 65: "heavy_rain", 66: "sleet", 67: "sleet",
+         71: "snow", 73: "snow", 75: "snow", 77: "snow", 80: "rain", 81: "rain", 82: "heavy_rain", 85: "snow",
+         86: "snow", 95: "storm", 96: "storm", 99: "storm"}
 
 
 def _get(url: str) -> Any:
@@ -126,6 +131,19 @@ def facts(question: str, home_place: str = "", fetch: Fetch = _get) -> list[dict
     now_key = cur.get("time", "")[:13]
     hours = [(t, hourly["temperature_2m"][i], hourly["precipitation_probability"][i], hourly["weather_code"][i])
              for i, t in enumerate(hourly.get("time") or []) if t[:13] >= now_key][:24:3]
+    icon = lambda code: ICONS.get(code, "cloud")  # noqa: E731
+    out[0]["view"] = {
+        "kind": "weather", "place": where["name"].split(" (")[0], "temp": cur.get("temperature_2m"),
+        "feels_like": cur.get("apparent_temperature"), "unit": unit, "condition": CODES.get(cur.get("weather_code"), "mixed"),
+        "icon": icon(cur.get("weather_code")), "high": daily["temperature_2m_max"][0], "low": daily["temperature_2m_min"][0],
+        "rain": daily["precipitation_probability_max"][0], "wind": f"{round(cur.get('wind_speed_10m', 0))} {wind}",
+        "sunrise": (daily.get("sunrise") or [""])[0][11:16], "sunset": (daily.get("sunset") or [""])[0][11:16],
+        "hours": [{"label": f"{datetime.fromisoformat(t):%-I %p}", "temp": temp, "rain": p or 0, "icon": icon(code)}
+                  for t, temp, p, code in hours[:8]],
+        "days": [{"label": "Today" if i == 0 else f"{date.fromisoformat(d):%a}", "high": daily["temperature_2m_max"][i],
+                  "low": daily["temperature_2m_min"][i], "rain": daily["precipitation_probability_max"][i] or 0,
+                  "condition": CODES.get(daily["weather_code"][i], "mixed"), "icon": icon(daily["weather_code"][i])}
+                 for i, d in enumerate(daily["time"][:7])]}
     if hours:
         out.append({"title": "Next 24 hours", "text": "; ".join(
             f"{datetime.fromisoformat(t):%-I %p} {round(temp)}{unit} {CODES.get(code, 'mixed')} rain {p or 0}%"

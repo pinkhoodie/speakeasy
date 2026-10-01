@@ -25,6 +25,7 @@ from . import home_control as home_control_mod
 from . import instant as instant_mod
 from . import jev as jev_mod
 from . import quick as quick_mod
+from . import views as views_mod
 from .settings import valid_delivery_target
 from .prompt import builder as P
 from .text import (ID_RE, MAX_TRANSCRIPT, TERMINAL, clean_transcript, delivery_text, derive_tool_status,
@@ -977,6 +978,10 @@ class SidebandWorker:
             return False  # a status question, a yes to an offer, a repeat: not a lookup
         started = time.monotonic()
         spoken = await asyncio.to_thread(instant_mod.answer, request)
+        shown: list[dict[str, Any]] = []
+        if spoken:
+            card = await asyncio.to_thread(instant_mod.view, request)
+            shown = views_mod.clean_all([card]) if card else []
         if not spoken:
             provider = fast.get("jev") or ""
             if not provider and (tasks or not quick_mod.QUESTION.search(request)):
@@ -1002,6 +1007,8 @@ class SidebandWorker:
                 except Exception:
                     results = []
                 spoken = await asyncio.to_thread(quick_mod.answer, request, today, None, None, results)
+                if spoken:
+                    shown = quick_mod.views_in(results)
         if not spoken:
             logger.info("speakeasy: quick answer passed to Hermes after %d ms", int((time.monotonic() - started) * 1000))
             return False
@@ -1016,7 +1023,10 @@ class SidebandWorker:
             self.store.set_title(idem, short_title(request) or "Quick answer")
             self.store.progress(idem, "request", request)
             self.store.update_run(idem, None, "completed")
-            self.store.set_result(idem, split_result(spoken, ()))
+            result = split_result(spoken, ()) or {"spoken": spoken, "full": spoken}
+            if shown:
+                result["views"] = shown
+            self.store.set_result(idem, result)
             self.store.progress(idem, "result", spoken)
         except Exception:
             logger.warning("speakeasy: could not record the quick-answer card")

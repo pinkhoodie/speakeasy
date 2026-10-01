@@ -62,10 +62,21 @@ def answer_messages(question: str, results: list[dict[str, str]], today: str) ->
             {"role": "user", "content": f"Today is {today}. Question: {question[:400]}\nResults:\n{lines}"}]
 
 
-def facts(question: str, home_place: str = "") -> list[dict[str, str]]:
-    """Best source first: live sports data, then the weather feed, then one web search."""
-    from . import scores, weather
+def facts(question: str, home_place: str = "") -> list[dict[str, Any]]:
+    """Best source first: live prices, live sports data, the weather feed, then one web search.
+    A fact may carry a ``view`` (the app's card for it); the writer only ever reads title and text."""
+    from . import markets, scores, weather
+    quote = markets.card(question)
+    if quote:
+        found = markets.facts_from(quote)
+        found[0]["view"] = quote
+        return found
     return scores.facts(question) or weather.facts(question, home_place) or search(question)
+
+
+def views_in(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from . import views
+    return views.clean_all([r["view"] for r in results if isinstance(r, dict) and isinstance(r.get("view"), dict)])
 
 
 def answer(question: str, today: str, searcher: Callable[[str], list[dict[str, str]]] | None = None,

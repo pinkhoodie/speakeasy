@@ -258,6 +258,34 @@ PRODUCT_CARDS_RULE = (
     "or destinations. Omit a field you cannot verify. Number products in your prose to match the array order. "
 )
 
+VIEWS_RULE = (
+    "When the answer is something the user would rather see than hear (a place, a route, a flight, a package, "
+    "a schedule, a comparison, a list, numbers over time, a recipe, a contact, a draft), also include a JSON array in "
+    "a fenced block labeled `speakeasy-views` before DONE/SPOKEN; the app draws each object as a card. Each object has "
+    "a `kind` and only fields you verified. Kinds and their main fields: "
+    "place {name, category, address, rating, price, open_now, hours_today, url, photo_url, lat, lon}; "
+    "places {title, items[{name, rating, price, distance, url, photo_url, lat, lon}]}; "
+    "route {origin, destination, mode, minutes, distance, leave_by, steps[]}; "
+    "transit {station, departures[{line, destination, minutes}]}; "
+    "flight {number, airline, origin, destination, departs, arrives, status, gate, delay}; "
+    "package {carrier, item, status, eta, steps[{when, text, done}]}; "
+    "calendar_day {date, events[{start, end, title, place}]}; agenda {days[{date, events[]}]}; "
+    "reminder {title, due, list}; countdown {label, date, days}; "
+    "contact {name, subtitle, phone, email}; message_draft {channel, to, subject, body}; "
+    "inbox {items[{from, subject, preview, when}]}; "
+    "media {kind_label, title, subtitle, year, art_url, rating, runtime, where[], overview}; "
+    "entity {title, subtitle, image_url, summary, facts[{label, value}]}; fact {title, value, unit, subtitle}; "
+    "definition {word, phonetic, part, meanings[], example}; conversion {from_value, from_unit, to_value, to_unit}; "
+    "translation {source_lang, target_lang, source, text, phonetic}; "
+    "recipe {title, image_url, time, serves, ingredients[], steps[]}; nutrition {title, serving, calories, rows[]}; "
+    "comparison {title, columns[], rows[{label, values[]}], winner}; list {title, items[{text, done, detail}]}; "
+    "steps {title, items[]}; stats {title, items[{label, value, delta, good}]}; "
+    "chart {title, style (line|bar), unit, labels[], series[{name, values[]}]}; progress {label, value, total, unit}; "
+    "news {items[{headline, source, when, url}]}; quote {symbol, name, price, change_pct, points[]}; "
+    "weather {place, temp, unit, condition, high, low, days[]}; game {league, status, teams[{name, score, winner}]}. "
+    "Use https URLs only, never invent images or numbers, and skip the block when nothing is worth showing. "
+)
+
 VISUAL_RESULTS_RULE = (
     "When the task creates or edits anything visual (a design, UI, chart, page, image or diagram), render or screenshot "
     "the finished result and include it as MEDIA:<absolute path> in your answer so {user_name} can review it in the app; "
@@ -327,7 +355,7 @@ def build_task_prompt(names: Names, revision: int, context: str, focus: str | No
         "another board or session. "
         + truthfulness(names) + " "
         "Do not auto-approve consequential actions. Return concise verified facts and status suitable for speech. "
-        + PRODUCT_CARDS_RULE + render(VISUAL_RESULTS_RULE, names) + render(EMAIL_DRAFT_RULE, names)
+        + PRODUCT_CARDS_RULE + VIEWS_RULE + render(VISUAL_RESULTS_RULE, names) + render(EMAIL_DRAFT_RULE, names)
         + (render("Your task: ", names) + f"{focus} " + render(
             "Other parts of what {user_name} said run as separate tasks; do not do them, and do not "
             "redo or cancel another task's work. ", names) if focus else

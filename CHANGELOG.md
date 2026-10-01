@@ -2,6 +2,12 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.35 — Cards behind every quick answer
+
+- **Prices answer in under a second, with a chart.** "Where's Apple at", "how's ETH today", "what's the S&P doing" read live stock and crypto prices (no web search) and come with a price card: ticker, today's change and the day's chart.
+- **Every quick answer now carries a card** for the apps to draw: the weather with hourly and 7-day forecasts, a game with both teams' logos and the score, a league's slate of games, a clock showing there and here, the math worked out.
+- **Full Hermes tasks can show cards too.** When an answer is better seen than heard (a place, a route, a flight, a package, a day's schedule, a comparison, a recipe, a draft), the task adds a card alongside its answer. 41 card types in all. Apps that don't know a card type yet simply skip it.
+
 ## Plugin 0.2.34
 
 - **Home city is exact.** Neighborhood names the map service doesn't know (or shares with another town) no longer land somewhere else: `hermes voice fast home "Neighborhood, City (lat, lon)"` pins it.

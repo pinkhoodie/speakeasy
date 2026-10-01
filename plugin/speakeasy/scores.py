@@ -100,6 +100,30 @@ def _local(iso: str) -> str:
     return when.strftime("%A, %B %d at %-I:%M %p")
 
 
+def game_view(event: dict[str, Any], league: str = "") -> dict[str, Any]:
+    """The app's game card: both sides with logos and scores, status, time, venue, broadcast."""
+    comp = (event.get("competitions") or [{}])[0]
+    status = ((comp.get("status") or {}).get("type") or {})
+    teams = []
+    for c in comp.get("competitors") or []:
+        team = c.get("team") or {}
+        score = c.get("score")
+        score = score.get("displayValue") if isinstance(score, dict) else score
+        record = ((c.get("records") or c.get("record") or [{}])[0] or {}).get("summary") if isinstance(
+            c.get("records") or c.get("record"), list) else None
+        logo = team.get("logo") or ((team.get("logos") or [{}])[0] or {}).get("href")
+        teams.append({"name": team.get("displayName"), "abbr": team.get("abbreviation"),
+                      "score": score if status.get("state") != "pre" else None, "logo_url": logo,
+                      "winner": c.get("winner"), "home": c.get("homeAway") == "home", "record": record})
+    teams.sort(key=lambda t: bool(t.get("home")))  # away first, then home
+    state = "final" if status.get("completed") else "live" if status.get("state") == "in" else "scheduled"
+    casts = [n for b in comp.get("broadcasts") or [] for n in (b.get("names") or [])]
+    return {"kind": "game", "league": LEAGUES.get(league, ""), "status": state,
+            "detail": status.get("shortDetail") or status.get("detail"), "when": _local(event.get("date") or ""),
+            "venue": (comp.get("venue") or {}).get("fullName"), "broadcast": ", ".join(casts[:2]) or None,
+            "teams": teams}
+
+
 def _game_line(event: dict[str, Any], team_id: str) -> str:
     comp = (event.get("competitions") or [{}])[0]
     sides = []
@@ -169,6 +193,11 @@ def league_facts(question: str, league: str, fetch: Fetch = _get) -> list[dict[s
         out.append({"title": f"{LEAGUES[league]} game", "text": _game_line(e, "")})
     if len(out) == 1:
         out.append({"title": f"{LEAGUES[league]} schedule", "text": "No games found from yesterday through the next seven days."})
+    elif events:
+        slate = [game_view(e, league) for e in events[:12]]
+        out[0]["view"] = ({**slate[0]} if len(slate) == 1 else
+                          {"kind": "games", "title": f"{LEAGUES[league]} games", "league": LEAGUES[league],
+                           "games": [{k: g.get(k) for k in ("status", "when", "teams")} for g in slate]})
     return out
 
 
@@ -213,6 +242,9 @@ def facts(question: str, fetch: Fetch = _get) -> list[dict[str, str]]:
         seen.add(e.get("id"))
         out.append({"title": f"{name} next game", "text": _game_line(e, team["id"])})
         break
+    focus = (live[:1] or finished[-1:] or [e for e in upcoming if e.get("id") in seen][:1])
+    if focus:
+        out[0]["view"] = game_view(focus[0], league)
     if len(out) == 1 or (not finished and not live and len(seen) == 0):
         out.append({"title": f"{name} schedule", "text": "No games found this season (it may be the off-season)."})
     return out
