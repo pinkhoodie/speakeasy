@@ -2,6 +2,11 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Mac 0.2.14 — Answers you can see
+
+- **Cards in the panel.** Quick answers and tasks now show a card next to the spoken answer: a stock with its day chart, the weather with hourly and 7-day forecasts, a game with both teams' logos, a place with its map, a day's schedule, a flight, a package's tracking, a recipe, a side-by-side comparison, and more (41 kinds). The newest one appears on the call screen while it's being said and stays in the task.
+- **Tap to open the real thing.** A place opens in Maps, a link opens in the browser, a stock opens its quote page.
+
 ## Plugin 0.2.35 — Cards behind every quick answer
 
 - **Prices answer in under a second, with a chart.** "Where's Apple at", "how's ETH today", "what's the S&P doing" read live stock and crypto prices (no web search) and come with a price card: ticker, today's change and the day's chart.
