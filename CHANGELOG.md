@@ -2,6 +2,10 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.37
+
+- **"Home" says which channel it is.** In the list of places to post results, the home channel now reads "Discord · Home · Your Server / general" instead of just "Discord · Home", so it's clear your general channel is already there.
+
 ## Plugin 0.2.36 — Every token price is live
 
 - **Any token or stock by name.** "how's the Zephyr token today", "where's Aerodrome at", "Snowflake shares?" now read the live price and show a price card, not just the handful of big names. Tokens come from CoinGecko, with Coinbase as a backup when CoinGecko is busy.

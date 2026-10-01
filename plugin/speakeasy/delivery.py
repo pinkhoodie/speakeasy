@@ -137,6 +137,18 @@ def _gateway_home_channels(hermes_home: Path) -> dict[str, dict[str, str]]:
         return {}
 
 
+def home_label(home: dict[str, str], chats: list[dict[str, Any]]) -> str:
+    """'Home · The Wetlands / general': the home channel is left out of the chat list, so its entry must
+    say which chat it actually is, or a user can't tell whether their #general is offered at all."""
+    label = str(home.get("name") or "Home").strip() or "Home"
+    for chat in chats:
+        if str(chat.get("id")) == str(home.get("chat_id")) and chat.get("type") != "group" and chat.get("name"):
+            real = str(chat["name"])
+            real = f"{chat['guild']} / {real}" if chat.get("guild") else real
+            return label if real.lower() == label.lower() else f"{label} · {real}"
+    return label
+
+
 def _chat_target(platform: str, chat: dict[str, Any]) -> str:
     target = f"{platform}:{chat['id']}"
     if chat.get("thread_id"):
@@ -189,7 +201,7 @@ def destinations(hermes_home: Path) -> dict[str, Any]:
         if home:
             target = f"{name}:{home['chat_id']}" + (f":{home['thread_id']}" if home.get("thread_id") else "")
             if valid_delivery_target(target):
-                entry["home_channel"] = {"name": home["name"][:80], "target": target}
+                entry["home_channel"] = {"name": home_label(home, chats)[:120], "target": target}
         chats.sort(key=lambda c: CHAT_TYPE_ORDER.get(str(c.get("type") or ""), 3))
         seen = {entry["home_channel"]["target"]} if entry["home_channel"] else set()
         for chat in chats:
