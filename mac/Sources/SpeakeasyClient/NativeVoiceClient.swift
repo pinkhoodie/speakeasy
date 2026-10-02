@@ -341,7 +341,7 @@ public final class NativeVoiceClient: VoiceCallClient {
                     self.connect(api)
                     return
                 }
-                self.dispatch(.failed(error.localizedDescription))
+                self.dispatch(.failed(ConnectionTrouble.message(for: error, server: self.config.serverURL)))
             }
         }
     }
