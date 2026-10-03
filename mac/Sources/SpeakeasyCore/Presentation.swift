@@ -136,7 +136,8 @@ public func present(_ s: VoiceState) -> PillPresentation {
     case .idle:
         mark = .idle; primary = s.workOnly ? "\(s.assistantName)'s work" : s.assistantName
     case .connecting:
-        mark = .connecting; primary = "Connecting…"
+        if s.earlyListening && !muted { mark = .listening; primary = "Listening" }
+        else { mark = .connecting; primary = "Connecting…" }
     case .live:
         if case .speaking = s.speech { mark = .speaking; primary = s.assistantName }
         else if muted { mark = .muted; primary = "Muted" }
@@ -164,7 +165,13 @@ public func present(_ s: VoiceState) -> PillPresentation {
         if running >= 2 && workTone != .attention { secondary = "\(running) tasks" }
     } else {
         switch s.connection {
-        case .connecting: secondary = s.interactionID == nil ? "Opening microphone" : "Getting ready"
+        case .connecting:
+            if s.earlyListening && !muted {
+                let heard = cleanTranscript(s.earlyHeard)
+                secondary = heard.isEmpty ? "Go ahead · connecting" : "\u{201C}" + (heard.count > 80 ? "…" + String(heard.suffix(80)) : heard) + "\u{201D}"
+            } else {
+                secondary = s.interactionID == nil ? "Opening microphone" : "Getting ready"
+            }
         case .live:
             if muted { secondary = "Mic off · call still open" }
             else if s.speech == .quieted { secondary = "Reply silenced · call continues" }

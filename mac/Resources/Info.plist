@@ -19,7 +19,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.2.14</string>
+	<string>0.2.15</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -43,6 +43,8 @@
 	<string>MIT License</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Speakeasy uses the microphone only during a voice call you start.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>While a call you start is still connecting, Speakeasy transcribes what you say on this Mac, so a request said right away isn't lost. Nothing is sent to Apple.</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>

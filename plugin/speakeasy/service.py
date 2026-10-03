@@ -6,6 +6,7 @@ gateway's profile scope.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import hashlib
 import json
@@ -54,6 +55,7 @@ ROUTING_HINT = ("Also: `hermes voice routing` on the machine that runs Hermes. "
 MAX_SDP = 96 * 1024
 PAUSE_NOTICE_AFTER_S = 15 * 60
 IDLE_CHECK_S = 15
+EARLY_CONNECT_WAIT_S = 8  # words heard while connecting wait this long for the call's event channel
 
 
 
@@ -502,6 +504,26 @@ class VoiceService:
         return None
 
     # -- task controls -------------------------------------------------------------------------
+    def early_request(self, interaction_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Words the app heard (and transcribed on the device) while the call was connecting.
+        Waits briefly for the call's event channel, then hands them over as the first request."""
+        text = body.get("text") if isinstance(body, dict) else None
+        if set(body or {}) != {"text"} or not isinstance(text, str) or len(text) > 4000:
+            raise ServiceError(400, "body must contain only text")
+        interaction = self.interaction(interaction_id)
+        deadline = time.monotonic() + EARLY_CONNECT_WAIT_S
+        worker = interaction.worker
+        while time.monotonic() < deadline:
+            worker = interaction.worker
+            if worker is not None and worker.loop is not None and worker.call_connected():
+                break
+            time.sleep(0.1)
+        else:
+            raise ServiceError(409, "the call isn't connected")
+        future = asyncio.run_coroutine_threadsafe(worker.early_request(text), worker.loop)
+        task_id = future.result(10)
+        return {"interaction_id": interaction_id, "task_id": task_id}
+
     def skip_tour(self, interaction_id: str) -> dict[str, Any]:
         """Skip button in the panel: tell the live call to drop the first-call tour."""
         interaction = self.interaction(interaction_id)

@@ -113,6 +113,10 @@ public struct VoiceState: Equatable, Sendable {
     public var idleTimeout: TimeInterval = VoiceState.defaultIdleTimeout
     /// Hint shown on the idle panel (the user's call shortcut, e.g. "⌃⌥Space").
     public var callShortcutHint: String = "Control–Option–Space"
+    /// Listening on the device while the call connects (words said now aren't lost).
+    public var earlyListening = false
+    /// What was heard while connecting, as transcribed so far.
+    public var earlyHeard = ""
 
     public init() {}
 
@@ -190,6 +194,10 @@ public enum VoiceEvent: Equatable, Sendable {
     case resumeRequested
     case tick
     case reset
+    /// On-device listening while connecting started (true) or stopped (false).
+    case earlyListening(Bool)
+    /// Words heard while connecting, so far.
+    case earlyHeard(String)
 }
 
 /// Pure reducer. `now` is supplied by the caller so tests are deterministic.
@@ -211,6 +219,13 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
 
     case .sessionAdmitted(let id):
         s.interactionID = id
+
+    case .earlyListening(let on):
+        s.earlyListening = on && s.connection == .connecting
+        if !s.earlyListening { s.earlyHeard = "" }
+
+    case .earlyHeard(let text):
+        if s.earlyListening { s.earlyHeard = text; s.lastActivityAt = now }
 
     case .pauseRequested:
         if s.canPause { s.pausing = true; s.connection = .ending; s.speech = .idle }

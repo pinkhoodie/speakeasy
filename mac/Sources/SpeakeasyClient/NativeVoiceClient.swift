@@ -98,6 +98,10 @@ public final class NativeVoiceClient: VoiceCallClient {
     private var codexStopRequested = false
     private var appliedMic: MicState?
     private var appliedRemote: Bool?
+    /// Listens on the device while the call connects; nil when not listening.
+    private var earlyCapture: EarlyCapture?
+    /// Listen while connecting so a request said right away isn't lost (on-device transcription).
+    public var listenWhileConnecting = true
     /// Preview mode: canned state, no network, no audio.
     public private(set) var previewMode = false
 
@@ -286,6 +290,7 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func connect(_ api: ServerClient) {
+        startEarlyCapture()
         let engine = NativeCallEngine()
         self.engine = engine
         engine.onMessage = { [weak self] data in
@@ -324,10 +329,14 @@ public final class NativeVoiceClient: VoiceCallClient {
                 self.voiceProvider = admission.voiceProvider
                 self.codexStopRequested = false
                 self.dispatch(.sessionAdmitted(interactionID: admission.interactionID))
+                // The call's own audio takes over from here: stop listening on the device.
+                let early = self.earlyCapture
+                early?.stopListening()
                 try await engine.setRemoteAnswer(admission.answerSDP)
                 self.appliedMic = nil; self.appliedRemote = nil
                 self.dispatch(.tick)
                 self.startServerEvents(api, interactionID: admission.interactionID)
+                if let early { self.handOverEarlyWords(early, api: api, interactionID: admission.interactionID) }
                 if self.model.state.connection == .ending { self.sendClose() }
             } catch {
                 guard let self, self.engine === engine else { return }
@@ -389,6 +398,7 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func callPaused() {
+        stopEarlyCapture()
         endDeadline?.cancel(); endDeadline = nil
         startTask?.cancel(); startTask = nil
         engine?.close(); engine = nil
@@ -527,6 +537,43 @@ public final class NativeVoiceClient: VoiceCallClient {
         }
     }
 
+    // MARK: Listening while connecting
+
+    private func startEarlyCapture() {
+        stopEarlyCapture()
+        guard listenWhileConnecting, model.state.localAudioEnabled, !previewMode else { return }
+        let capture = EarlyCapture()
+        capture.onPartial = { [weak self] text in self?.dispatch(.earlyHeard(text)) }
+        guard capture.start() else { return }
+        earlyCapture = capture
+        dispatch(.earlyListening(true))
+    }
+
+    private func stopEarlyCapture() {
+        earlyCapture?.cancel()
+        earlyCapture = nil
+        if model.state.earlyListening { dispatch(.earlyListening(false)) }
+    }
+
+    /// The words said while connecting become the call's first request. Muting before the call
+    /// connected drops them (a mute means "that wasn't for you").
+    private func handOverEarlyWords(_ capture: EarlyCapture, api: ServerClient, interactionID: String) {
+        Task { [weak self] in
+            let text = await capture.finish()
+            guard let self, self.earlyCapture === capture else { return }
+            self.earlyCapture = nil
+            let keep = self.model.state.localAudioEnabled && self.model.state.connection.isInCall
+            self.dispatch(.earlyListening(false))
+            guard keep, !cleanTranscript(text).isEmpty else { return }
+            self.dispatch(.inputDelta(text))
+            do {
+                _ = try await api.post("/voice/interactions/\(interactionID)/early-request", ["text": String(text.prefix(1000))])
+            } catch {
+                self.dispatch(.error("Couldn't pass on what you said while connecting. Say it again."))
+            }
+        }
+    }
+
     public func skipTour() {
         guard model.tourActive else { return }
         model.tourActive = false
@@ -535,6 +582,7 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func finishCall(_ finalization: Finalization) {
+        stopEarlyCapture()
         model.selectedTaskID = nil
         model.tourActive = false
         endDeadline?.cancel(); endDeadline = nil

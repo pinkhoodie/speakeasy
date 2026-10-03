@@ -228,12 +228,14 @@ class Handler(BaseHTTPRequestHandler):
             if draft:
                 self._reply(200, self.service.decide_draft(draft.group(1), self._body()))
                 return
-            action = re.fullmatch(rf"/voice/interactions/{_ID}/(end|pause|approval|cancel-backend|skip-tour)", path)
+            action = re.fullmatch(rf"/voice/interactions/{_ID}/(end|pause|approval|cancel-backend|skip-tour|early-request)", path)
             if not action:
                 raise ServiceError(404, "not found")
             interaction_id, verb = action.groups()
             if verb == "end":
                 self._reply(200, self.service.finish_transport(interaction_id))
+            elif verb == "early-request":
+                self._reply(200, self.service.early_request(interaction_id, self._body()))
             elif verb == "pause":
                 self._reply(200, self.service.pause(interaction_id))
             elif verb == "skip-tour":

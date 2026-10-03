@@ -477,6 +477,17 @@ enum PanelSmoke {
         await settle()
         do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/long-connecting.png")); record("snapshot \(dir)/long-connecting.png") }
         catch { fail("snapshot failed: \(error)") }
+        // Listening while connecting: the words already heard show under "Listening".
+        var early = connecting
+        early.exchange = Exchange()
+        early.transcript = []
+        early.earlyListening = true
+        early.earlyHeard = "Turn on the bedroom lamps"
+        c.showPreview(early, workExpanded: false)
+        c.model.shownStatus = present(early).secondary
+        await settle()
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/early-listening.png")); record("snapshot \(dir)/early-listening.png") }
+        catch { fail("snapshot failed: \(error)") }
         guard let (listening, _) = PreviewFixtures.state("listening") else { return }
         c.showPreview(listening, workExpanded: false)
         c.model.tourActive = true

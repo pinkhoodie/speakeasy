@@ -706,6 +706,17 @@ def draft_notice(subject: str | None) -> str:
     return "Email draft waiting for your approval in Speakeasy" + (f": {notice_text(subject, 120)}" if subject else ".")
 
 
+def early_request_note(names: Names, text: str) -> str:
+    """Words said while the call was still connecting, transcribed on the device. Work on them has
+    already started, so the voice must not hand them off again or ask for them again."""
+    return render(
+        "Before this call finished connecting, {user_name_cap} already said: \u201c", names) + text.strip()[:1000] + (
+        "\u201d\nThis is their first request. It has already been handed off and work has started, so do NOT "
+        "hand it off again and do not ask them to repeat it. Don't greet them or introduce yourself: "
+        "acknowledge it in a few words of your own (\u201cOn it\u201d), then stop talking. If it was only a "
+        "greeting or small talk, just answer it briefly.")
+
+
 def quick_note(spoken: str) -> str:
     """A quick answer from one web search: say it as the answer, in your own words, briefly."""
     return f"Answer from a quick web search (say it now, briefly, in your own words; offer to dig deeper only if asked): {spoken}"

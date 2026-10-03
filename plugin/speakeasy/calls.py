@@ -57,6 +57,8 @@ def whole_request(context: str) -> str:
 
 TASK_SESSION_PREFIX = "speakeasy_task_"
 LOCAL_RUN_PREFIX = "lr_"   # ids for tasks Hermes ran without a run id (thread tasks)
+EARLY_PREFIX = "early_"    # handoffs for words said while the call was still connecting
+EARLY_MAX_CHARS = 1000
 MAX_TASKS = 8
 ACTIVE_RUN_STATES = {"admitting", "running", "working", "waiting_for_approval", "resolving_approval",
                      "cancel_requested"}
@@ -655,11 +657,30 @@ class SidebandWorker:
         target = head.worker if head is not self.interaction else self
         if target is None or target is not self and not target.call_connected():
             return
+        if delegation_id and delegation_id.startswith(EARLY_PREFIX):
+            delegation_id = None  # the provider never issued this handoff: say it session-wide
         if target is not self:
             content = "(Update on a task from before the pause.) " + content
             await target.send_on_own_loop(kind, None, content)
             return
         await self._send(kind, delegation_id, content[:2000])
+
+    async def early_request(self, text: str) -> str | None:
+        """Words the app heard while the call was still connecting (transcribed on the device).
+        They become the call's first request, handled like any handoff, and the voice is told so it
+        acknowledges them instead of greeting the user or asking them to repeat it."""
+        text = clean_transcript(text or "").strip()[:EARLY_MAX_CHARS]
+        if not text:
+            return None
+        delegation_id = EARLY_PREFIX + secrets.token_hex(8)
+        self.delegations.add(delegation_id)
+        self.touch()
+        # Part of the call's transcript, so later requests ("make it warmer") see it as context.
+        self.fragments.append({"speaker": "user", "text": text, "at": time.monotonic(), "start_ms": 0, "end_ms": 0})
+        logger.info("speakeasy: request heard while connecting (%d words)", len(text.split()))
+        await self.append("session.thinking.append", None, P.early_request_note(self.names, text))
+        self.schedule_dispatch(delegation_id, f"User: {text}")
+        return delegation_id
 
     async def send_on_own_loop(self, kind: str, delegation_id: str | None, content: str) -> None:
         loop, current = self.loop, asyncio.get_running_loop()
@@ -852,8 +873,12 @@ class SidebandWorker:
         self.route_timings[delegation_id] = decision.latency_ms
         part = decision.parts[0]
         if part.kind == router.IGNORE:
-            logger.info("speakeasy: nothing to act on in a %d-word fragment; asked again", len(last_request.split()))
             self.handoff_at.pop(delegation_id, None)
+            if delegation_id.startswith(EARLY_PREFIX):
+                # "Hey" before the call connected: the voice already has the words and answers itself.
+                logger.info("speakeasy: words heard while connecting were not a request")
+                return
+            logger.info("speakeasy: nothing to act on in a %d-word fragment; asked again", len(last_request.split()))
             await self.append("session.commentary.append", delegation_id, P.DIDNT_CATCH)
             return
         if part.kind == router.STATUS and part.task_id:

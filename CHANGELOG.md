@@ -2,6 +2,11 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Mac 0.2.15 + Plugin 0.2.38 — Talk while it connects
+
+- **Start talking right away.** While a call is still connecting, Speakeasy already listens: the panel says "Listening" and shows your words as you say them. When the call connects, what you said becomes your first request, so "turn on the bedroom lamps" works without waiting or repeating yourself.
+- **Stays on your Mac.** Those first words are transcribed on the device by macOS speech recognition; macOS asks for permission once. Mute before the call connects and the words are dropped.
+
 ## Plugin 0.2.37
 
 - **"Home" says which channel it is.** In the list of places to post results, the home channel now reads "Discord · Home · Your Server / general" instead of just "Discord · Home", so it's clear your general channel is already there.
