@@ -306,6 +306,11 @@ class VoiceService:
             self.interactions[interaction_id] = interaction
         self.store.complete_session(request_id, client_result)
         self._start_worker(interaction, provider, transport).start()
+        # Weather is the most common quick question: have the home forecast ready before it's asked.
+        home = (s.get("fast_routing") or {}).get("home_place") or ""
+        if home and s.get("fast_routing", {}).get("quick_answers", True):
+            from . import weather
+            threading.Thread(target=weather.warm, args=(home,), daemon=True, name="speakeasy-weather-warm").start()
         return client_result
 
     def _start_codex(self, sdp: str, instructions: str, seed: list, voice: str, s: dict[str, Any]) -> Any:

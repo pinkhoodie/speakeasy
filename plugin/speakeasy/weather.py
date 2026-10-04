@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
@@ -19,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 FORECAST = "https://api.open-meteo.com/v1/forecast"
 GEOCODE = "https://geocoding-api.open-meteo.com/v1/search"
-TIMEOUT_S = 2.0
+TIMEOUT_S = 3.0
 WEATHER_WORDS = re.compile(r"(?i)\b(?:weather|forecast|rain|raining|rainy|snow|snowing|sunny|cloudy|umbrella|jacket|"
                            r"temperature|how (?:hot|cold|warm)|humid|humidity|windy|wind|storm|thunder|degrees)\b")
 NOT_WEATHER = re.compile(r"(?i)\b(?:thermostat|ac|a/c|air conditioning|heater|heating|inside|indoors|in here|"
@@ -41,10 +43,46 @@ ICONS = {0: "sun", 1: "sun", 2: "cloud_sun", 3: "cloud", 45: "fog", 48: "fog", 5
          86: "snow", 95: "storm", 96: "storm", 99: "storm"}
 
 
-def _get(url: str) -> Any:
+_cache: dict[str, tuple[float, Any]] = {}
+_cache_lock = threading.Lock()
+# Places don't move; forecasts are refreshed by Open-Meteo about every 15 minutes.
+GEOCODE_TTL_S = 7 * 24 * 3600
+FORECAST_TTL_S = 10 * 60
+
+
+def _fetch_once(url: str) -> Any:
     req = urllib.request.Request(url, headers={"User-Agent": "curl/8.7.1", "Accept": "*/*"})
     with urllib.request.urlopen(req, timeout=TIMEOUT_S) as response:
         return json.loads(response.read(500_000) or b"{}")
+
+
+def _get(url: str) -> Any:
+    """One Open-Meteo request: from the cache when fresh, else fetched with one quick retry.
+    A single slow reply used to drop the whole card (the call then fell back to a web search)."""
+    ttl = GEOCODE_TTL_S if url.startswith(GEOCODE) else FORECAST_TTL_S
+    now = time.monotonic()
+    with _cache_lock:
+        hit = _cache.get(url)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    try:
+        data = _fetch_once(url)
+    except (TimeoutError, OSError):
+        data = _fetch_once(url)
+    with _cache_lock:
+        if len(_cache) > 200:
+            _cache.clear()
+        _cache[url] = (time.monotonic(), data)
+    return data
+
+
+def warm(home_place: str) -> None:
+    """Fetch the home place's forecast ahead of a call, so the first weather question is instant."""
+    if home_place:
+        try:
+            facts("weather today", home_place)
+        except Exception as exc:  # warming is best effort
+            logger.info("speakeasy: weather warm-up failed (%s)", type(exc).__name__)
 
 
 def is_weather(question: str) -> bool:
