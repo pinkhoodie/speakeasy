@@ -17,6 +17,7 @@ public final class EarlyCapture {
     private var task: SFSpeechRecognitionTask?
     private var recognizer: SFSpeechRecognizer?
     private var latest = ""
+    private var lastHeardAt: Date?
     private var finalText: String?
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var running = false
@@ -79,6 +80,7 @@ public final class EarlyCapture {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if let text, !text.isEmpty {
+                    if text != self.latest { self.lastHeardAt = Date() }
                     self.latest = text
                     self.onPartial?(text)
                 }
@@ -86,6 +88,21 @@ public final class EarlyCapture {
             }
         }
         return true
+    }
+
+    /// Words heard so far (may still grow).
+    public var heardSoFar: String { latest }
+
+    /// The call is ready. If you're mid-sentence, keep listening until you pause, so a sentence is
+    /// never split between this listener and the call. Returns at once when nothing has been said;
+    /// otherwise after `pause` seconds with no new words, or `limit` seconds at most.
+    public func waitForPause(pause: TimeInterval = 0.8, limit: TimeInterval = 8) async {
+        let deadline = Date().addingTimeInterval(limit)
+        while running, audioOn, Date() < deadline {
+            guard let last = lastHeardAt, !latest.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+            if Date().timeIntervalSince(last) >= pause { return }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
     }
 
     /// Stop the mic now (the call's own audio is taking over); the words are read with `finish()`.

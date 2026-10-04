@@ -151,7 +151,9 @@ public final class NativeVoiceClient: VoiceCallClient {
     private func applySideEffects(from old: VoiceState, to new: VoiceState) {
         if appliedMic != new.mic {
             appliedMic = new.mic
-            engine?.setMicEnabled(new.localAudioEnabled)
+            // While the connecting listener still has the mic (you're finishing a sentence), the
+            // call's mic stays off so it doesn't hear the end of that sentence a second time.
+            engine?.setMicEnabled(new.localAudioEnabled && earlyCapture == nil)
         }
         if appliedRemote != new.remoteAudioEnabled {
             appliedRemote = new.remoteAudioEnabled
@@ -330,15 +332,21 @@ public final class NativeVoiceClient: VoiceCallClient {
                 self.voiceProvider = admission.voiceProvider
                 self.codexStopRequested = false
                 self.dispatch(.sessionAdmitted(interactionID: admission.interactionID))
-                // The call's own audio takes over from here: stop listening on the device.
                 let early = self.earlyCapture
-                early?.stopListening()
-                engine.releaseAudio()
+                if early != nil { engine.setMicEnabled(false) }
                 try await engine.setRemoteAnswer(admission.answerSDP)
                 self.appliedMic = nil; self.appliedRemote = nil
                 self.dispatch(.tick)
                 self.startServerEvents(api, interactionID: admission.interactionID)
-                if let early { self.handOverEarlyWords(early, api: api, interactionID: admission.interactionID) }
+                if let early {
+                    // Mid-sentence? Let the listener hear you out before the call takes the mic.
+                    await early.waitForPause()
+                    early.stopListening()
+                    engine.releaseAudio()
+                    self.handOverEarlyWords(early, api: api, interactionID: admission.interactionID)
+                } else {
+                    engine.releaseAudio()
+                }
                 if self.model.state.connection == .ending { self.sendClose() }
             } catch {
                 guard let self, self.engine === engine else { return }
@@ -565,6 +573,8 @@ public final class NativeVoiceClient: VoiceCallClient {
             let text = await capture.finish()
             guard let self, self.earlyCapture === capture else { return }
             self.earlyCapture = nil
+            self.appliedMic = nil
+            self.dispatch(.tick)   // the call's mic opens now (unless you muted)
             let keep = self.model.state.localAudioEnabled && self.model.state.connection.isInCall
             self.dispatch(.earlyListening(false))
             guard keep, !cleanTranscript(text).isEmpty else { return }
