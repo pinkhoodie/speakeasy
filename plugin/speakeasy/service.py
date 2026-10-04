@@ -529,6 +529,16 @@ class VoiceService:
         task_id = future.result(10)
         return {"interaction_id": interaction_id, "task_id": task_id}
 
+    def mic_check(self, interaction_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """The app found the call's mic wasn't getting through and reopened the connection.
+        Logged (no audio, no words) so dead-mic calls show up in the logs with a reason."""
+        note = body.get("note") if isinstance(body, dict) else None
+        if set(body or {}) != {"note"} or not isinstance(note, str) or len(note) > 200:
+            raise ServiceError(400, "body must contain only note")
+        self.interaction(interaction_id)
+        logger.warning("speakeasy: mic check on %s: %s", interaction_id[:10], re.sub(r"[^\w :.,()-]", "", note))
+        return {"interaction_id": interaction_id, "logged": True}
+
     def skip_tour(self, interaction_id: str) -> dict[str, Any]:
         """Skip button in the panel: tell the live call to drop the first-call tour."""
         interaction = self.interaction(interaction_id)

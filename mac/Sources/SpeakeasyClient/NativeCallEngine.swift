@@ -210,6 +210,23 @@ public final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDat
         }
     }
 
+    /// Mic health probe: the capture level (nil when WebRTC reports none) and outgoing audio
+    /// packets so far (nil when unknown). Calls back on the main queue.
+    public func micProbe(_ completion: @escaping (_ level: Double?, _ packetsSent: Int?) -> Void) {
+        guard let peer, !closed else { return }
+        peer.statistics { report in
+            var level: Double?, packets: Int?
+            for stats in report.statistics.values where (stats.values["kind"] as? String) == "audio" {
+                if stats.type == "media-source", let l = (stats.values["audioLevel"] as? NSNumber)?.doubleValue {
+                    level = max(level ?? 0, l)
+                } else if stats.type == "outbound-rtp", let p = (stats.values["packetsSent"] as? NSNumber)?.intValue {
+                    packets = (packets ?? 0) + p
+                }
+            }
+            DispatchQueue.main.async { completion(level, packets) }
+        }
+    }
+
     public var sdpLineCount: Int? {
         peer?.localDescription?.sdp.components(separatedBy: .newlines).filter { !$0.isEmpty }.count
     }

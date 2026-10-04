@@ -115,6 +115,8 @@ public struct VoiceState: Equatable, Sendable {
     public var callShortcutHint: String = "Control–Option–Space"
     /// Listening on the device while the call connects (words said now aren't lost).
     public var earlyListening = false
+    /// Whether the call's mic is really delivering sound (see MicCheck). `.ok` unless the client checks.
+    public var micHealth: MicHealth = .ok
     /// What was heard while connecting, as transcribed so far.
     public var earlyHeard = ""
 
@@ -198,6 +200,8 @@ public enum VoiceEvent: Equatable, Sendable {
     case earlyListening(Bool)
     /// Words heard while connecting, so far.
     case earlyHeard(String)
+    /// The mic check's verdict changed.
+    case micHealth(MicHealth)
 }
 
 /// Pure reducer. `now` is supplied by the caller so tests are deterministic.
@@ -223,6 +227,9 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
     case .earlyListening(let on):
         s.earlyListening = on && s.connection == .connecting
         if !s.earlyListening { s.earlyHeard = "" }
+
+    case .micHealth(let health):
+        s.micHealth = health
 
     case .earlyHeard(let text):
         if s.earlyListening { s.earlyHeard = text; s.lastActivityAt = now }

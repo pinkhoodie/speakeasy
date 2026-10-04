@@ -91,6 +91,11 @@ public final class NativeVoiceClient: VoiceCallClient {
     private var workOnlyTask: Task<Void, Never>?
     private var ticker: Timer?
     private var levelTimer: Timer?
+    /// Checks the call's mic really gets through (see MicCheck); runs even with the screen off.
+    private var micCheck = MicCheck()
+    private var micTimer: Timer?
+    /// Set while a dead mic is being repaired (pause → immediate resume).
+    private var micRepairPending = false
     private var endDeadline: DispatchWorkItem?
     private var dwell = StatusDwell(minimumDwell: 1.5)
     private var closeNotified = false
@@ -146,6 +151,63 @@ public final class NativeVoiceClient: VoiceCallClient {
         let after = reduce(before, event, now: Date())
         model.state = after
         applySideEffects(from: before, to: after)
+        watchMic(event, from: before, to: after)
+    }
+
+    // MARK: Mic check
+
+    private func watchMic(_ event: VoiceEvent, from old: VoiceState, to new: VoiceState) {
+        switch event {
+        case .inputDelta, .outputDelta: micCheck.heard()
+        default: break
+        }
+        if old.connection != .live && new.connection == .live {
+            micCheck.connectionOpened()
+            micRepairPending = false
+            if new.micHealth != micCheck.health { dispatch(.micHealth(micCheck.health)) }
+            startMicTimer()
+        }
+        if !new.connection.isInCall && new.connection != .paused && micTimer != nil {
+            micTimer?.invalidate(); micTimer = nil
+        }
+    }
+
+    private func startMicTimer() {
+        guard micTimer == nil else { return }
+        micTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.checkMic() }
+        }
+    }
+
+    private func checkMic() {
+        guard let engine, model.state.connection == .live else { return }
+        let state = model.state
+        var speaking = false
+        if case .speaking = state.speech { speaking = true }
+        let listening = state.mic == .live && earlyCapture == nil && !engine.isAudioHeld && !speaking
+        engine.micProbe { [weak self] level, packets in
+            guard let self, self.engine === engine else { return }
+            let fault = self.micCheck.sample(level: level, packetsSent: packets, listening: listening, now: Date())
+            if self.model.state.micHealth != self.micCheck.health { self.dispatch(.micHealth(self.micCheck.health)) }
+            if let fault { self.repairMic(fault) }
+        }
+    }
+
+    /// The mic isn't getting through: reopen the voice connection (conversation and tasks kept).
+    /// This is what closing and reopening the app did, done for you within a few seconds.
+    private func repairMic(_ fault: MicFault) {
+        guard model.state.canPause, !micRepairPending, !reconnectAfterPause else { return }
+        micCheck.repairStarted()
+        micRepairPending = true
+        dispatch(.micHealth(.repairing))
+        reportMic("repair \(micCheck.repairs): \(fault.rawValue)")
+        reconnectAfterPause = true
+        pause()
+    }
+
+    private func reportMic(_ note: String) {
+        guard let api, let id = model.state.interactionID else { return }
+        Task { _ = try? await api.post("/voice/interactions/\(id)/mic-check", ["note": String(note.prefix(200))]) }
     }
 
     private func applySideEffects(from old: VoiceState, to new: VoiceState) {
@@ -251,6 +313,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         voiceProvider = "openai"
         codexStopRequested = false
         appliedMic = nil; appliedRemote = nil
+        micCheck = MicCheck(); micRepairPending = false
         dwell = StatusDwell(minimumDwell: 1.5)
         model.workExpanded = false
         model.captionExpanded = false

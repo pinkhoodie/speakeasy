@@ -149,14 +149,19 @@ public func present(_ s: VoiceState) -> PillPresentation {
     case .idle:
         mark = .idle; primary = s.workOnly ? "\(s.assistantName)'s work" : s.assistantName
     case .connecting:
-        if s.earlyListening && !muted { mark = .listening; primary = "Listening" }
+        if s.micHealth == .repairing { mark = .connecting; primary = "Fixing the mic…" }
+        else if s.earlyListening && !muted { mark = .listening; primary = "Listening" }
         else { mark = .connecting; primary = "Connecting…" }
     case .live:
         if case .speaking = s.speech { mark = .speaking; primary = s.assistantName }
         else if muted { mark = .muted; primary = "Muted" }
+        else if s.micHealth == .broken { mark = .idle; primary = "Mic isn't working" }
+        else if s.micHealth == .repairing { mark = .connecting; primary = "Fixing the mic…" }
+        else if s.micHealth == .checking { mark = .connecting; primary = "Starting mic…" }
         else { mark = .listening; primary = "Listening" }
     case .ending:
-        mark = .connecting; primary = s.pausing ? "Pausing…" : "Ending…"
+        mark = .connecting
+        primary = s.micHealth == .repairing ? "Fixing the mic…" : (s.pausing ? "Pausing…" : "Ending…")
     case .paused:
         mark = .idle; primary = "Paused"
     case .ended(.complete):
@@ -179,6 +184,12 @@ public func present(_ s: VoiceState) -> PillPresentation {
         if running >= 2 && workTone != .attention { secondary = "\(running) tasks" }
     } else {
         switch s.connection {
+        case .connecting where s.micHealth == .repairing:
+            secondary = "Mic wasn't picking you up · reconnecting, conversation kept"
+        case .live where !muted && s.micHealth == .broken && s.speech != .quieted:
+            secondary = "End the call and start a new one"; tone = .error
+        case .live where !muted && s.micHealth == .checking:
+            secondary = "Checking it can hear you"
         case .connecting:
             if s.earlyListening && !muted {
                 let heard = cleanTranscript(s.earlyHeard)
@@ -191,6 +202,8 @@ public func present(_ s: VoiceState) -> PillPresentation {
             else if s.speech == .quieted { secondary = "Reply silenced · call continues" }
             else if case .speaking = s.speech { secondary = "Talk to interrupt" }
             else { secondary = "Go ahead" }
+        case .ending where s.micHealth == .repairing:
+            secondary = "Mic wasn't picking you up · reconnecting, conversation kept"
         case .ending: secondary = s.pausing ? "Holding your place" : "Confirming final usage"
         case .paused: secondary = "Voice off · not billed · Resume to continue"
         case .ended(.complete): secondary = "Closed and confirmed"
