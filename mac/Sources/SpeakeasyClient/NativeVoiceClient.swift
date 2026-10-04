@@ -293,6 +293,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         startEarlyCapture()
         let engine = NativeCallEngine()
         self.engine = engine
+        if earlyCapture != nil { engine.holdAudio() }
         engine.onMessage = { [weak self] data in
             guard let self else { return }
             for event in parseDataChannelMessage(data) {
@@ -332,6 +333,7 @@ public final class NativeVoiceClient: VoiceCallClient {
                 // The call's own audio takes over from here: stop listening on the device.
                 let early = self.earlyCapture
                 early?.stopListening()
+                engine.releaseAudio()
                 try await engine.setRemoteAnswer(admission.answerSDP)
                 self.appliedMic = nil; self.appliedRemote = nil
                 self.dispatch(.tick)
@@ -552,6 +554,7 @@ public final class NativeVoiceClient: VoiceCallClient {
     private func stopEarlyCapture() {
         earlyCapture?.cancel()
         earlyCapture = nil
+        engine?.releaseAudio()
         if model.state.earlyListening { dispatch(.earlyListening(false)) }
     }
 

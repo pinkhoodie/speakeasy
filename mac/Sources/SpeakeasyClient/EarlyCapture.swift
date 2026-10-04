@@ -1,6 +1,9 @@
 import AVFoundation
 import Foundation
 import Speech
+#if os(iOS)
+import WebRTC
+#endif
 
 /// Listens while a call is still connecting, so words said before the voice is ready aren't lost.
 /// Transcribes on the device (Apple speech recognition, on-device only: no audio leaves the machine
@@ -117,6 +120,19 @@ public final class EarlyCapture {
     }
 
     private func tapAndStart(_ request: SFSpeechAudioBufferRecognitionRequest) -> Bool {
+        #if os(iOS)
+        // On iPhone nothing has opened the audio session yet at this point (WebRTC normally does it
+        // when the call's audio starts), so the mic would read silence. Open it the way the call
+        // will use it, through WebRTC's own session object so the two never disagree about it.
+        let session = RTCAudioSession.sharedInstance()
+        session.lockForConfiguration()
+        defer { session.unlockForConfiguration() }
+        do {
+            try session.setConfiguration(RTCAudioSessionConfiguration.webRTC(), active: true)
+        } catch {
+            return false
+        }
+        #endif
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { return false }
@@ -140,6 +156,8 @@ public final class EarlyCapture {
         audioOn = false
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        // Release the input unit entirely so the call's own audio can take the mic straight away.
+        engine.reset()
     }
 
     private func finished() {

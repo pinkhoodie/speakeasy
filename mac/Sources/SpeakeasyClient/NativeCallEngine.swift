@@ -214,7 +214,34 @@ public final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDat
         peer?.localDescription?.sdp.components(separatedBy: .newlines).filter { !$0.isEmpty }.count
     }
 
+    /// iPhone: keep the call's audio (WebRTC's voice unit) off while the on-device listener has the
+    /// mic, so the two never fight over it; `releaseAudio()` hands the mic over. No-op on the Mac,
+    /// where both can share the input.
+    public func holdAudio() {
+        #if os(iOS)
+        let session = RTCAudioSession.sharedInstance()
+        session.useManualAudio = true
+        session.isAudioEnabled = false
+        audioHeld = true
+        #endif
+    }
+
+    /// Let the call's audio start (call after the on-device listener has stopped).
+    public func releaseAudio() {
+        #if os(iOS)
+        guard audioHeld else { return }
+        audioHeld = false
+        let session = RTCAudioSession.sharedInstance()
+        session.isAudioEnabled = true
+        session.useManualAudio = false
+        #endif
+    }
+
+    public var isAudioHeld: Bool { audioHeld }
+    private var audioHeld = false
+
     public func close() {
+        releaseAudio()
         guard !closed else { return }
         closed = true
         localTrack?.isEnabled = false
