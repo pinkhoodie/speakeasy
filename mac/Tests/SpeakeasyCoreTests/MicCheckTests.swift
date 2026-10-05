@@ -58,6 +58,17 @@ final class MicCheckTests: XCTestCase {
         XCTAssertNil(run(&c, from: 17.25, to: 30, level: 0.003))
     }
 
+    func testPauseAfterBeingHeardIsNotADeadMic() {
+        // AirPods send pure zeros while you pause; once the voice heard you, that's not a fault.
+        var c = MicCheck(); c.connectionOpened()
+        XCTAssertNil(run(&c, from: 0, to: 2, level: 0.2))
+        c.heard()
+        XCTAssertNil(run(&c, from: 2.25, to: 20, level: 0))
+        XCTAssertEqual(c.health, .ok)
+        // Audio that stops leaving the device is still caught.
+        XCTAssertEqual(run(&c, from: 20.25, to: 30, level: 0.01, packets: { _ in 999 }), .notSending)
+    }
+
     func testMutedOrAssistantTalkingIsNeverJudged() {
         var c = MicCheck(); c.connectionOpened()
         XCTAssertNil(run(&c, from: 0, to: 30, level: 0, packets: { _ in 0 }, listening: false))
@@ -87,7 +98,8 @@ final class MicCheckTests: XCTestCase {
         s.connection = .live
         s.interactionID = "vi_1"
         s.micHealth = .checking
-        XCTAssertEqual(present(s).primary, "Starting mic…")
+        XCTAssertEqual(present(s).primary, "Listening")   // no mic status flashes on a working call
+        XCTAssertEqual(present(s).secondary, "Go ahead")
         s.micHealth = .ok
         XCTAssertEqual(present(s).primary, "Listening")
         s.micHealth = .broken

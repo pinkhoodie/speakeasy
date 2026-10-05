@@ -39,7 +39,7 @@ public struct MicCheck: Sendable {
     /// …and ends after this much quiet…
     public static let utteranceGap: TimeInterval = 0.7
     /// …and the voice must show it heard within this long after it ends.
-    public static let answerWithin: TimeInterval = 7
+    public static let answerWithin: TimeInterval = 10
     /// Automatic reopen attempts per call before asking the user to restart.
     public static let maxRepairs = 2
 
@@ -105,7 +105,10 @@ public struct MicCheck: Sendable {
 
         let grace = lastSound == nil ? Self.firstSoundWithin : Self.deadAfter
         if now.timeIntervalSince(since) >= grace {
-            if !soundOK { return fault(.noSound) }
+            // Once the voice has heard you on this connection, the mic is proven: a stretch of
+            // pure zeros after that is a headset gating silence while you pause (AirPods do),
+            // not a dead mic. Only audio that stops leaving the device still counts then.
+            if !soundOK && !heardAny { return fault(.noSound) }
             if !sendingOK { return fault(.notSending) }
         }
 

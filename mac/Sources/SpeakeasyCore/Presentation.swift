@@ -157,7 +157,8 @@ public func present(_ s: VoiceState) -> PillPresentation {
         else if muted { mark = .muted; primary = "Muted" }
         else if s.micHealth == .broken { mark = .idle; primary = "Mic isn't working" }
         else if s.micHealth == .repairing { mark = .connecting; primary = "Fixing the mic…" }
-        else if s.micHealth == .checking { mark = .connecting; primary = "Starting mic…" }
+        // While the mic is still being checked it shows as Listening: the check only speaks up
+        // when it finds a real fault, so a working call never flashes a mic status.
         else { mark = .listening; primary = "Listening" }
     case .ending:
         mark = .connecting
@@ -188,8 +189,6 @@ public func present(_ s: VoiceState) -> PillPresentation {
             secondary = "Mic wasn't picking you up · reconnecting, conversation kept"
         case .live where !muted && s.micHealth == .broken && s.speech != .quieted:
             secondary = "End the call and start a new one"; tone = .error
-        case .live where !muted && s.micHealth == .checking:
-            secondary = "Checking it can hear you"
         case .connecting:
             if s.earlyListening && !muted {
                 let heard = cleanTranscript(s.earlyHeard)
