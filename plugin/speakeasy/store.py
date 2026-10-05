@@ -5,6 +5,7 @@ list; notices are deduplicated across restarts; email drafts carry their exact-c
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import re
@@ -22,6 +23,11 @@ from .text import (MAX_CARDS, AUTHORED_PRECEDENCE_S, SETTLED, TERMINAL, notice_t
 
 STALE_AFTER_S = 90
 MAX_REVIEWS = 3  # finished-image review cards carried onto the call panel
+
+
+def local_run_id(idem_key: str) -> str:
+    """The id for a task Hermes ran without a run id (same scheme as calls.LOCAL_RUN_PREFIX)."""
+    return "lr_" + hashlib.sha256(idem_key.encode()).hexdigest()[:32]
 
 
 class StateStore:
@@ -68,6 +74,13 @@ class StateStore:
                 self._db.execute("ALTER TABLE runs ADD COLUMN timings TEXT")
             if "failure" not in columns:  # why a run failed: a failures.py kind, never provider text
                 self._db.execute("ALTER TABLE runs ADD COLUMN failure TEXT")
+            # Finished tasks that never had a Hermes run id (quick answers, home control) could not be
+            # cleared: "Clear done" and the x address tasks by run id. Give them their local id.
+            settled = sorted(TERMINAL | {"rejected"})
+            for (key,) in self._db.execute(
+                    f"SELECT idem_key FROM runs WHERE run_id IS NULL AND status IN ({','.join('?' * len(settled))})",
+                    settled).fetchall():
+                self._db.execute("UPDATE runs SET run_id=? WHERE idem_key=?", (local_run_id(key), key))
 
     # -- session admission -------------------------------------------------------------
     def reserve_session(self, request_id: str, fingerprint: str, interaction_id: str) -> tuple[str, dict[str, Any] | None]:
@@ -230,6 +243,10 @@ class StateStore:
         with self._lock, self._db:
             self._db.execute("UPDATE runs SET run_id=COALESCE(?,run_id),status=?,updated=? WHERE idem_key=?",
                              (run_id, status, now, key))
+            if status in TERMINAL or status == "rejected":
+                # Every finished task needs a run id so "Clear done" and the x can clear it.
+                self._db.execute("UPDATE runs SET run_id=? WHERE idem_key=? AND run_id IS NULL",
+                                 (local_run_id(key), key))
             if status in SETTLED:
                 self._db.execute("UPDATE runs SET settled_at=? WHERE idem_key=?", (now, key))
 

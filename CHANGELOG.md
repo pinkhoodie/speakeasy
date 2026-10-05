@@ -2,6 +2,10 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.40
+
+- **"Clear done" clears everything that's done.** Quick answers and home-control tasks (weather, lights) showed as Done but stayed in the task list after Clear done or the x. They now clear like every other task, including ones already stuck there.
+
 ## Mac 0.2.16 + Plugin 0.2.39 — Says why a task failed
 
 - **The reason, not just "Work failed".** When Hermes can't do a task because its model provider is out of credits, rejected its key or sign-in, is rate-limiting it, or doesn't have the model it's set to use, the task reads "Work failed · Out of credits" (or the matching reason), its detail says what to do (usually top up, or run `hermes model` on the Hermes machine to switch), and the voice says it too. The chat notice and the Mac notification carry the same sentence.
