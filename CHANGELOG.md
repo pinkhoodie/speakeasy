@@ -2,6 +2,11 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Mac 0.2.16 + Plugin 0.2.39 — Says why a task failed
+
+- **The reason, not just "Work failed".** When Hermes can't do a task because its model provider is out of credits, rejected its key or sign-in, is rate-limiting it, or doesn't have the model it's set to use, the task reads "Work failed · Out of credits" (or the matching reason), its detail says what to do (usually top up, or run `hermes model` on the Hermes machine to switch), and the voice says it too. The chat notice and the Mac notification carry the same sentence.
+- **Your provider's own error text stays private.** Speakeasy only recognizes known kinds of failure and describes them in its own words; anything it doesn't recognize points you to Hermes' error log on the Hermes machine instead of guessing.
+
 ## Mac 0.2.15 + Plugin 0.2.38 — Talk while it connects
 
 - **Start talking right away.** While a call is still connecting, Speakeasy already listens: the panel says "Listening" and shows your words as you say them. When the call connects, what you said becomes your first request, so "turn on the bedroom lamps" works without waiting or repeating yourself.

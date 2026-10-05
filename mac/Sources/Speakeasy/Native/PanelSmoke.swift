@@ -304,6 +304,21 @@ enum PanelSmoke {
         check(abs(panel.frame.width - Tokens.width) < 1 && c.model.extraHeight == 0, "resize: reset restores the default size")
     }
 
+    /// A failed task names why in its row and explains the fix in its detail.
+    static func failedTask(_ c: NativeVoiceClient, dir: String) async {
+        guard let (state, _) = PreviewFixtures.state("failed") else { fail("failed: no fixture"); return }
+        c.showPreview(state, workExpanded: true)
+        await settle()
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/failed-tasklist.png")); record("snapshot \(dir)/failed-tasklist.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.model.selectedTaskID = "f1"
+        await settle()
+        check(c.model.selectedTask?.info.failure?.label == "Out of credits", "failed: the task carries its reason")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/failed-detail.png")); record("snapshot \(dir)/failed-detail.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.model.selectedTaskID = nil
+    }
+
     static func snapshots(_ c: NativeVoiceClient, dir: String) async {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         for (name, badge) in [("menubar-glyph", false), ("menubar-glyph-badge", true)] {
@@ -328,6 +343,7 @@ enum PanelSmoke {
             do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/site-\(name).png")); record("snapshot \(dir)/site-\(name).png") }
             catch { fail("snapshot failed: \(error)") }
         }
+        await failedTask(c, dir: dir)
         await designReview(c, dir: dir)
         await lookingAt(c, dir: dir)
         if let (draft, _) = PreviewFixtures.state("email-draft") {

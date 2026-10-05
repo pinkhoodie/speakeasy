@@ -20,7 +20,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
-from . import channels, continuity, router
+from . import channels, continuity, failures, router
 from . import home_control as home_control_mod
 from . import instant as instant_mod
 from . import jev as jev_mod
@@ -418,8 +418,8 @@ class Notices:
             if kind == "command" and f"```" not in text:
                 self.post(f"command:{run_id}:{i}", chunk, limit=4000, target=target)
 
-    def stopped(self, run_id: str, status: str, request: str | None) -> None:
-        self.post(f"stopped:{run_id}", P.stopped_notice(self.names(), status, request))
+    def stopped(self, run_id: str, status: str, request: str | None, why: str | None = None) -> None:
+        self.post(f"stopped:{run_id}", P.stopped_notice(self.names(), status, request, why))
 
     def draft_waiting(self, draft_id: str, subject: str | None) -> None:
         self.post(f"draft:{draft_id}", P.draft_notice(subject))
@@ -1357,14 +1357,28 @@ class SidebandWorker:
                     return
                 except Exception as reconcile_exc:
                     exc = reconcile_exc
-            self.store.update_run(idem, None, "failed")
-            self.store.progress(idem, "result", "Work failed; details unavailable")
-            with self.interaction.lock:
-                backend.status, backend.error = "failed", str(exc)[:240]
-            self.publish()
+            reason = self._record_start_failure(backend, exc, "task")
             if backend.run_id:
-                self.notices.stopped(backend.run_id, "failed", self.store.title(idem) or self.store.request_text(idem))
-            await self.append("session.commentary.append", delegation_id, P.FAILED_SPOKEN)
+                self.notices.stopped(backend.run_id, "failed", self.store.title(idem) or self.store.request_text(idem),
+                                     reason)
+            await self.append("session.commentary.append", delegation_id,
+                              P.failed_because(reason) if reason else P.FAILED_SPOKEN)
+
+    def _record_start_failure(self, backend: BackendRun, exc: Exception, what: str) -> str | None:
+        """A run that never got going on Hermes (or whose stream broke beyond repair): mark it failed
+        with the reason Speakeasy can name, and return that sentence (None when it can't name one)."""
+        # Logged so errors.log (which the app points to for an unknown reason) has the cause.
+        logger.warning("speakeasy: %s failed to run on Hermes (%s: %s)", what, type(exc).__name__, str(exc)[:200])
+        idem = backend.idem_key
+        failed_as = failures.start_failure_kind(exc) or failures.UNKNOWN
+        reason = failures.reason_text(failed_as)
+        self.store.update_run(idem, None, "failed")
+        self.store.set_failure(idem, failed_as)
+        self.store.progress(idem, "result", f"Work failed: {reason}" if reason else "Work failed; details unavailable")
+        with self.interaction.lock:
+            backend.status, backend.error = "failed", str(exc)[:240]
+        self.publish()
+        return reason
 
     async def start_continuity_task(self, task_id: str, revision: int, context: str, request: str,
                                     conv: continuity.Conversation, joins: "BackendRun | None" = None) -> None:
@@ -1448,6 +1462,7 @@ class SidebandWorker:
                     final["text"] = payload.get("content") or ""
                 elif name.startswith("run.") and name != "run.started":
                     final["status"] = name.split(".", 1)[1]
+                    final["error"] = payload.get("error")
 
             terminal = await asyncio.to_thread(continuity.stream_session_chat, self.hermes.base, self.rt.hermes_key(),
                                                conv, message, on_event)
@@ -1462,14 +1477,13 @@ class SidebandWorker:
             # the answer into that chat ourselves, like any routed answer; Hermes config is untouched.
             if valid_delivery_target(conv.target):
                 backend.deliver_to = conv.target
-            await self.handle_hermes_event(backend, {"event": f"run.{status}", "output": output})
+            # A failed turn's reply is Hermes' failure message; _handle_hermes_event keeps only its kind.
+            await self.handle_hermes_event(backend, {"event": f"run.{status}", "output": output,
+                                                     "error": final.get("error")})
         except Exception as exc:
-            self.store.update_run(idem, None, "failed")
-            self.store.progress(idem, "result", "Work failed; details unavailable")
-            with self.interaction.lock:
-                backend.status, backend.error = "failed", str(exc)[:240]
-            self.publish()
-            await self.append("session.commentary.append", delegation_id, P.continuing_failed_note(where))
+            reason = self._record_start_failure(backend, exc, "conversation turn")
+            await self.append("session.commentary.append", delegation_id,
+                              P.failed_because(reason) if reason else P.continuing_failed_note(where))
 
     async def start_thread_task(self, task_id: str, revision: int, context: str, request: str,
                                 channel: channels.Channel, named: bool = False) -> None:
@@ -1586,8 +1600,9 @@ class SidebandWorker:
         status = result.get("status")
         if status in TERMINAL:
             event = {"event": f"run.{status}"}
-            if "output" in result:
-                event["output"] = result["output"]
+            for field in ("output", "error"):  # a failed run's status carries Hermes' error line too
+                if field in result:
+                    event[field] = result[field]
             await self.handle_hermes_event(backend, event)
             return
         detail = "Hermes event stream ended before a terminal event" + (f": {type(cause).__name__}" if cause else "")
@@ -1691,13 +1706,31 @@ class SidebandWorker:
                 self.store.update_run(idem, None, status)
             if status not in TERMINAL:
                 return
-            result = split_result(event.get("output"), self.rt.image_roots())
+            output, error = event.get("output"), event.get("error")
+            if status == "failed" and (line := failures.provider_line(output)):
+                # The session chat stream (and its run status) carry no error field: a failed turn's
+                # reply is Hermes' failure message quoting the provider. Keep only what it means.
+                output, error = None, error or line
+            result = split_result(output, self.rt.image_roots())
             drafts = (result or {}).pop("_email_drafts", None) or []
             self.store.set_result(idem, result)
+            failed_as = None  # a failures.py kind
+            if status == "failed":
+                # Hermes' error line maps to Speakeasy's own sentence; with neither a known reason nor
+                # an answer, the app points at Hermes' errors.log instead.
+                failed_as = failures.failure_kind(error) or (None if result else failures.UNKNOWN)
+                self.store.set_failure(idem, failed_as)
+                if failed_as in failures.REASONS:
+                    logger.info("speakeasy: Hermes run %s failed (%s)", backend.run_id, failed_as)
+                else:
+                    # WARNING so it lands in errors.log, where the app sends the user for the details.
+                    logger.warning("speakeasy: Hermes run %s failed, reason not recognized: %s", backend.run_id,
+                                   str(error or "no error given")[:200])
+            reason = failures.reason_text(failed_as)
             safe_output = safe_user_text(result["full"], 4000) if result else None
-            self.store.progress(idem, "result", safe_output or {
+            self.store.progress(idem, "result", safe_output or (f"Work failed: {reason}" if reason else {
                 "completed": "Work complete", "cancelled": "Work stopped", "failed": "Work failed",
-                "interrupted": "Work interrupted"}.get(status, "Work ended"))
+                "interrupted": "Work interrupted"}.get(status, "Work ended")))
             with self.interaction.lock:
                 backend.status, backend.approval = status, None
             stored_drafts = [self.store.add_draft(idem, self.store.session_for(idem), d) for d in drafts]
@@ -1715,7 +1748,8 @@ class SidebandWorker:
                 siblings = [r for r in head.runs.values()
                             if r is not backend and r.say_id == delegation_id and r.status in ACTIVE_RUN_STATES]
             if status != "completed" and backend.run_id and not backend.run_id.startswith(LOCAL_RUN_PREFIX):
-                self.notices.stopped(backend.run_id, status, self.store.title(idem) or self.store.request_text(idem))
+                self.notices.stopped(backend.run_id, status, self.store.title(idem) or self.store.request_text(idem),
+                                     reason)
             if status == "completed" and backend.run_id and result and not event.get("continued"):
                 self.notices.answered(backend.run_id, delivery_text(result), backend.deliver_to)
                 self.notices.pointer(backend.run_id, self.store.title(idem), backend.deliver_to)
@@ -1756,6 +1790,10 @@ class SidebandWorker:
                                       P.earlier_task_finished(self.names, request, spoken))
             elif status == "cancelled":
                 await self.append("session.commentary.append", delegation_id, P.STOPPED_SPOKEN)
+            elif reason:
+                await self.append("session.commentary.append", delegation_id, P.failed_because(reason))
+            elif failed_as == failures.UNKNOWN:
+                await self.append("session.commentary.append", delegation_id, P.FAILED_SPOKEN)
             else:
                 await self.append("session.commentary.append", delegation_id, P.ended_without_result(status))
 

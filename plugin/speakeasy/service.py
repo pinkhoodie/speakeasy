@@ -94,7 +94,7 @@ class VoiceService:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.settings = Settings(self.home)
         self.devices = DeviceStore(self.home)
-        self.store = StateStore(self.dir / "state.sqlite3")
+        self.store = StateStore(self.dir / "state.sqlite3", hermes_home=self.home)
         self.hermes = hermes or HermesAPI(hermes_api_base(self.home), self.hermes_key,
                                           self.settings.get()["hermes_profile"])
         self.notifier = notifier if notifier is not None else D.HermesSendNotifier(

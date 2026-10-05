@@ -1031,16 +1031,20 @@ struct WorkDetailView: View {
 
     private var nowLine: String {
         if let task = model.selectedTask { return taskStatusLine(task.info, now: model.state.now, assistantName: model.state.assistantName).0 }
-        return workStatusLine(model.state.work, now: model.state.now, assistantName: model.state.assistantName)?.0 ?? (model.state.workInfo == nil ? "No active work" : "Idle")
+        return workStatusLine(model.state.work, now: model.state.now, assistantName: model.state.assistantName,
+                              failure: model.state.workInfo?.failure)?.0 ?? (model.state.workInfo == nil ? "No active work" : "Idle")
     }
     private var nowTone: StatusTone {
         if let task = model.selectedTask { return taskStatusLine(task.info, now: model.state.now, assistantName: model.state.assistantName).1 }
-        return workStatusLine(model.state.work, now: model.state.now, assistantName: model.state.assistantName)?.1 ?? .plain
+        return workStatusLine(model.state.work, now: model.state.now, assistantName: model.state.assistantName,
+                              failure: model.state.workInfo?.failure)?.1 ?? .plain
     }
     private var nowDetail: String? {
-        if let task = model.selectedTask { return task.info.isTerminal ? nil : task.info.detail }
+        // A finished task's live detail is stale; a failed one says why it failed instead.
+        if let task = model.selectedTask { return task.info.isTerminal ? failureDetail(task.info) : task.info.detail }
         switch model.state.work {
         case .active(_, let detail, _, _): return detail
+        case .done: return failureDetail(model.state.workInfo)
         case .stale: return model.state.workInfo?.detail ?? "No verified update has arrived recently."
         case .notReceived: return "The request never reached \(model.state.assistantName). Say it again; if it keeps happening, restart Hermes."
         default: return nil

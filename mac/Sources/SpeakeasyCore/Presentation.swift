@@ -90,8 +90,11 @@ public func formatElapsed(_ seconds: TimeInterval) -> String {
     return "\(total / 3600)h \(String(format: "%02d", (total % 3600) / 60))m"
 }
 
+/// `failure` names why a failed task failed ("Work failed · Out of credits"); pass the task's
+/// `WorkInfo.failure`.
 public func workStatusLine(_ work: WorkPhase, now: Date,
-                           assistantName: String = VoiceState.defaultAssistantName) -> (String, StatusTone)? {
+                           assistantName: String = VoiceState.defaultAssistantName,
+                           failure: WorkFailure? = nil) -> (String, StatusTone)? {
     switch work {
     case .none: return nil
     case .waiting(let since): return ("Waiting for \(assistantName) · \(formatElapsed(now.timeIntervalSince(since)))", .plain)
@@ -109,7 +112,9 @@ public func workStatusLine(_ work: WorkPhase, now: Date,
             if let label = result?.label { return ("Done · \(label)", .success) }
             return ("Done", .success)
         case "cancelled": return ("Work stopped", .plain)
-        case "failed": return ("Work failed", .error)
+        case "failed":
+            if let label = failure?.label { return ("Work failed · \(label)", .error) }
+            return ("Work failed", .error)
         default: return ("Work ended · \(status)", .warning)
         }
     }
@@ -124,7 +129,15 @@ public func taskStatusLine(_ info: WorkInfo, now: Date,
     s.now = now
     s.workInfo = info
     s.delegationAt = info.events.first { $0.kind == "request" }?.at ?? info.updated ?? now
-    return workStatusLine(deriveWork(s, now: now), now: now, assistantName: assistantName) ?? ("Working", .plain)
+    return workStatusLine(deriveWork(s, now: now), now: now, assistantName: assistantName,
+                          failure: info.failure) ?? ("Working", .plain)
+}
+
+/// The task detail's explanation under "Work failed": what happened and what to do, or nil when
+/// the task didn't fail (or the api gave no reason).
+public func failureDetail(_ info: WorkInfo?) -> String? {
+    guard let info, info.status == "failed" else { return nil }
+    return info.failure?.text
 }
 
 public func present(_ s: VoiceState) -> PillPresentation {
@@ -157,7 +170,8 @@ public func present(_ s: VoiceState) -> PillPresentation {
 
     var secondary: String
     var tone: StatusTone = .plain
-    if let (text, workTone) = workStatusLine(s.work, now: now, assistantName: s.assistantName) {
+    if let (text, workTone) = workStatusLine(s.work, now: now, assistantName: s.assistantName,
+                                             failure: s.workInfo?.failure) {
         secondary = text; tone = workTone
         // Parallel tasks: say how many are running unless one needs the user.
         let running = s.activeTasks.count

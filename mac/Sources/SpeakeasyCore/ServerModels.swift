@@ -54,6 +54,28 @@ public struct ImageCard: Equatable, Sendable, Identifiable {
     }
 }
 
+/// Why a task failed, in Speakeasy's own words (the api maps Hermes' error; the provider's raw
+/// text never reaches the app). Present only on `failed` tasks.
+public struct WorkFailure: Equatable, Sendable {
+    /// `billing`, `auth`, `rate_limit`, `model_not_found`, `hermes_key`, `hermes_unreachable` or `unknown`.
+    public var kind: String
+    /// Short tag for the status line ("Out of credits"); nil when the reason isn't known.
+    public var label: String?
+    /// What happened and what to do, for the task detail.
+    public var text: String
+
+    public init(kind: String, label: String? = nil, text: String) {
+        self.kind = kind; self.label = label; self.text = text
+    }
+
+    public init?(json: Any?) {
+        guard let raw = json as? [String: Any], let text = nonEmpty(raw["text"]) else { return nil }
+        kind = nonEmpty(raw["kind"]) ?? "unknown"
+        label = nonEmpty(raw["label"]).map { String($0.prefix(60)) }
+        self.text = String(text.prefix(400))
+    }
+}
+
 public struct WorkResult: Equatable, Sendable {
     public var spoken: String?
     public var full: String?
@@ -92,6 +114,8 @@ public struct WorkInfo: Equatable, Sendable {
     public var reviewSettledAt: Date?
     /// The latest image the task produced or is looking at (live view); bytes via `/voice/live-image/<run>`.
     public var liveImage: LiveImage?
+    /// Why a `failed` task failed (out of credits, rejected key, …); nil for any other status.
+    public var failure: WorkFailure?
 
     public init(runID: String?, status: String, stale: Bool = false, updated: Date? = nil,
                 shortStatus: String? = nil, detail: String? = nil, updatedAt: Date? = nil,
@@ -148,6 +172,7 @@ public struct WorkInfo: Equatable, Sendable {
         summary = nonEmpty(object["summary"])
         emailDrafts = EmailDraft.list(json: object["email_drafts"])
         liveImage = LiveImage(json: object["live_image"])
+        failure = status == "failed" ? WorkFailure(json: object["failure"]) : nil
         if let review = object["review"] as? [String: Any] {
             reviewImages = (review["images"] as? [Any] ?? []).compactMap { ($0 as? NSNumber)?.intValue }.filter { (1...8).contains($0) }
             reviewSettledAt = decodeDate(review["settled_at"])

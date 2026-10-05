@@ -232,6 +232,18 @@ dismissal) and the recap of results that finished while no call was open (`away`
 Product and image cards appear as `result.cards`; image cards are fetched through
 `/voice/card-image/...`, never by path.
 
+A `failed` task also has `failure`: why it failed, in Speakeasy's own words (the provider's error
+text is never passed through). `kind` is `billing`, `auth`, `rate_limit`, `model_not_found`,
+`hermes_key`, `hermes_unreachable` or `unknown`; `label` is a short tag for the status line
+("Out of credits"), present only for a known reason; `text` says what happened and what to do.
+`unknown` means Hermes gave neither a recognized reason nor an answer, and its `text` points at
+Hermes' errors.log. A failed item in `away` carries the same `failure` object.
+
+```json
+"failure": {"kind": "billing", "label": "Out of credits",
+            "text": "Hermes's model provider is out of credits. Top up that account, or run hermes model on the Hermes machine to switch providers."}
+```
+
 `200`
 ```json
 {

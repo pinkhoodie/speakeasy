@@ -102,7 +102,7 @@ enum PreviewFixtures {
         return rep.representation(using: .png, properties: [:])
     }
 
-    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "looking", "email-draft", "ended", "home"]
+    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "looking", "email-draft", "ended", "home", "failed"]
 
     static func state(_ name: String) -> (VoiceState, workExpanded: Bool)? {
         let now = Date()
@@ -212,6 +212,22 @@ enum PreviewFixtures {
             s.workInfo = s.tasks[0].info
             s.exchange = Exchange(you: "Kitchen lights to 30, and heat to 72.",
                                   assistant: "Done. Anything else?", replyStarted: true)
+        case "failed":
+            // Hermes' model provider ran out of credits (HTTP 402): the row and the detail say so
+            // in the plugin's words, next to a task that still finished.
+            var failed = WorkInfo(runID: "run_f1", status: "failed", updated: now - 2,
+                                  events: [WorkEventItem(kind: "request", text: "What's the weather tomorrow in Lisbon?", at: now - 3)],
+                                  title: "Lisbon weather tomorrow")
+            failed.failure = WorkFailure(kind: "billing", label: "Out of credits",
+                                         text: "Hermes's model provider is out of credits. Top up that account, or run hermes model on the Hermes machine to switch providers.")
+            let done = WorkInfo(runID: "run_f0", status: "completed", updated: now - 60, shortStatus: "Done",
+                                events: [WorkEventItem(kind: "request", text: "Kitchen lights to thirty percent", at: now - 61)],
+                                result: WorkResult(spoken: "Kitchen's at 30 percent.", full: nil), title: "Kitchen lights")
+            s.tasks = [TaskItem(id: "f0", info: done), TaskItem(id: "f1", info: failed)]
+            s.runID = "run_f1"; s.delegationAt = now - 3
+            s.workInfo = failed
+            s.exchange = Exchange(you: "What's the weather tomorrow in Lisbon?",
+                                  assistant: "That task failed. Hermes's model provider is out of credits.", replyStarted: true)
         case "detail":
             let events = [
                 WorkEventItem(kind: "request", text: "Restock the snack cart with salty stuff, about $60", at: now - 70),
