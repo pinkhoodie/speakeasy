@@ -35,6 +35,24 @@ REASONS: dict[str, tuple[str, str]] = {
                            "Speakeasy couldn't reach Hermes's API server. Restart Hermes; if that "
                            "doesn't fix it, run hermes voice setup again."),
 }
+# kind -> what the voice says. The voice never reads a command aloud (it can't be copied from speech
+# and sounds like noise), so these name the fix in words and send the user to the app, whose task
+# detail and chat notice carry the REASONS text with the command.
+SPOKEN: dict[str, str] = {
+    "billing": "Hermes's model provider is out of credits. Top up that account or switch Hermes to "
+               "another provider; the steps are in the app.",
+    "auth": "Hermes's model provider rejected its sign-in, so Hermes needs to sign in to it again; "
+            "the steps are in the app.",
+    "rate_limit": "Hermes's model provider is rate-limiting it. Wait a minute and try again, or switch "
+                  "providers; the steps are in the app.",
+    "model_not_found": "Hermes's model provider doesn't offer the model Hermes is set to use, so it needs "
+                       "a different model; the steps are in the app.",
+    "hermes_key": "Hermes rejected Speakeasy's key. Restarting Hermes usually fixes it; if not, Speakeasy "
+                  "needs setting up again. The steps are in the app.",
+    "hermes_unreachable": "Speakeasy couldn't reach Hermes. Restarting Hermes usually fixes it; if not, "
+                          "Speakeasy needs setting up again. The steps are in the app.",
+}
+assert set(SPOKEN) == set(REASONS)
 UNKNOWN = "unknown"  # failed with no reason Speakeasy recognizes and no answer: point at the log
 
 # "HTTP 402: ..." is Hermes' own prefix; "Error code: 402 - {...}" is the OpenAI SDK's str(error),
@@ -154,13 +172,15 @@ def public_failure(kind: str | None, hermes_home: Path | None = None) -> dict[st
 
 
 def reason_text(kind: str | None) -> str | None:
-    """The sentence for a known kind (what the voice says); None for unknown or no kind."""
+    """The on-screen sentence for a known kind (task detail, chat notice), command included; None for
+    unknown or no kind. The voice uses voice_text instead."""
     return REASONS[kind][1] if kind in REASONS else None
 
 
 def voice_text(kind: str | None) -> str | None:
-    """What the voice's background notes say about a failed task: the known sentence, or for an
-    unknown reason a pointer to the log without its path (a file path is no use read aloud)."""
+    """What the voice says about a failed task (spoken now, or in its background notes on a later
+    call): the SPOKEN sentence, never a command, or for an unknown reason a pointer to the log
+    without its path (a file path is no use read aloud)."""
     if kind == UNKNOWN:
         return "Hermes didn't say why; its error log on the Hermes machine has the details."
-    return reason_text(kind)
+    return SPOKEN.get(kind) if kind else None

@@ -120,11 +120,11 @@ def test_next_call_and_resumed_call_hear_why(tmp_path):
     away = {item["run_id"]: item for item in store.away()}
     assert away["run_1"]["failure"] == store.work(idem_key="k1")["failure"]
     block = P.away_block(list(away.values()), P.Names())
-    assert f"Weather in Lisbon: failed: {failures.reason_text('billing')}" in block
+    assert f"Weather in Lisbon: failed: {failures.voice_text('billing')}" in block
     assert f"Book a table: failed: {failures.voice_text(failures.UNKNOWN)}" in block
     assert str(tmp_path) not in block  # the log path is for the app, not something to read aloud
     resumed = P.resume_block([store.work(idem_key="k1")], P.Names())
-    assert f"Weather in Lisbon: failed: {failures.reason_text('billing')}" in resumed
+    assert f"Weather in Lisbon: failed: {failures.voice_text('billing')}" in resumed
 
 
 def test_failure_kind_survives_a_restart_and_old_databases_upgrade(tmp_path):
@@ -175,10 +175,11 @@ def test_out_of_credits_reaches_the_task_and_the_voice(server, service, hermes):
     _, worker = start_call(server, service)
     worker.delegate("call_weather", "What's the weather in Lisbon?")
     task = failed_task(server)
-    reason = failures.reason_text("billing")
+    reason, said = failures.reason_text("billing"), failures.voice_text("billing")
     assert task["failure"] == {"kind": "billing", "label": "Out of credits", "text": reason}
     assert task["events"][-1] == {"kind": "result", "text": f"Work failed: {reason}", "at": task["events"][-1]["at"]}
-    wait_for(lambda: P.failed_because(reason) in spoken(worker))
+    wait_for(lambda: P.failed_because(said) in spoken(worker))
+    assert not any("hermes model" in c for c in spoken(worker))  # the command is on screen, not spoken
     assert stopped == [("failed", reason)]
     # The provider's words stay in Hermes' log: not in the task, not in anything said on the call.
     assert "Diem" not in json.dumps(task) and not any("Diem" in c for _, _, c in worker.sent)
@@ -190,7 +191,7 @@ def test_reason_is_read_from_the_run_status_when_the_stream_drops(server, servic
     worker.delegate("call_key", "Summarize my inbox")
     task = failed_task(server)
     assert task["failure"]["kind"] == "auth"
-    wait_for(lambda: P.failed_because(failures.reason_text("auth")) in spoken(worker))
+    wait_for(lambda: P.failed_because(failures.voice_text("auth")) in spoken(worker))
     assert "sk-proj" not in json.dumps(task)
 
 
@@ -213,7 +214,7 @@ def test_rejected_api_server_key_is_named(server, service, hermes, home):
     worker.delegate("call_rotated", "Check my calendar tomorrow")
     task = failed_task(server)
     assert task["failure"]["kind"] == "hermes_key"
-    wait_for(lambda: P.failed_because(failures.reason_text("hermes_key")) in spoken(worker))
+    wait_for(lambda: P.failed_because(failures.voice_text("hermes_key")) in spoken(worker))
 
 
 def test_continued_conversation_failure_is_explained(server, service, hermes, monkeypatch):
@@ -241,7 +242,7 @@ def test_continued_conversation_failure_is_explained(server, service, hermes, mo
     assert task["failure"]["kind"] == "billing"
     # The reply was Hermes' failure message quoting the provider: none of it is kept as the answer.
     assert task["result"] is None and "Diem" not in json.dumps(task)
-    wait_for(lambda: P.failed_because(failures.reason_text("billing")) in spoken(worker))
+    wait_for(lambda: P.failed_because(failures.voice_text("billing")) in spoken(worker))
     assert not any("Diem" in c for _, _, c in worker.sent)
 
 
@@ -274,4 +275,17 @@ def test_continued_conversation_that_cannot_reach_hermes(server, service, hermes
     worker.delegate("call_cont_down", "In the league team thread, am I going to win this week?")
     task = failed_task(server)
     assert task["failure"]["kind"] == "hermes_unreachable"
-    wait_for(lambda: P.failed_because(failures.reason_text("hermes_unreachable")) in spoken(worker))
+    wait_for(lambda: P.failed_because(failures.voice_text("hermes_unreachable")) in spoken(worker))
+
+
+def test_voice_never_reads_a_command_aloud():
+    """The voice names the fix in words; the command (hermes model, hermes voice setup) is only on
+    screen and in the chat notice, where it can be copied."""
+    from speakeasy.text import looks_like_command
+    for kind in failures.REASONS:
+        said = failures.voice_text(kind)
+        assert said and "hermes model" not in said and "voice setup" not in said and "`" not in said
+        assert not looks_like_command(said)
+        assert "in the app" in said
+        assert "hermes " in failures.reason_text(kind)  # the on-screen text keeps the command
+    assert "in the app" not in failures.voice_text(failures.UNKNOWN)

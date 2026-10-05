@@ -1357,16 +1357,18 @@ class SidebandWorker:
                     return
                 except Exception as reconcile_exc:
                     exc = reconcile_exc
-            reason = self._record_start_failure(backend, exc, "task")
+            failed_as = self._record_start_failure(backend, exc, "task")
             if backend.run_id:
                 self.notices.stopped(backend.run_id, "failed", self.store.title(idem) or self.store.request_text(idem),
-                                     reason)
+                                     failures.reason_text(failed_as))
+            said = failures.reason_text(failed_as) and failures.voice_text(failed_as)
             await self.append("session.commentary.append", delegation_id,
-                              P.failed_because(reason) if reason else P.FAILED_SPOKEN)
+                              P.failed_because(said) if said else P.FAILED_SPOKEN)
 
-    def _record_start_failure(self, backend: BackendRun, exc: Exception, what: str) -> str | None:
+    def _record_start_failure(self, backend: BackendRun, exc: Exception, what: str) -> str:
         """A run that never got going on Hermes (or whose stream broke beyond repair): mark it failed
-        with the reason Speakeasy can name, and return that sentence (None when it can't name one)."""
+        with the reason Speakeasy can name, and return its failures kind (UNKNOWN when it can't name
+        one). Callers pick the on-screen (reason_text) or spoken (voice_text) sentence from it."""
         # Logged so errors.log (which the app points to for an unknown reason) has the cause.
         logger.warning("speakeasy: %s failed to run on Hermes (%s: %s)", what, type(exc).__name__, str(exc)[:200])
         idem = backend.idem_key
@@ -1378,7 +1380,7 @@ class SidebandWorker:
         with self.interaction.lock:
             backend.status, backend.error = "failed", str(exc)[:240]
         self.publish()
-        return reason
+        return failed_as
 
     async def start_continuity_task(self, task_id: str, revision: int, context: str, request: str,
                                     conv: continuity.Conversation, joins: "BackendRun | None" = None) -> None:
@@ -1481,9 +1483,10 @@ class SidebandWorker:
             await self.handle_hermes_event(backend, {"event": f"run.{status}", "output": output,
                                                      "error": final.get("error")})
         except Exception as exc:
-            reason = self._record_start_failure(backend, exc, "conversation turn")
+            failed_as = self._record_start_failure(backend, exc, "conversation turn")
+            said = failures.reason_text(failed_as) and failures.voice_text(failed_as)
             await self.append("session.commentary.append", delegation_id,
-                              P.failed_because(reason) if reason else P.continuing_failed_note(where))
+                              P.failed_because(said) if said else P.continuing_failed_note(where))
 
     async def start_thread_task(self, task_id: str, revision: int, context: str, request: str,
                                 channel: channels.Channel, named: bool = False) -> None:
@@ -1791,7 +1794,9 @@ class SidebandWorker:
             elif status == "cancelled":
                 await self.append("session.commentary.append", delegation_id, P.STOPPED_SPOKEN)
             elif reason:
-                await self.append("session.commentary.append", delegation_id, P.failed_because(reason))
+                # Spoken: the same reason without the command (that's on screen and in chat).
+                await self.append("session.commentary.append", delegation_id,
+                                  P.failed_because(failures.voice_text(failed_as)))
             elif failed_as == failures.UNKNOWN:
                 await self.append("session.commentary.append", delegation_id, P.FAILED_SPOKEN)
             else:
