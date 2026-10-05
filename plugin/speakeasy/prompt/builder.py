@@ -93,6 +93,16 @@ def truthfulness(names: Names) -> str:
 
 # -- the voice session ------------------------------------------------------------------
 
+def failed_note(task: dict[str, Any]) -> str | None:
+    """Why a failed task (a work or away item) failed, for the voice's background notes: Speakeasy's
+    own sentence from its ``failure`` kind, never provider text and never a file path."""
+    from ..failures import voice_text
+    failure = task.get("failure")
+    if task.get("status") != "failed" or not isinstance(failure, dict):
+        return None
+    return voice_text(failure.get("kind"))
+
+
 def away_block(away: list[dict[str, Any]], names: Names) -> str:
     """What settled since the last call. Finished work is background: its answer already went to the
     app (and their chat), so reciting it when they call back hours later is noise. Only something
@@ -105,6 +115,8 @@ def away_block(away: list[dict[str, Any]], names: Names) -> str:
             needs.append(f"- {request}: needs {names.possessive} approval in the app")
         elif status == "completed":
             done.append(f"- {request}: finished" + (f": {item['spoken']}" if item.get("spoken") else ""))
+        elif why := failed_note(item):
+            done.append(f"- {request}: failed: {why}")
         else:
             done.append(f"- {request}: stopped ({status})")
     if not needs and not done:
@@ -137,6 +149,8 @@ def resume_block(tasks: list[dict[str, Any]], names: Names) -> str:
         if status in {"completed", "failed", "cancelled", "interrupted", "ambiguous"}:
             spoken = notice_text((task.get("result") or {}).get("spoken"), 300)
             outcome = "finished" + (f": {spoken}" if spoken else "") if status == "completed" else f"stopped ({status})"
+            if why := failed_note(task):
+                outcome = f"failed: {why}"  # it may have failed while paused, with no one to hear why
             open_tasks.append(f"- {request}: {outcome}")
         elif status == "waiting_for_approval":
             open_tasks.append(f"- {request}: waiting for {names.possessive} approval in the panel")
@@ -674,6 +688,12 @@ def ended_without_result(status: str) -> str:
     return f"That task ended without a result (status {status})."
 
 
+def failed_because(reason: str) -> str:
+    """Spoken when a task failed for a reason Speakeasy recognizes (failures.REASONS): what
+    happened and the fix, in Speakeasy's own words, never the provider's error text."""
+    return f"That task failed. {reason}"
+
+
 # -- chat notices (delivery target) ------------------------------------------------------
 
 def still_working_notice(request: str | None, short_status: str | None) -> str:
@@ -694,12 +714,13 @@ def needs_you_notice(names: Names, summary: str | None) -> str:
     return f"Needs you: {notice_text(summary, 300) or names.assistant_name + ' is waiting for your approval'}"
 
 
-def stopped_notice(names: Names, status: str, request: str | None) -> str:
+def stopped_notice(names: Names, status: str, request: str | None, why: str | None = None) -> str:
+    """``why`` is a failures.REASONS sentence (what happened and the fix), never provider text."""
     reason = {"failed": "the work failed", "cancelled": "the work was cancelled",
               "interrupted": "the work was interrupted",
               "ambiguous": f"{names.assistant_name} lost track of the backend run (status unconfirmed)"}.get(status, status)
     about = notice_text(request, 140)
-    return f"Stopped: {reason}" + (f" — {about}" if about else "")
+    return f"Stopped: {reason}" + (f" — {about}" if about else "") + (f"\n{why}" if why else "")
 
 
 def draft_notice(subject: str | None) -> str:

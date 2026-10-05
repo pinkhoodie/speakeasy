@@ -81,7 +81,10 @@ class FakeHermes(BaseHTTPRequestHandler):
             if not run:
                 self._json(404, {"error": "no run"})
                 return
-            self._json(200, {"run_id": parts[2], "status": run["status"], "output": run["output"]})
+            status = {"run_id": parts[2], "status": run["status"], "output": run["output"]}
+            if run.get("error"):
+                status["error"] = run["error"]
+            self._json(200, status)
             return
         self._json(404, {"error": "not found"})
 
@@ -106,6 +109,18 @@ class FakeHermes(BaseHTTPRequestHandler):
             run = {"status": "completed", "output": output, "done": threading.Event(),
                    "events": [{"event": "tool.started", "tool": "web_search", "preview": "weather"},
                               {"event": "run.completed", "output": output}]}
+            if self.state.fail_with is not None:
+                # Hermes' shape for a turn that failed (api_server_runs._execute_run): no output, the
+                # provider's redacted error line in ``error`` on the event and on GET /v1/runs/{id}.
+                # ``fail_reply`` instead gives the session chat stream's shape: the reply is Hermes'
+                # failure message and there is no error field.
+                reply = self.state.fail_reply
+                run.update(status="failed", output=reply or "", error=None if reply else self.state.fail_with,
+                           events=[{"event": "run.failed", "completed": False, "partial": False,
+                                    "interrupted": False, **({"output": reply} if reply else
+                                                             {"error": self.state.fail_with})}])
+            if self.state.drop_terminal:
+                run["events"] = [e for e in run["events"] if not e["event"].startswith("run.")]
             if self.state.approval_first:
                 run["pre_events"] = [{"event": "approval.request", "request_id": "apr_" + run_id,
                                       "description": "Delete an old file"}]
@@ -154,6 +169,9 @@ class FakeHermesServer:
         self.approval_first = False
         self.live_events: list[dict[str, Any]] = []  # streamed while a held run is still working
         self.steers: list[tuple[str, str]] = []
+        self.fail_with: str | None = None  # every run fails with this Hermes error line
+        self.fail_reply: str | None = None  # …or with this failure reply and no error (session chat shape)
+        self.drop_terminal = False          # the event stream ends without its run.* event
         self.responder = responder or (lambda prompt, sid: "Done.\nDONE: Finished\nSPOKEN: All done.")
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeHermes)
         self.httpd.daemon_threads = True

@@ -69,7 +69,7 @@ public struct IdleWorkWatch: Equatable, Sendable {
             return WorkNotice(kind: .completed, runID: work.runID, title: name, body: body)
         case "failed", "interrupted":
             return WorkNotice(kind: .failed, runID: work.runID, title: name,
-                              body: work.result?.spoken ?? "\(name)'s work stopped before finishing.")
+                              body: work.failure?.text ?? work.result?.spoken ?? "\(name)'s work stopped before finishing.")
         case "waiting_for_approval":
             return WorkNotice(kind: .approval, runID: work.runID, title: name, body: "Needs your approval")
         default:
@@ -96,8 +96,9 @@ public enum PausedTaskNotices {
                 notices.append(WorkNotice(kind: .completed, runID: task.info.runID, title: "\(name) · call paused",
                                           body: body))
             case "failed", "interrupted":
+                let stopped = what.map { "Couldn't finish \($0)." } ?? "A task stopped before finishing."
                 notices.append(WorkNotice(kind: .failed, runID: task.info.runID, title: "\(name) · call paused",
-                                          body: what.map { "Couldn't finish \($0)." } ?? "A task stopped before finishing."))
+                                          body: task.info.failure.map { "\(stopped) \($0.text)" } ?? stopped))
             case "waiting_for_approval":
                 notices.append(WorkNotice(kind: .approval, runID: task.info.runID, title: "\(name) · call paused",
                                           body: what.map { "Needs your approval: \($0)" } ?? "Needs your approval"))

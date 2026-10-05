@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .emails import canonical_json, draft_sha256
+from .failures import public_failure
 from .text import (MAX_CARDS, AUTHORED_PRECEDENCE_S, SETTLED, TERMINAL, notice_text, public_result, safe_user_text,
                    valid_short_status)
 
@@ -24,8 +25,9 @@ MAX_REVIEWS = 3  # finished-image review cards carried onto the call panel
 
 
 class StateStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, hermes_home: Path | None = None):
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.hermes_home = hermes_home  # where Hermes' errors.log lives, named when a failure has no known reason
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._lock = threading.Lock()
         with self._db:
@@ -64,6 +66,8 @@ class StateStore:
             columns = {row[1] for row in self._db.execute("PRAGMA table_info(runs)")}
             if "timings" not in columns:  # added after the first release
                 self._db.execute("ALTER TABLE runs ADD COLUMN timings TEXT")
+            if "failure" not in columns:  # why a run failed: a failures.py kind, never provider text
+                self._db.execute("ALTER TABLE runs ADD COLUMN failure TEXT")
 
     # -- session admission -------------------------------------------------------------
     def reserve_session(self, request_id: str, fingerprint: str, interaction_id: str) -> tuple[str, dict[str, Any] | None]:
@@ -229,6 +233,11 @@ class StateStore:
             if status in SETTLED:
                 self._db.execute("UPDATE runs SET settled_at=? WHERE idem_key=?", (now, key))
 
+    def set_failure(self, key: str, kind: str | None) -> None:
+        """Why the run failed, as a ``failures`` kind (the app and voice get Speakeasy's own words)."""
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET failure=? WHERE idem_key=?", (kind, key))
+
     # -- notices / meta ----------------------------------------------------------------
     def claim_notice(self, dedupe_key: str) -> bool:
         """True exactly once per key, across restarts."""
@@ -307,11 +316,11 @@ class StateStore:
             return []
         with self._lock:
             rows = self._db.execute(
-                """SELECT idem_key,run_id,status,settled_at,result_json FROM runs
+                """SELECT idem_key,run_id,status,settled_at,result_json,failure FROM runs
                    WHERE settled_at > ? AND run_id IS NOT NULL ORDER BY settled_at DESC LIMIT ?""",
                 (float(ended), limit)).fetchall()
         items = []
-        for key, run_id, status, settled_at, result_json in rows:
+        for key, run_id, status, settled_at, result_json, failure in rows:
             if status not in SETTLED:
                 continue
             spoken = None
@@ -320,8 +329,12 @@ class StateStore:
                     spoken = json.loads(result_json).get("spoken")
                 except ValueError:
                     spoken = None
-            items.append({"run_id": run_id, "request": notice_text(self.request_text(key), 140),
-                          "status": status, "spoken": notice_text(spoken, 300), "finished_at": settled_at})
+            item = {"run_id": run_id, "request": notice_text(self.request_text(key), 140),
+                    "status": status, "spoken": notice_text(spoken, 300), "finished_at": settled_at}
+            why = public_failure(failure, self.hermes_home) if status == "failed" else None
+            if why:
+                item["failure"] = why  # the same object as on the task (work()["failure"])
+            items.append(item)
         return items
 
     def progress(self, key: str, kind: str, text: str) -> None:
@@ -561,7 +574,7 @@ class StateStore:
              assistant_name: str = "Hermes") -> dict[str, Any] | None:
         """The latest admitted job or one exact server-owned run, including past calls."""
         cols = """idem_key,run_id,status,updated,short_status,detail,progress_updated,
-                  status_source,result_json,title,dismissed,summary,continued,settled_at"""
+                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure"""
         with self._lock:
             if idem_key:
                 row = self._db.execute(f"SELECT {cols} FROM runs WHERE idem_key=?", (idem_key,)).fetchone()
@@ -572,7 +585,7 @@ class StateStore:
             if row is None:
                 return None
             (key, actual_run_id, status, updated, short_status, detail, progress_updated,
-             status_source, result_json, title, dismissed, summary, continued, settled_at) = row
+             status_source, result_json, title, dismissed, summary, continued, settled_at, failure) = row
             events = self._db.execute(
                 "SELECT kind,text,created FROM work_events WHERE idem_key=? ORDER BY seq DESC LIMIT 30", (key,)).fetchall()
         stale = status not in TERMINAL | {"waiting_for_approval"} and time.time() - updated > STALE_AFTER_S
@@ -601,6 +614,11 @@ class StateStore:
             "title": title, "summary": summary, "dismissed": bool(dismissed),
             "email_drafts": self.drafts_for(key),
         }
+        why = public_failure(failure, self.hermes_home) if status == "failed" else None
+        if why:
+            # Speakeasy's own words for why it failed: a row label when the reason is known, and a
+            # sentence for the detail. The provider's error text never reaches here.
+            work["failure"] = why
         live = self.public_live_image(key)
         if live is not None:
             # Addressed by /voice/live-image/<run_id>; the path or URL stays on the server.
