@@ -75,7 +75,7 @@ def test_voice_rules_say_spoken_approve_does_not_send():
     text = P.build_live_instructions(P.Names("Hermes", "Sam"))
     assert "does NOT send an email" in text and "press Send on the card" in text
     note = P.draft_waiting_note(P.Names("Hermes", "Sam"), "Dinner", ["pat@example.org"])
-    assert "press Send when it looks right" in note and "spoken approval does not send it" in note
+    assert "tap Send if you're happy with it" in note and "spoken approval does not send it" in note
 
 
 # -- end to end over HTTP with a fake Hermes ------------------------------------------------------------
@@ -98,7 +98,7 @@ def test_draft_card_flow_approve_sends_once(server, service, hermes):
     assert set(draft) >= {"draft_id", "from", "to", "cc", "bcc", "subject", "body", "status", "sha256"}
     assert not any(k.startswith("_") for k in draft)
     # the live call was told a draft is waiting, and that spoken approval does not count
-    wait_for(lambda: any("press Send when it looks right" in c for _, _, c in worker.sent))
+    wait_for(lambda: any("tap Send if you're happy with it" in c for _, _, c in worker.sent))
     # SSE-visible state carries the draft
     interaction = service.interaction(session["interaction_id"])
     assert interaction.feed.last["email_drafts"][0]["draft_id"] == draft["draft_id"]

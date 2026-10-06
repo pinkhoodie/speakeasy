@@ -2,6 +2,10 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.42
+
+- **Plainer wording when an email draft is ready:** the voice tells you the draft is on the card and to tap Send once you've read it.
+
 ## Plugin 0.2.41 — Lets you finish your thought
 
 - **"Hey" no longer starts a task.** A greeting on its own gets a hello back, never "On it".
@@ -16,6 +20,9 @@ Speakeasy has two parts that update separately: the **Mac app** (updates through
 
 - **The reason, not just "Work failed".** When Hermes can't do a task because its model provider is out of credits, rejected its key or sign-in, is rate-limiting it, or doesn't have the model it's set to use, the task reads "Work failed · Out of credits" (or the matching reason), its detail says what to do (usually top up, or run `hermes model` on the Hermes machine to switch), and the voice says it too. The chat notice and the Mac notification carry the same sentence.
 - **Your provider's own error text stays private.** Speakeasy only recognizes known kinds of failure and describes them in its own words; anything it doesn't recognize points you to Hermes' error log on the Hermes machine instead of guessing.
+- **No false "mic isn't working".** The panel only says it's listening once your voice is actually getting through. A pause after you've spoken (AirPods go silent between words) is no longer mistaken for a dead mic, and a mic that really stops is reopened automatically before Speakeasy tells you.
+- **Your first sentence isn't cut off at connect.** If you start talking while the call is still connecting, Speakeasy finishes hearing that sentence before the call takes over the mic.
+
 
 ## Mac 0.2.15 + Plugin 0.2.38 — Talk while it connects
 
