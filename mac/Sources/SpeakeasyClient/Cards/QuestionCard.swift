@@ -6,8 +6,10 @@ import SpeakeasyCore
 public struct QuestionActions {
     public var onAnswer: ((String) -> Void)?
     public var answered: String?
-    public init(onAnswer: ((String) -> Void)? = nil, answered: String? = nil) {
-        self.onAnswer = onAnswer; self.answered = answered
+    /// Loads a task picture by card number (the authenticated card-image route); nil = no pictures.
+    public var image: ((Int) async -> Data?)?
+    public init(onAnswer: ((String) -> Void)? = nil, answered: String? = nil, image: ((Int) async -> Data?)? = nil) {
+        self.onAnswer = onAnswer; self.answered = answered; self.image = image
     }
 }
 
@@ -39,6 +41,20 @@ struct QuestionCard: View {
             }
             Text(card["question"].string ?? "").font(.system(size: 14, weight: .semibold))
                 .fixedSize(horizontal: false, vertical: true)
+            let pictures = card["images"].doubles.map { Int($0) }
+            if pictures.contains(where: { $0 > 0 }), let load = actions.image {
+                HStack(alignment: .top, spacing: 8) {
+                    ForEach(Array(options.prefix(4).enumerated()), id: \.offset) { i, option in
+                        PictureOption(number: i + 1, text: option, picture: i < pictures.count ? pictures[i] : 0,
+                                      load: load, recommended: i == recommended, chosen: answer == option,
+                                      dimmed: answer != nil && answer != option,
+                                      enabled: answer == nil && actions.onAnswer != nil) {
+                            picked = option
+                            actions.onAnswer?(option)
+                        }
+                    }
+                }
+            } else {
             VStack(spacing: 6) {
                 ForEach(Array(options.prefix(4).enumerated()), id: \.offset) { i, option in
                     OptionRow(number: i + 1, text: option, recommended: i == recommended,
@@ -48,6 +64,7 @@ struct QuestionCard: View {
                         actions.onAnswer?(option)
                     }
                 }
+            }
             }
             Text(answer != nil ? "Sent to the task." :
                     actions.onAnswer != nil ? "Tap, press 1–\(min(options.count, 4)), or just say it." : "Say your answer.")
@@ -78,7 +95,7 @@ private struct OptionRow: View {
                     .foregroundStyle(chosen ? Color.white : Color.secondary)
                 Text(text).font(.system(size: 12.5, weight: chosen ? .semibold : .regular)).lineLimit(2)
                 Spacer(minLength: 4)
-                if recommended && !chosen {
+                if recommended && !chosen && !dimmed {
                     Text("Recommended").font(.system(size: 9.5, weight: .semibold))
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(Capsule().fill(Color.accentColor.opacity(0.14)))
@@ -96,6 +113,76 @@ private struct OptionRow: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
+        #if os(macOS)
+        .onHover { hover = $0 }
+        .keyboardShortcut(KeyEquivalent(Character("\(number)")), modifiers: [])
+        #endif
+    }
+}
+
+/// An option that is something to look at: its picture, number and name; click to pick, or press
+/// its number. Opens larger on hover via the tooltip-sized preview is left to the task's image cards.
+private struct PictureOption: View {
+    let number: Int
+    let text: String
+    let picture: Int
+    let load: (Int) async -> Data?
+    let recommended: Bool
+    let chosen: Bool
+    let dimmed: Bool
+    let enabled: Bool
+    let action: () -> Void
+    @State private var image: Image?
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 6) {
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(0.06))
+                    if let image {
+                        image.resizable().scaledToFit()   // the whole design, never cropped
+                            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                    } else if picture > 0 {
+                        ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    Text("\(number)")
+                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                        .frame(width: 18, height: 18)
+                        .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(chosen ? Color.accentColor : Color.black.opacity(0.55)))
+                        .foregroundStyle(.white)
+                        .padding(5)
+                }
+                .aspectRatio(4.0 / 3.0, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(
+                    chosen ? Color.accentColor : recommended && !dimmed ? Color.accentColor.opacity(0.5)
+                        : Color.primary.opacity(hover && enabled ? 0.25 : 0.08),
+                    lineWidth: chosen ? 2 : 1))
+                HStack(spacing: 4) {
+                    Text(text).font(.system(size: 11.5, weight: chosen ? .semibold : .regular)).lineLimit(2)
+                    Spacer(minLength: 0)
+                    if chosen { Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Color.accentColor) }
+                }
+                if recommended && !chosen && !dimmed {
+                    Text("Recommended").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Color.accentColor)
+                }
+            }
+            .contentShape(Rectangle())
+            .opacity(dimmed ? 0.45 : 1)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .frame(maxWidth: .infinity)
+        .task(id: picture) {
+            guard picture > 0, image == nil, let data = await load(picture) else { return }
+            #if os(macOS)
+            if let ns = NSImage(data: data) { image = Image(nsImage: ns) }
+            #else
+            if let ui = UIImage(data: data) { image = Image(uiImage: ui) }
+            #endif
+        }
         #if os(macOS)
         .onHover { hover = $0 }
         .keyboardShortcut(KeyEquivalent(Character("\(number)")), modifiers: [])

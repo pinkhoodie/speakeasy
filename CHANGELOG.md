@@ -2,6 +2,10 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.47 — See the options
+
+- **Questions about something visual come with pictures.** When the choice is between layouts, designs, photos, places or products, Hermes attaches a screenshot of each option. The card shows them side by side, numbered, and the voice says "they're on screen". Pictures go through the same safety checks as any other task image.
+
 ## Plugin 0.2.46 — Questions you answer in one tap
 
 - **When a task needs a decision, it asks you.** Instead of guessing or burying the question in its answer, Hermes ends with one short question and 2–4 options, marking the one it would pick. The voice reads it out ("Quick question: which layout should I build? Three tiers, one plan, or a comparison table. I'd go with three tiers.").
@@ -46,7 +50,7 @@ Speakeasy has two parts that update separately: the **Mac app** (updates through
 ## Mac (next)
 
 - Settings › Where work goes: pick one place, default plus approved threads, or sorted by topic.
-- Question cards: a task's question shows with numbered answers and a Recommended pick; tap one or press 1–4. Unanswered questions stay on screen until you answer.
+- Question cards: a task's question shows with numbered answers and a Recommended pick; tap one or press 1–4. Unanswered questions stay on screen until you answer. Options with pictures show as numbered thumbnails.
 
 ## Mac 0.2.16 + Plugin 0.2.39 — Says why a task failed
 

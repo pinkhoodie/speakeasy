@@ -54,11 +54,15 @@ public final class VoicePanelModel: ObservableObject {
     public var onAnswer: (String, String) -> Void = { _, _ in }
     /// Answers already given, by task id, so a card stays settled after the tap.
     @Published public var answers: [String: String] = [:]
+    /// Fetches a task picture (run id, card number) through the authenticated api.
+    public var loadCardImage: (String, Int) async -> Data? = { _, _ in nil }
     public func questionActions(for taskID: String) -> QuestionActions {
-        QuestionActions(onAnswer: { [weak self] text in
+        let runID = state.tasks.first(where: { $0.id == taskID })?.info.runID
+        let load = loadCardImage
+        return QuestionActions(onAnswer: { [weak self] text in
             self?.answers[taskID] = text
             self?.onAnswer(taskID, text)
-        }, answered: answers[taskID])
+        }, answered: answers[taskID], image: runID.map { run in { number in await load(run, number) } })
     }
     /// nil shows the task list; an id opens that task.
     public var onSelectTask: (String?) -> Void = { _ in }

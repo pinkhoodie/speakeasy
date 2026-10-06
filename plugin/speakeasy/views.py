@@ -93,7 +93,7 @@ CATALOG: dict[str, dict[str, Any]] = {
     "thermostat": {"name": S, "current": N, "target": N, "mode": S, "unit": S, "humidity": N},
     "camera": {"name": S, "image_url": URL, "when": S},
     # A decision the task needs from the user; the app shows numbered answers (tap, 1-4, or say it).
-    "question": {"question": S, "options": (S, 4), "recommended": N, "task_id": S},
+    "question": {"question": S, "options": (S, 4), "recommended": N, "task_id": S, "images": (N, 4)},
 }
 
 
@@ -194,9 +194,15 @@ def extract_question(output: str) -> tuple[str, dict[str, Any] | None]:
         return rest, None
     if not isinstance(raw, dict):
         return rest, None
+    # Options are short strings, or {"text", "image"} when the choice is something to look at.
+    opts = raw.get("options") if isinstance(raw.get("options"), list) else []
+    images = [(o.get("image") or "").strip() if isinstance(o, dict) else "" for o in opts[:4]]
+    raw = {**raw, "options": [o.get("text") if isinstance(o, dict) else o for o in opts]}
     view = clean({**raw, "kind": "question"})
     if not view or not view.get("question") or len(view.get("options") or []) < 2:
         return rest, None
+    if any(images):
+        view["_option_images"] = images[:len(view["options"])]
     rec = view.get("recommended")
     if isinstance(rec, (int, float)) and 0 <= int(rec) < len(view["options"]):
         view["recommended"] = int(rec)
@@ -213,6 +219,8 @@ def spoken_question(view: dict[str, Any]) -> str:
         said = said.rstrip(".") + "?"
     listed = ", ".join(opts[:-1]) + f", or {opts[-1]}" if len(opts) > 2 else f"{opts[0]} or {opts[1]}"
     out = f"Quick question: {said[0].lower() + said[1:]} {listed}."
+    if any(view.get("images") or []):
+        out = out[:-1] + ". They're on screen."
     if "recommended" in view:
         out += f" I'd go with {opts[view['recommended']].lower()}."
     return out

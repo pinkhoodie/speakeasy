@@ -304,8 +304,11 @@ QUESTION_RULE = (
     "When you can't go on without a decision from {user_name} (which option, which file, go ahead or not), "
     "don't guess on anything that matters: do everything you can first, then end your answer with a fenced block "
     "labeled `speakeasy-question` holding one JSON object: {\"question\": \"<one short question>\", \"options\": "
-    "[\"<2 to 4 short answers, a few words each>\"], \"recommended\": <index of the one you'd pick, or omit>}, "
-    "then stop. {user_name} answers with one tap or by voice, and the answer comes back to you here. Ask at most "
+    "[\"<2 to 4 short answers, a few words each>\"], \"recommended\": <index of the one you'd pick, or omit>}. "
+    "When the options are things to look at (layouts, designs, photos, places, products), make each option "
+    "{\"text\": \"<short name>\", \"image\": \"<absolute path of a screenshot or render of it, or an https image URL>\"} "
+    "so {user_name} can see them side by side. After the block, "
+    "stop.  {user_name} answers with one tap or by voice, and the answer comes back to you here. Ask at most "
     "one question, only for a real decision, never to confirm something you were already asked to do. "
 )
 

@@ -60,3 +60,21 @@ def test_tapping_an_answer_continues_the_same_task(server, service, hermes):
     assert "One long bed" in second["input"] and "garden" in second["input"].lower()   # same task, with context
     assert http(server.base_url, "POST", f"/voice/interactions/{session['interaction_id']}/answer",
                 {"task_id": "nope", "text": "x"}, server.token)[0] == 404
+
+
+def test_options_can_be_pictures(tmp_path):
+    pics = []
+    for name in ("wide", "tall"):
+        p = tmp_path / f"{name}.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 64)
+        pics.append(str(p))
+    out = ("Two layouts ready.\n```speakeasy-question\n"
+           '{"question": "Which banner?", "options": [{"text": "Wide", "image": "%s"}, {"text": "Tall", "image": "%s"}]}'
+           "\n```\nSPOKEN: Two layouts ready." % tuple(pics))
+    r = text.split_result(out, (tmp_path,))
+    assert r["question"]["options"] == ["Wide", "Tall"] and r["question"]["images"] == [1, 2]
+    assert [c["name"] for c in r["cards"]] == ["wide.png", "tall.png"]
+    assert "They're on screen." in r["spoken"]
+    assert "_option_images" not in r["question"]
+    outside = out.replace(str(tmp_path), "/etc")   # a picture outside the allowed folders is just left out
+    assert "images" not in text.split_result(outside, (tmp_path,))["question"]

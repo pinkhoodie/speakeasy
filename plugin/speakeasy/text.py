@@ -513,8 +513,24 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
     output, views = extract_views(output)
     from .views import extract_question, spoken_question
     output, question = extract_question(output)
+    option_images = question.pop("_option_images", []) if question else []
+    for raw in option_images:
+        if raw and raw not in output:
+            output += f"\nMEDIA:{raw}"   # one picture per option, through the same vetting as any result image
     output, images, media_tags = media_images(output, image_roots)
     cards = (cards + images)[:MAX_CARDS]
+    if question and any(option_images):
+        def number(raw: str) -> int:
+            if not raw:
+                return 0
+            want = raw if raw.startswith("https://") else str(Path(raw).expanduser().resolve())
+            for i, card in enumerate(cards):
+                if card.get("image_url") == want or card.get("path") == want:
+                    return i + 1
+            return 0
+        numbers = [number(r) for r in option_images]
+        if any(numbers):
+            question["images"] = numbers   # card numbers, fetched by the app from /voice/card-image
     full = safe_full_text(output)
     spoken = safe_user_text(spoken_raw, 500) if spoken_raw else None
     if not spoken and full:

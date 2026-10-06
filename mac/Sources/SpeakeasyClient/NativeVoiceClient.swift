@@ -132,6 +132,10 @@ public final class NativeVoiceClient: VoiceCallClient {
         model.onTogglePause = { [weak self] in self?.togglePause() }
         model.onStopTask = { [weak self] runID in self?.stopWork(runID: runID) }
         model.onAnswer = { [weak self] taskID, text in self?.answerQuestion(taskID: taskID, text: text) }
+        model.loadCardImage = { [weak self] runID, number in
+            guard let api = await self?.api else { return nil }
+            return try? await api.image(runID: runID, index: number)
+        }
         model.onSelectTask = { [weak self] id in self?.selectTask(id) }
         model.onDismissTasks = { [weak self] runIDs in self?.dismissTasks(runIDs) }
         model.onDismissReview = { [weak self] runID in self?.dismissReview(runID) }

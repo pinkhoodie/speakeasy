@@ -37,7 +37,8 @@ enum CardsSmoke {
                 let view = ViewCardView(card)
                     .environment(\.draftActions, DraftActions(onSend: { _ in }, onEdit: { _ in }))
                     .environment(\.questionActions, QuestionActions(onAnswer: { _ in },
-                                                                    answered: card["answered"].string))
+                        answered: card["answered"].string,
+                        image: { n in FileManager.default.contents(atPath: "\(dir)/picture-\(n).png") }))
                     .padding(12)
                     .frame(width: 380)
                     .background(scheme == .dark ? Color(white: 0.13) : Color(white: 0.97))
