@@ -575,7 +575,7 @@ def clarify_channel(named: list[str], known: list[str]) -> str:
     if len(named) >= 2:
         return f"Should that go in {named[0]} or {named[1]}?"
     if known:
-        return f"I don't have that channel. I have {', '.join(known[:4])}; which one?"
+        return f"That channel isn't one I know. The ones I know are {', '.join(known[:4])}; which should it be?"
     return "I don't have that channel. Where should it go?"
 
 
@@ -646,6 +646,7 @@ def pictures_note(count: int) -> str:
 STOPPED_SPOKEN = "I stopped that task. I'm still here."
 FAILED_SPOKEN = "I couldn't finish that one; the app shows what went wrong."
 NO_TRANSCRIPT_SPOKEN = "I did not receive enough transcript to act. Please repeat the request."
+GREETING_SPOKEN = "That was just a hello, so nothing's started. Go ahead, I'm listening."
 
 
 def lost_track_note(names: Names) -> str:

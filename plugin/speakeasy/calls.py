@@ -7,6 +7,7 @@ only implement ``run()`` (read provider events) and ``_send()`` (write context t
 from __future__ import annotations
 
 import asyncio
+import re
 import dataclasses
 import functools
 import hashlib
@@ -33,6 +34,20 @@ from .text import (ID_RE, MAX_TRANSCRIPT, TERMINAL, clean_transcript, delivery_t
                    thread_commentary, vetted_live_ref)
 
 logger = logging.getLogger(__name__)
+
+
+# A greeting or a bare filler sound on its own is never work ("hey", "yo there", "um").
+GREETING_RE = re.compile(
+    r"(?i)^\s*(?:(?:hey|hi|hello|yo|sup|hiya|howdy|morning|evening|um+|uh+|hmm+|so|okay so|alright so)"
+    r"(?:\s+(?:there|again|man|buddy|dude|you|yo))?"
+    r"|what'?s up|whats up|wassup|how'?s it going|you there|are you there)\s*[.!?,]*\s*$")
+SETTLE_S = 1.5         # wait this long after a handoff for the user to keep going
+SETTLE_MAX_S = 6.0     # and never longer than this in total
+ABSORB_WINDOW_S = 15.0 # a handoff of words already folded into an earlier task is dropped
+
+
+def is_greeting(request: str) -> bool:
+    return bool(GREETING_RE.match(request or ""))
 
 
 def whole_request(context: str) -> str:
@@ -434,6 +449,7 @@ class SidebandWorker:
         self.rt, self.store, self.hermes, self.interaction = rt, rt.store, rt.hermes, interaction
         self.notices = rt.notices
         self.fragments: deque[dict[str, Any]] = deque(maxlen=512)
+        self.absorbed: list[tuple[str, float]] = []  # words folded into an earlier task by settle()
         self.handoff_at: dict[str, float] = {}   # delegation id -> when the handoff arrived (monotonic)
         self.show_pending: set[str] = set()      # task keys asked for a screenshot by "show me"
         # Home control: the question just asked (original request, question, when) and answers given
@@ -812,6 +828,43 @@ class SidebandWorker:
                            type(exc).__name__, str(exc)[:200])
             await self._handoff_failed(delegation_id, revision, exc)
 
+    async def settle(self, request: str) -> str:
+        """Wait SETTLE_S after the handoff; every new user turn in that time restarts the wait (up to
+        SETTLE_MAX_S) and is added to this request. Returns the whole request."""
+        start = time.monotonic()
+        quiet_until, seen = start + SETTLE_S, 0
+        extra: list[str] = []
+        while time.monotonic() < min(quiet_until, start + SETTLE_MAX_S):
+            await asyncio.sleep(0.15)
+            fresh = [f["text"] for f in list(self.fragments) if f["speaker"] == "user" and f["at"] > start]
+            if len(fresh) > seen:
+                seen, extra = len(fresh), fresh
+                quiet_until = time.monotonic() + SETTLE_S
+        if not extra:
+            return request
+        more = " ".join(" ".join(extra).split())
+        self.absorbed = [(t, at) for t, at in self.absorbed if time.monotonic() - at < ABSORB_WINDOW_S]
+        self.absorbed.append((more, time.monotonic()))
+        logger.info("speakeasy: kept listening, added %d more words to the request", len(more.split()))
+        return f"{request.rstrip()} {more}"
+
+    def _already_absorbed(self, request: str) -> bool:
+        norm = lambda t: " ".join(re.findall(r"[a-z0-9']+", t.lower()))  # noqa: E731
+        want = norm(request)
+        now = time.monotonic()
+        return bool(want) and any(now - at < ABSORB_WINDOW_S and (want in norm(t) or norm(t) in want)
+                                  for t, at in self.absorbed)
+
+    async def _drop(self, delegation_id: str, revision: int, reason: str, spoken: str | None) -> None:
+        """A handoff that should never become a task. It ends visibly (no lingering "Waiting for")."""
+        backend = BackendRun(delegation_id, revision, self._idem(delegation_id, revision))
+        with self.interaction.lock:
+            self.interaction.runs[delegation_id] = backend
+            backend.status, backend.error = "rejected", reason
+        self.publish()
+        if spoken:
+            await self.append("session.commentary.append", delegation_id, spoken)
+
     async def _handoff_failed(self, delegation_id: str, revision: int, exc: Exception) -> None:
         with self.interaction.lock:
             backend = self.interaction.runs.get(delegation_id)
@@ -848,6 +901,15 @@ class SidebandWorker:
             await self.append("session.commentary.append", delegation_id, P.NO_TRANSCRIPT_SPOKEN)
             return
         last_request = whole_request(context)
+        if is_greeting(last_request):
+            # "Hey" opens a conversation; it never starts work.
+            logger.info("speakeasy: greeting, no task started")
+            await self._drop(delegation_id, revision, "Just a greeting", P.GREETING_SPOKEN)
+            return
+        if self._already_absorbed(last_request):
+            logger.info("speakeasy: handoff already folded into the task before it; not started twice")
+            await self._drop(delegation_id, revision, "Added to the previous request", None)
+            return
         if router.is_show_me(last_request) and await self.show_me(delegation_id, last_request):
             return
         with self.interaction.lock:
@@ -856,6 +918,10 @@ class SidebandWorker:
         home_follow = isinstance(marked, str) and marked in self.home_tasks
         if (not marked or home_follow) and await self.home_control(delegation_id, revision, last_request):
             return
+        # Home commands stay instant. Anything else waits a beat in case the user is still talking,
+        # so a breath mid-thought doesn't send half a request.
+        if not marked and router.continues_newest(last_request, self.open_tasks()) is None:
+            last_request = await self.settle(last_request)
         if not marked and await self.quick_answer(delegation_id, revision, last_request):
             return
         candidates = await self.conversation_candidates(last_request)

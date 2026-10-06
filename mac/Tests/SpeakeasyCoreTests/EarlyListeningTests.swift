@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import SpeakeasyCore
 
-/// Words said while a call is still connecting: the panel shows it's listening and what it heard.
+/// Speech captured during call setup: the panel shows it's listening plus a live transcript.
 final class EarlyListeningTests: XCTestCase {
     let t0 = Date(timeIntervalSince1970: 1_800_000_000)
 

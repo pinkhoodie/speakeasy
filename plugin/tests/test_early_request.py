@@ -1,4 +1,4 @@
-"""Words said while a call is still connecting: the app transcribes them on the device and hands them
+"""Speech captured during call setup: the app transcribes it on the device and hands them
 over once the call is up, as the call's first request."""
 from __future__ import annotations
 

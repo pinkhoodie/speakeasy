@@ -5,7 +5,7 @@ import Speech
 import WebRTC
 #endif
 
-/// Listens while a call is still connecting, so words said before the voice is ready aren't lost.
+/// Captures speech during call setup, so nothing said before the voice is ready gets dropped.
 /// Transcribes on the device (Apple speech recognition, on-device only: no audio leaves the machine
 /// here). The text is handed to the call as its first request once it connects.
 ///

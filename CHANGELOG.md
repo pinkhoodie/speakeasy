@@ -2,9 +2,15 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.41 — Lets you finish your thought
+
+- **"Hey" no longer starts a task.** A greeting on its own gets a hello back, never "On it".
+- **A breath mid-thought doesn't send half a request.** After you pause, Speakeasy waits a moment (about a second and a half) before starting work. If you keep talking, what you add joins the same request instead of becoming a second task. Light switches and quick follow-ups to running work stay instant.
+- **The voice is told to wait for the actual ask** when you're building up to it over several sentences.
+
 ## Plugin 0.2.40
 
-- **"Clear done" clears everything that's done.** Quick answers and home-control tasks (weather, lights) showed as Done but stayed in the task list after Clear done or the x. They now clear like every other task, including ones already stuck there.
+- **Finished quick answers clear properly.** Weather lookups, light switches and other instant answers used to linger in the list after you cleared finished work. Now they go away with everything else, including old ones that were stuck.
 
 ## Mac 0.2.16 + Plugin 0.2.39 — Says why a task failed
 
@@ -13,7 +19,7 @@ Speakeasy has two parts that update separately: the **Mac app** (updates through
 
 ## Mac 0.2.15 + Plugin 0.2.38 — Talk while it connects
 
-- **Start talking right away.** While a call is still connecting, Speakeasy already listens: the panel says "Listening" and shows your words as you say them. When the call connects, what you said becomes your first request, so "turn on the bedroom lamps" works without waiting or repeating yourself.
+- **Speak as soon as you tap.** Before the call has fully connected, Speakeasy is already listening and shows a live transcript. Once it connects, those words become your first request, so "dim the den lights" works with no waiting and no repeating.
 - **Stays on your Mac.** Those first words are transcribed on the device by macOS speech recognition; macOS asks for permission once. Mute before the call connects and the words are dropped.
 
 ## Plugin 0.2.37
