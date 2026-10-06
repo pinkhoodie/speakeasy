@@ -27,7 +27,9 @@ public enum ConnectionTrouble {
         guard isTailnet(server) else {
             return "Couldn't reach your Hermes. Check that the Hermes machine is on and awake, then try again."
         }
-        #if os(iOS)
+        #if os(visionOS)
+        return "Couldn't reach your Hermes. Tailscale may be off on this Vision Pro: open Tailscale, turn it on, then try again."
+        #elseif os(iOS)
         return "Couldn't reach your Hermes. Tailscale may be off on this phone: open Tailscale, turn it on, then try again."
         #else
         return "Couldn't reach your Hermes. Tailscale may be off on this Mac: open Tailscale, connect, then try again."

@@ -1,6 +1,10 @@
 import AVFoundation
 import Foundation
+#if os(visionOS)
+import LiveKitWebRTC
+#else
 import WebRTC
+#endif
 
 /// Native WebRTC transport: one peer connection, one captured audio track,
 /// the `oai-events` data channel, and remote audio playout via the default ADM.
@@ -235,7 +239,7 @@ public final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDat
     /// mic, so the two never fight over it; `releaseAudio()` hands the mic over. No-op on the Mac,
     /// where both can share the input.
     public func holdAudio() {
-        #if os(iOS)
+        #if os(iOS) || os(visionOS)
         let session = RTCAudioSession.sharedInstance()
         session.useManualAudio = true
         session.isAudioEnabled = false
@@ -245,7 +249,7 @@ public final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDat
 
     /// Let the call's audio start (call after the on-device listener has stopped).
     public func releaseAudio() {
-        #if os(iOS)
+        #if os(iOS) || os(visionOS)
         guard audioHeld else { return }
         audioHeld = false
         let session = RTCAudioSession.sharedInstance()

@@ -3,6 +3,8 @@ import Foundation
 import Speech
 #if os(iOS)
 import WebRTC
+#elseif os(visionOS)
+import LiveKitWebRTC
 #endif
 
 /// Captures speech during call setup, so nothing said before the voice is ready gets dropped.
@@ -137,7 +139,7 @@ public final class EarlyCapture {
     }
 
     private func tapAndStart(_ request: SFSpeechAudioBufferRecognitionRequest) -> Bool {
-        #if os(iOS)
+        #if os(iOS) || os(visionOS)
         // On iPhone nothing has opened the audio session yet at this point (WebRTC normally does it
         // when the call's audio starts), so the mic would read silence. Open it the way the call
         // will use it, through WebRTC's own session object so the two never disagree about it.

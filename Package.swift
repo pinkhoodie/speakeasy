@@ -6,19 +6,23 @@ import PackageDescription
 // and panel model. They build for macOS and iOS. The Mac app itself builds from mac/Package.swift.
 let package = Package(
     name: "Speakeasy",
-    platforms: [.macOS(.v14), .iOS(.v17)],
+    platforms: [.macOS(.v14), .iOS(.v17), .visionOS(.v2)],
     products: [
         .library(name: "SpeakeasyCore", targets: ["SpeakeasyCore"]),
         .library(name: "SpeakeasyClient", targets: ["SpeakeasyClient"]),
     ],
     dependencies: [
         .package(url: "https://github.com/stasel/WebRTC.git", exact: "153.0.0"),
+        // Vision Pro: the same WebRTC, built by LiveKit (stasel ships no visionOS slice). Class names
+        // carry an LK prefix; SpeakeasyClient/WebRTCNames.swift maps them back.
+        .package(url: "https://github.com/livekit/webrtc-xcframework.git", exact: "150.7871.03"),
     ],
     targets: [
         .target(name: "SpeakeasyCore", path: "mac/Sources/SpeakeasyCore"),
         .target(name: "SpeakeasyClient", dependencies: [
             "SpeakeasyCore",
-            .product(name: "WebRTC", package: "WebRTC"),
+            .product(name: "WebRTC", package: "WebRTC", condition: .when(platforms: [.macOS, .iOS])),
+            .product(name: "LiveKitWebRTC", package: "webrtc-xcframework", condition: .when(platforms: [.visionOS])),
         ], path: "mac/Sources/SpeakeasyClient"),
     ],
     swiftLanguageModes: [.v5]
