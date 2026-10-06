@@ -256,7 +256,7 @@ def test_explicit_channel_naming_wins_and_never_asks():
 
 
 def test_topical_pick_or_default():
-    s = _settings()
+    s = _settings(mode="topic")
     assert channels.resolve(s, "Telegram", "#work").channel.target == "discord:111"
     fallback = channels.resolve(s, "Telegram", None)
     assert fallback.channel.default and fallback.channel.target == "telegram:555"
@@ -264,7 +264,7 @@ def test_topical_pick_or_default():
 
 def test_legacy_settings_migrate():
     s = S.validate({"delivery": {"target": "discord:123", "new_thread_per_task": True}})
-    assert s["delivery"] == {"target": "discord:123", "new_thread": True, "channels": []}
+    assert s["delivery"] == {"target": "discord:123", "new_thread": True, "channels": [], "mode": "home"}
 
 
 def test_channel_settings_are_validated(server):
@@ -479,6 +479,8 @@ def test_continuing_a_chat_posts_there_and_never_writes_hermes_config(server, se
         callback("run.completed", {})
         return True
     monkeypatch.setattr(continuity, "stream_session_chat", fake_stream)
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [  # the thread's channel is approved
+        {"target": "discord:111", "label": "#work", "topic": "work"}]}})
     posted = []
     monkeypatch.setattr(service.rt.notices, "post",
                         lambda key, text, limit=600, target=None: posted.append((key, target, text)) or True)

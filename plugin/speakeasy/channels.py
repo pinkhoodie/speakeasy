@@ -38,7 +38,14 @@ class Choice:
     clarify: str | None = None
 
 
+def mode(settings: dict[str, Any]) -> str:
+    return settings["delivery"].get("mode") or "home"
+
+
 def opted_in(settings: dict[str, Any]) -> list[Channel]:
+    """The approved channels. In "single" mode there are none: everything goes to the home target."""
+    if mode(settings) == "single":
+        return []
     return [Channel(c["target"], c["label"], c.get("topic", ""), bool(c.get("new_thread")))
             for c in settings["delivery"].get("channels") or []]
 
@@ -97,6 +104,8 @@ def explicit(request: str, settings: dict[str, Any],
 
 def resolve(settings: dict[str, Any], default_label: str, picked: str | None) -> Choice:
     """The routing model's topical pick (an opted-in label) or the default target."""
+    if mode(settings) != "topic":
+        picked = None  # only "sort by topic" sends new work anywhere but home
     key = (picked or "").lower().lstrip("#")
     found = next((c for c in opted_in(settings) if c.key == key), None) if key else None
     return Choice(found, "topic") if found else Choice(default_channel(settings, default_label), "default")
@@ -106,3 +115,29 @@ def choose(request: str, settings: dict[str, Any], default_label: str, picked: s
            clarify_text: Callable[[list[str], list[str]], str] | None = None) -> Choice:
     """Explicit naming first, then the routing model's topical pick, then the default."""
     return explicit(request, settings, clarify_text) or resolve(settings, default_label, picked)
+
+
+def _place(target: str) -> tuple[str, str]:
+    parts = (target or "").split(":")
+    return parts[0].lower(), (parts[1] if len(parts) > 1 else "")
+
+
+def allows_conversation(settings: dict[str, Any], platform: str, chat_id: str, parent_chat_id: str = "",
+                        chat_type: str = "") -> bool:
+    """May voice work continue this existing chat? Only when it is the home target or an approved
+    channel (or a thread inside one). A bare platform target ("telegram") means its home DM."""
+    places = [settings["delivery"]["target"]] + [c.target for c in opted_in(settings)]
+    platform = (platform or "").lower()
+    for target in places:
+        if target == "none":
+            continue
+        p, chat = _place(target)
+        if p != platform:
+            continue
+        if not chat:
+            if chat_type in ("dm", "private", ""):
+                return True
+            continue
+        if chat in (chat_id, parent_chat_id):
+            return True
+    return False

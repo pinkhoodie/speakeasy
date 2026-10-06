@@ -224,6 +224,8 @@ def test_continued_conversation_failure_is_explained(server, service, hermes, mo
                                    "Server / #work / League", "League team", time.time())
     monkeypatch.setattr(continuity, "conversations_with_context", lambda db, request, **kw: [continuity.Candidate(conv, ())])
     monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [  # the thread's channel is approved
+        {"target": "discord:111", "label": "#work", "topic": "work"}]}})
     from speakeasy import router
     monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S:
                         '{"follow_up_task_id": null, "conversation": "c1", "parts": ["x"], "channel": null}')
@@ -264,6 +266,8 @@ def test_continued_conversation_that_cannot_reach_hermes(server, service, hermes
                                    "Server / #work / League", "League team", time.time())
     monkeypatch.setattr(continuity, "conversations_with_context", lambda db, request, **kw: [continuity.Candidate(conv, ())])
     monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [  # the thread's channel is approved
+        {"target": "discord:111", "label": "#work", "topic": "work"}]}})
     from speakeasy import router
     monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S:
                         '{"follow_up_task_id": null, "conversation": "c1", "parts": ["x"], "channel": null}')

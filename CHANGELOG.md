@@ -2,6 +2,16 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.45 — Choose where voice work goes
+
+- **New setting: where voice work goes.** Three choices:
+  - **One place:** everything goes to your default chat, and Speakeasy never continues a conversation anywhere else.
+  - **Default, plus approved threads** (the new default): new work goes to your default chat. A follow-up to something already running in one of your approved channels continues in that thread.
+  - **Sorted by topic:** the old behavior. New work goes to the approved channel whose description fits.
+  
+  Change it with `hermes voice where single|home|topic`, or in the Mac app's Settings (next Mac release).
+- **Speakeasy only continues chats you've approved.** It no longer picks up a thread in a channel you never added.
+
 ## Plugin 0.2.44 — You hear the heads-up
 
 - **Problems and heads-ups are always said out loud.** When a task's answer has no line written for speech, the voice used to read only the first two sentences, so "the old script broke, I worked around it" further down was never said. Now it reads the opening line plus anything that broke, failed, or needs you.
@@ -26,6 +36,10 @@ Speakeasy has two parts that update separately: the **Mac app** (updates through
 ## Plugin 0.2.40
 
 - **Finished quick answers clear properly.** Weather lookups, light switches and other instant answers used to linger in the list after you cleared finished work. Now they go away with everything else, including old ones that were stuck.
+
+## Mac (next)
+
+- Settings › Where work goes: pick one place, default plus approved threads, or sorted by topic.
 
 ## Mac 0.2.16 + Plugin 0.2.39 — Says why a task failed
 

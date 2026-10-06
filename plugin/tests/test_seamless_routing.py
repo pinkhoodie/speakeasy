@@ -49,3 +49,33 @@ def test_a_warning_is_never_cut_from_what_the_voice_says():
     assert said.startswith("The porch lights are on.") and "failed after the update" in said
     assert "**" not in said and "- " not in said
     assert spoken_from("Done. Everything synced. Nothing else to report.") == "Done. Everything synced."
+
+
+def _modes(mode):
+    from speakeasy.settings import validate_delivery
+    return {"delivery": validate_delivery({"target": "discord:100", "new_thread": True, "mode": mode, "channels": [
+        {"target": "discord:1", "label": "home-lab", "topic": "house"},
+        {"target": "discord:2", "label": "work", "topic": "jobs"}]})}
+
+
+def test_where_modes():
+    from speakeasy.settings import validate_delivery, SettingsError
+    import pytest
+    assert validate_delivery({"target": "none", "new_thread": False, "channels": []})["mode"] == "home"
+    with pytest.raises(SettingsError):
+        validate_delivery({"target": "none", "new_thread": False, "channels": [], "mode": "everywhere"})
+    # new work: only "topic" follows the routing model's pick
+    assert channels.resolve(_modes("topic"), "voice", "work").channel.label == "work"
+    assert channels.resolve(_modes("home"), "voice", "work").channel.default
+    assert channels.resolve(_modes("single"), "voice", "work").channel.default
+    # naming a channel works except in "single"
+    assert channels.explicit("put this in #work", _modes("home")).channel.label == "work"
+    assert channels.explicit("put this in #work", _modes("single")) is None
+    # continuing existing chats: home + approved (and threads in them); "single" = home only
+    home, single = _modes("home"), _modes("single")
+    assert channels.allows_conversation(home, "discord", "999", "2", "thread")       # thread in #work
+    assert channels.allows_conversation(home, "discord", "100", "", "group")         # the home channel
+    assert not channels.allows_conversation(home, "discord", "555", "", "group")     # not approved
+    assert not channels.allows_conversation(home, "telegram", "7", "", "dm")
+    assert not channels.allows_conversation(single, "discord", "999", "2", "thread")
+    assert channels.allows_conversation(single, "discord", "998", "100", "thread")   # thread in home

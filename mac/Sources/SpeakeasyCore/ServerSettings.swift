@@ -57,21 +57,25 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         public var target: String?
         public var newThread: Bool?
         public var channels: [Channel]?
-        enum CodingKeys: String, CodingKey { case target, newThread = "new_thread", legacyNewThread = "new_thread_per_task", channels }
-        public init(target: String? = nil, newThread: Bool? = nil, channels: [Channel]? = nil) {
-            self.target = target; self.newThread = newThread; self.channels = channels
+        /// "single" (home only), "home" (home + continue approved threads), "topic" (also sort new work).
+        public var mode: String?
+        enum CodingKeys: String, CodingKey { case target, newThread = "new_thread", legacyNewThread = "new_thread_per_task", channels, mode }
+        public init(target: String? = nil, newThread: Bool? = nil, channels: [Channel]? = nil, mode: String? = nil) {
+            self.target = target; self.newThread = newThread; self.channels = channels; self.mode = mode
         }
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             target = try? c.decodeIfPresent(String.self, forKey: .target)
             newThread = (try? c.decodeIfPresent(Bool.self, forKey: .newThread)) ?? (try? c.decodeIfPresent(Bool.self, forKey: .legacyNewThread))
             channels = try? c.decodeIfPresent([Channel].self, forKey: .channels)
+            mode = try? c.decodeIfPresent(String.self, forKey: .mode)
         }
         public func encode(to encoder: Encoder) throws {
             var c = encoder.container(keyedBy: CodingKeys.self)
             try c.encodeIfPresent(target, forKey: .target)
             try c.encodeIfPresent(newThread, forKey: .newThread)
             try c.encodeIfPresent(channels, forKey: .channels)
+            try c.encodeIfPresent(mode, forKey: .mode)
         }
     }
     public struct Continuity: Codable, Equatable, Sendable {
@@ -160,6 +164,7 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         var d: [String: Any] = ["target": deliveryTarget ?? "none"]
         if let v = delivery?.newThread { d["new_thread"] = deliveryTarget == nil ? false : v }
         if let channels = delivery?.channels { d["channels"] = channels.map(\.patchObject) }
+        if let mode = delivery?.mode { d["mode"] = mode }
         object["delivery"] = d
         if let enabled = continuity?.enabled { object["continuity"] = ["enabled": enabled] }
         if let speech {

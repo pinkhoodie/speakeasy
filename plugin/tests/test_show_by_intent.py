@@ -110,7 +110,7 @@ def test_a_picture_from_a_thread_task_still_pops_up(home, hermes):
     runner = Threads()
     svc.rt.threads = runner
     svc.settings.patch({"delivery": {"target": "telegram:555", "channels": [
-        {"label": "#life", "target": "discord:222", "topic": "life", "new_thread": True}]}})
+        {"label": "#life", "target": "discord:222", "topic": "life", "new_thread": True}], "mode": "topic"}})
     try:
         created = svc.create_session({"sdp": SDP}, "req_see_3")
         workers[-1].delegate("call_see_3", "show the Lisbon hotel photo")

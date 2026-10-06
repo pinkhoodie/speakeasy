@@ -80,6 +80,8 @@ def setup_parser(parser) -> None:
     fast_.add_argument("what", nargs="?", default="status",
                        help="status | quick on|off | jev venice|openrouter|typesafe|off | home CITY")
     fast_.add_argument("value", nargs="*", default=[])
+    where_ = sub.add_parser("where", help="Where voice work is posted: one place, home + approved threads, or by topic")
+    where_.add_argument("mode", nargs="?", choices=("status", "single", "home", "topic"), default="status")
     tune_ = sub.add_parser("tune", help="Improve the voice brief from your recent calls (you review every edit)")
     tune_.add_argument("action", nargs="?", choices=("start", "show", "apply", "dismiss"), default="show")
     tune_.add_argument("ids", nargs="*", help="edit ids to apply (default: all)")
@@ -325,6 +327,38 @@ def cmd_home(home: Path, args) -> int:
         return 0
     finally:
         svc.close()
+
+
+WHERE_MODES = {
+    "single": ("One place", "Everything goes to your home channel. Speakeasy never posts anywhere else, "
+                            "and never continues a chat outside it."),
+    "home": ("Home, plus approved threads", "New work goes to your home channel. A follow-up to something "
+             "already running in one of your approved channels continues in that thread."),
+    "topic": ("Sort by topic", "Like the one above, plus new work goes to the approved channel whose "
+              "description fits it."),
+}
+
+
+def cmd_where(home: Path, args) -> int:
+    """`hermes voice where`: show or pick where voice work is posted."""
+    from .delivery import target_label
+    from .settings import Settings, SettingsError
+    settings = Settings(home)
+    choice = getattr(args, "mode", "status") or "status"
+    if choice != "status":
+        try:
+            settings.patch({"delivery": {"mode": choice}})
+        except SettingsError as exc:
+            print(f"Error: {exc}")
+            return 2
+    d = settings.get()["delivery"]
+    print(f"Home channel: {target_label(d['target']) if d['target'] != 'none' else 'none set'}")
+    print(f"Approved channels: {', '.join(c['label'] for c in d['channels']) or 'none'}\n")
+    for key, (name, what) in WHERE_MODES.items():
+        mark = "●" if d["mode"] == key else "○"
+        print(f"{mark} {name}  (hermes voice where {key})\n    {what}")
+    print("\nNaming a channel out loud (\"put this in #work\") still sends it there, except in One place.")
+    return 0
 
 
 def cmd_fast(home: Path, args) -> int:
@@ -628,6 +662,8 @@ def handle(args) -> int:
         return cmd_tune(home, args)
     if command == "fast":
         return cmd_fast(home, args)
+    if command == "where":
+        return cmd_where(home, args)
     store = _store(home)
     if command == "devices":
         devices = store.devices()

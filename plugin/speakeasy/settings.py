@@ -30,7 +30,10 @@ DEFAULTS: dict[str, Any] = {
     "hermes_profile": "",
     # target: the default destination; new_thread: open a thread there per task (where supported);
     # channels: extra opted-in destinations a new task is routed to by topic or by name.
-    "delivery": {"target": "none", "new_thread": False, "channels": []},
+    # mode: where work goes. "single" = only the home target; "home" = new work goes home, and
+    # follow-ups can continue existing threads in the approved channels; "topic" = like "home",
+    # plus new work is sorted into the approved channel whose description fits.
+    "delivery": {"target": "none", "new_thread": False, "channels": [], "mode": "home"},
     "continuity": {"enabled": True},
     # A brief spoken update on long tasks. (Where a task went, e.g. a new thread, is always said.)
     "speech": {"progress": True},
@@ -191,6 +194,9 @@ def validate_channels(raw: list[Any]) -> list[dict[str, Any]]:
     return channels
 
 
+DELIVERY_MODES = ("single", "home", "topic")
+
+
 def validate_delivery(delivery: dict[str, Any]) -> dict[str, Any]:
     """The delivery block. Settings from before channels existed (``new_thread_per_task``) migrate:
     that flag becomes ``new_thread`` on the default target."""
@@ -200,7 +206,7 @@ def validate_delivery(delivery: dict[str, Any]) -> dict[str, Any]:
         raise SettingsError("delivery.new_thread_per_task must be true or false")
     if legacy is True and delivery.get("new_thread") is False:
         delivery["new_thread"] = True
-    unknown = set(delivery) - {"target", "new_thread", "channels"}
+    unknown = set(delivery) - {"target", "new_thread", "channels", "mode"}
     if unknown:
         raise SettingsError(f"unknown setting: delivery.{sorted(unknown)[0]}")
     if not valid_delivery_target(delivery.get("target")):
@@ -211,9 +217,12 @@ def validate_delivery(delivery: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_channels, list) or len(raw_channels) > MAX_CHANNELS:
         raise SettingsError(f"delivery.channels must be a list of at most {MAX_CHANNELS} channels")
     channels = validate_channels(raw_channels)
+    mode = delivery.get("mode", "home")
+    if mode not in DELIVERY_MODES:
+        raise SettingsError("delivery.mode must be single, home or topic")
     if delivery["target"] == "none":
         delivery["new_thread"] = False
-    return {"target": delivery["target"], "new_thread": delivery["new_thread"], "channels": channels}
+    return {"target": delivery["target"], "new_thread": delivery["new_thread"], "channels": channels, "mode": mode}
 
 
 def _write_private(path: Path, text: str) -> None:

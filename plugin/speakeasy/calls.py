@@ -169,7 +169,9 @@ class Runtime:
     def route(self, request: str, tasks: list[router.OpenTask], marked: Any,
               chats: list[router.Chat] | None = None, call_so_far: str = "",
               replied_task_id: str | None = None) -> router.Decision:
-        topics = [router.Topic(c.label, c.topic) for c in channels.opted_in(self.routable())]
+        settings = self.routable()
+        topics = ([router.Topic(c.label, c.topic) for c in channels.opted_in(settings)]
+                  if channels.mode(settings) == "topic" else [])
         provider = (self.settings().get("fast_routing") or {}).get("jev") or ""
         place = None
         if provider:
@@ -1262,7 +1264,11 @@ class SidebandWorker:
         try:
             found = await asyncio.to_thread(continuity.conversations_with_context, self.rt.state_db, request)
             placements = self.store.recent_placements()
-            return await asyncio.to_thread(continuity.with_placements, self.rt.state_db, found, placements)
+            ranked = await asyncio.to_thread(continuity.with_placements, self.rt.state_db, found, placements)
+            settings = self.rt.routable()
+            # Only chats in the home target or an approved channel; a thread elsewhere is never picked up.
+            return [c for c in ranked if channels.allows_conversation(
+                settings, c.conv.platform, c.conv.chat_id, c.conv.parent_chat_id, c.conv.chat_type)]
         except Exception as exc:  # never let matching break a request
             logger.warning("speakeasy: conversation candidates failed: %s", type(exc).__name__)
             return []

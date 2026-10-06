@@ -561,6 +561,14 @@ private struct DeliverySettings: View {
         var d = draft.delivery ?? .init(); d.channels = list; draft.delivery = d
     }
 
+    private var modeExplainer: String {
+        switch draft.delivery?.mode ?? "home" {
+        case "single": return "Everything goes to the default. Speakeasy never posts anywhere else or picks up a chat elsewhere."
+        case "topic": return "New work goes to the channel whose description fits, else the default. Follow-ups continue where their task runs."
+        default: return "New work goes to the default. A follow-up to something in an approved channel continues in that thread."
+        }
+    }
+
     var body: some View {
         ServerForm(draft: $draft) {
             Section {
@@ -578,6 +586,19 @@ private struct DeliverySettings: View {
                         .help("You can follow up in that thread, and the call still hears the result.")
                 }
             }
+            Section {
+                Picker("Voice work goes", selection: Binding(
+                    get: { draft.delivery?.mode ?? "home" },
+                    set: { m in var d = draft.delivery ?? .init(); d.mode = m; draft.delivery = d })) {
+                    Text("Only to the default").tag("single")
+                    Text("Default, plus threads in channels below").tag("home")
+                    Text("Sorted into channels below by topic").tag("topic")
+                }
+                Text(modeExplainer).font(.caption).foregroundStyle(.secondary)
+            } header: {
+                Text("Where work goes")
+            }
+            if (draft.delivery?.mode ?? "home") != "single" {
             Section {
                 ForEach(channels) { channel in
                     ChannelRow(channel: Binding(
@@ -599,10 +620,11 @@ private struct DeliverySettings: View {
                 }
                 if let suggestError { Text(suggestError).font(.caption).foregroundStyle(.orange) }
             } header: {
-                Text("More channels")
+                Text("Approved channels")
             } footer: {
-                Text("A new task goes to the channel you name (\"put this in #work\"), else the one whose topic fits, else the default. Follow-ups stay where their task runs.")
+                Text("Speakeasy only posts in, or continues threads in, the default and these channels. Saying a channel's name (\"put this in #work\") sends a new task there.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
             }
             if app.destinations.isEmpty {
                 Text("No connected Hermes chats found. Connect one in Hermes (e.g. Telegram), then reopen Settings.")
