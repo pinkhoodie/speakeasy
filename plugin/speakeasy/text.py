@@ -56,6 +56,38 @@ def clean_transcript(text: str) -> str:
     return out.strip()
 
 
+# A sentence the user needs to hear even when the answer is cut short: something broke, failed,
+# changed, needs them, or is a heads-up. Without a SPOKEN line (tasks in a chat thread) the voice
+# used to read only the first two sentences and drop a "the helper is broken" in sentence five.
+HEADS_UP_RE = re.compile(
+    r"(?i)\b(?:broke|broken|fail(?:s|ed|ing)?|error|couldn't|could not|can't|cannot|unable|didn't work|"
+    r"not working|stopped working|missing|expired|heads up|one more thing|note that|warning|careful|"
+    r"you(?:'ll)? (?:need|have) to|needs? your|waiting (?:for|on) you|approve|confirm|first thing to check|"
+    r"may (?:have )?(?:changed|broken)|instead)\b")
+
+
+def spoken_from(full: str, limit: int = 3) -> str:
+    """What to say aloud when the task gave no SPOKEN line: the opening sentence, then the first
+    sentences that carry a problem or a heads-up, so a warning is never cut off. Bullets and
+    markdown read as separate plain sentences."""
+    text = re.sub(r"https?://\S*[^\s.,;:!?)]|[`*_#>]+", "", full)
+    lines = [re.sub(r"^\s*(?:[-•]|\d+[.)])\s+", "", l).strip() for l in text.splitlines()]
+    sentences = []
+    for line in lines:
+        if line:
+            sentences += [x.strip() for x in re.split(r"(?<=[.!?])\s+", line) if x.strip()]
+    sentences = [x if re.search(r"[.!?]$", x) else x + "." for x in sentences]
+    if not sentences:
+        return ""
+    picked = [0]
+    flagged = [i for i, x in enumerate(sentences[1:], 1) if HEADS_UP_RE.search(x)]
+    picked += flagged[: limit - 1]
+    if len(picked) == 1 and len(sentences) > 1:
+        picked.append(1)
+    out = " ".join(sentences[i] for i in sorted(picked))
+    return re.sub(r"\s+([.,;:!?])", r"\1", re.sub(r"\s+", " ", out)).strip()
+
+
 def safe_user_text(value: Any, limit: int = 500) -> str | None:
     """Bounded display copy, rejecting likely secrets and machine payloads."""
     if not isinstance(value, str):
@@ -484,9 +516,7 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
     full = safe_full_text(output)
     spoken = safe_user_text(spoken_raw, 500) if spoken_raw else None
     if not spoken and full:
-        sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", full).strip())
-        plain = re.sub(r"https?://\S*[^\s.,;:!?)]|[`*_#>]+", "", " ".join(sentences[:2]))
-        spoken = safe_user_text(re.sub(r"\s+([.,;:!?])", r"\1", plain), 500)
+        spoken = safe_user_text(spoken_from(full), 500)
     if spoken and (any(k == "command" for k, _ in split_commands(spoken)) or SHELL_MARK_RE.search(spoken)
                    or "`" in spoken):
         # Never hand the voice a command to read out; the pasteable copy is on screen and in chat.

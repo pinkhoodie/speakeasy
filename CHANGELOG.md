@@ -2,6 +2,11 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.44 — You hear the heads-up
+
+- **Problems and heads-ups are always said out loud.** When a task's answer has no line written for speech, the voice used to read only the first two sentences, so "the old script broke, I worked around it" further down was never said. Now it reads the opening line plus anything that broke, failed, or needs you.
+- **A mid-task warning is spoken right away** instead of waiting its turn behind a routine "starting now" update.
+
 ## Plugin 0.2.43 — No more "which channel?"
 
 - **Speakeasy never stops to ask where something goes.** A place in your request ("in the kitchen") is no longer mistaken for a channel name. A channel you name that isn't set up is ignored, and the task goes where it normally would. Two named channels: the first one wins.

@@ -29,6 +29,7 @@ from . import quick as quick_mod
 from . import views as views_mod
 from .settings import valid_delivery_target
 from .prompt import builder as P
+from . import text as text_mod
 from .text import (ID_RE, MAX_TRANSCRIPT, TERMINAL, clean_transcript, delivery_text, derive_tool_status,
                    interim_progress, live_images_in, notice_text, safe_user_text, short_title, split_result,
                    thread_commentary, vetted_live_ref)
@@ -773,10 +774,13 @@ class SidebandWorker:
         if not self.rt.settings()["speech"]["progress"]:
             return False
         now = time.monotonic()
+        # A problem or heads-up ("the helper is broken, fixing it") is worth hearing now: it skips the
+        # spacing between updates, which otherwise let "starting music" crowd it out.
+        urgent = bool(milestone and text_mod.HEADS_UP_RE.search(milestone))
         with self.interaction.lock:
             last_any = self.interaction.progress_spoken_at
             if (now - backend.started < PROGRESS_AFTER_S or backend.status not in {"running", "working"}
-                    or (last_any and now - last_any < PROGRESS_EVERY_S)
+                    or (last_any and now - last_any < PROGRESS_EVERY_S and not urgent)
                     or backend.activity_count <= backend.told_count):
                 return False
             self.interaction.progress_spoken_at = now  # claim the slot before the (slow) wording call

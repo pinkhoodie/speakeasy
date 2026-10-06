@@ -39,3 +39,13 @@ def test_decide_uses_it_without_the_model():
 def test_the_request_is_not_added_to_itself():
     assert _same_words("Dim the den lamps", "Dim the den lamps")
     assert not _same_words("and the hallway too", "Dim the den lamps")
+
+
+def test_a_warning_is_never_cut_from_what_the_voice_says():
+    from speakeasy.text import spoken_from
+    full = ("The porch lights are on.\n- **Brightness:** 60%, same as last night.\n- **Scene:** Evening.\n"
+            "The schedule that turns them off at midnight failed after the update. I set a one-off timer instead.")
+    said = spoken_from(full)
+    assert said.startswith("The porch lights are on.") and "failed after the update" in said
+    assert "**" not in said and "- " not in said
+    assert spoken_from("Done. Everything synced. Nothing else to report.") == "Done. Everything synced."
