@@ -286,6 +286,15 @@ class StateStore:
                 "SELECT text FROM work_events WHERE idem_key=? AND kind='request' ORDER BY seq LIMIT 1", (key,)).fetchone()
         return row[0] if row else None
 
+    def told(self, key: str, limit: int = 600) -> str:
+        """What the task has told the user so far (progress updates and result), newest last, capped."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT text FROM work_events WHERE idem_key=? AND kind IN ('milestone','result') "
+                "ORDER BY seq DESC LIMIT 8", (key,)).fetchall()
+        text = " ".join(" ".join(r[0].split()) for r in reversed(rows))
+        return text[-limit:]
+
     def recent_placements(self, since_s: float = 7 * 86400, limit: int = 20) -> list[dict[str, Any]]:
         """Chats this assistant recently sent voice work into (thread tasks and continued
         conversations), newest first, across calls: the strongest hint for "where we were working"."""

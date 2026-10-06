@@ -52,7 +52,7 @@ def default_channel(settings: dict[str, Any], label: str) -> Channel | None:
 
 _HASHTAG = re.compile(r"(?<![\w&])#([A-Za-z0-9][A-Za-z0-9_.-]{0,39})")
 _IN_CHANNEL = re.compile(r"(?i)\b(?:in|to|into|over in|on)\s+(?:the\s+|my\s+)?([A-Za-z0-9][A-Za-z0-9_.-]{0,39})"
-                         r"\s+(?:channel|chat|thread|room|group)\b")
+                         r"\s+(?:channel|chat|thread|group)\b")
 _IN_NAME = re.compile(r"(?i)\b(?:start|put|post|do|run|send|drop|open)\b[^.?!]{0,40}?\b(?:in|to|into)\s+"
                       r"(?:the\s+|my\s+)?#?([A-Za-z0-9][A-Za-z0-9_.-]{0,39})\b")
 
@@ -87,13 +87,11 @@ def explicit(request: str, settings: dict[str, Any],
     if not channels:
         return None
     hits, unknown = named(request, channels)
-    labels = [c.label for c in channels]
-    if len(hits) > 1:
-        return Choice(None, "clarify", clarify_text([h.label for h in hits], labels) if clarify_text else "")
+    # Never stop to ask where something goes: placement should be invisible. Two named channels ->
+    # the first one said; a name that isn't a channel ("in the living room", a typo) -> ignored, and
+    # the routing model's topical pick or the default decides as usual.
     if hits:
         return Choice(hits[0], "named")
-    if unknown:
-        return Choice(None, "clarify", clarify_text([], labels) if clarify_text else "")
     return None
 
 

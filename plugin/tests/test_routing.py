@@ -245,14 +245,13 @@ def _settings(**delivery):
     return S.validate({"delivery": {"target": "telegram:555", "channels": [WORK, RESEARCH], **delivery}})
 
 
-def test_explicit_channel_naming_wins_and_ambiguity_asks():
+def test_explicit_channel_naming_wins_and_never_asks():
     s = _settings()
     assert channels.explicit("put this in work: a menu bar timer", s).channel.label == "#work"
     assert channels.explicit("put it in #research please", s).channel.label == "#research"
     both = channels.explicit("post it in #work and #research", s, P.clarify_channel)
-    assert both.clarify and "#work" in both.clarify and "#research" in both.clarify
-    unknown = channels.explicit("put it in #cooking", s, P.clarify_channel)
-    assert unknown.clarify and unknown.channel is None
+    assert not both.clarify and both.channel.label == "#work"      # the first one named
+    assert channels.explicit("put it in #cooking", s, P.clarify_channel) is None  # unknown: topic/default decide
     assert channels.explicit("put it in writing for me", s) is None  # ordinary phrase, not a channel
 
 
@@ -293,13 +292,12 @@ def test_named_channel_runs_here_and_posts_the_result_there(server, service, her
     assert "#work" in hermes.calls[0]["input"]
 
 
-def test_unknown_channel_does_not_start_and_asks(server, service, hermes):
+def test_unknown_channel_starts_anyway_without_asking(server, service, hermes):
     service.settings.patch({"delivery": {"target": "telegram:555", "channels": [WORK]}})
     _, worker = start_call(server, service)
     worker.delegate("call_c", "put it in #cooking: find a pasta recipe")
-    wait_for(lambda: spoken(worker))
-    time.sleep(0.2)
-    assert hermes.calls == [] and "channel" in spoken(worker)[0]
+    wait_for(lambda: hermes.calls)
+    assert not any("channel" in line.lower() and "?" in line for line in spoken(worker))
 
 
 class FakeThreads:

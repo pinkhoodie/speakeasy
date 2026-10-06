@@ -2,6 +2,12 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.43 — No more "which channel?"
+
+- **Speakeasy never stops to ask where something goes.** A place in your request ("in the kitchen") is no longer mistaken for a channel name. A channel you name that isn't set up is ignored, and the task goes where it normally would. Two named channels: the first one wins.
+- **"Fix that thing it mentioned" continues the right task.** Routing now sees what each recent task told you, not just what you asked it. Pointing back at something a task said, even one that already finished, continues in that task's thread instead of opening a new one.
+- **Fixed: a request sometimes reached Hermes twice over** ("dim the lamps dim the lamps"). Keeping the line open after a pause no longer re-adds the words you'd already said.
+
 ## Plugin 0.2.42
 
 - **Plainer wording when an email draft is ready:** the voice tells you the draft is on the card and to tap Send once you've read it.

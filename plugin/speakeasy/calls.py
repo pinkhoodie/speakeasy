@@ -46,6 +46,13 @@ SETTLE_MAX_S = 6.0     # and never longer than this in total
 ABSORB_WINDOW_S = 15.0 # a handoff of words already folded into an earlier task is dropped
 
 
+def _same_words(fragment: str, request: str) -> bool:
+    """The transcript of words already in the request (it often lands just after the handoff)."""
+    norm = lambda t: " ".join(re.findall(r"[a-z0-9']+", t.lower()))  # noqa: E731
+    f = norm(fragment)
+    return not f or f in norm(request)
+
+
 def is_greeting(request: str) -> bool:
     return bool(GREETING_RE.match(request or ""))
 
@@ -812,7 +819,9 @@ class SidebandWorker:
                 continue
             work = self.store.work(idem_key=key) or {}
             spoken = ((work.get("result") or {}).get("spoken") or "") if status == "completed" else ""
-            tasks.append(router.OpenTask(task_id, request, status, spoken, round(now - started, 1)))
+            told = self.store.told(key)
+            tasks.append(router.OpenTask(task_id, request, status, (spoken + " " + told).strip(),
+                                         round(now - started, 1)))
         return tasks
 
     async def dispatch(self, delegation_id: str, revision: int, context: str, marked: Any = None) -> None:
@@ -836,7 +845,8 @@ class SidebandWorker:
         extra: list[str] = []
         while time.monotonic() < min(quiet_until, start + SETTLE_MAX_S):
             await asyncio.sleep(0.15)
-            fresh = [f["text"] for f in list(self.fragments) if f["speaker"] == "user" and f["at"] > start]
+            fresh = [f["text"] for f in list(self.fragments) if f["speaker"] == "user" and f["at"] > start
+                     and not _same_words(f["text"], request)]
             if len(fresh) > seen:
                 seen, extra = len(fresh), fresh
                 quiet_until = time.monotonic() + SETTLE_S

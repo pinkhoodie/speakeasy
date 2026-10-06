@@ -166,6 +166,33 @@ def continues_newest(request: str, tasks: list[OpenTask]) -> OpenTask | None:
     return newest
 
 
+# "fix that helper the agent was telling me about", "do what it suggested", "the one you mentioned".
+_BACK_REF = re.compile(
+    r"(?i)\b(?:(?:you|it|he|she|they|hermes|the agent|the assistant)\s+(?:was|were|is)?\s*"
+    r"(?:telling me about|told me about|mentioned|said|suggested|found|flagged|brought up|recommended|offered)"
+    r"|(?:that|the)\s+(?:one|thing|fix|idea|issue|problem)\s+(?:you|it))\b")
+_STOP = set("""the a an that this those these it its to of for and or but with on in at by from about me my you your
+he she they them was were is are be been do did does fix make get go try can could would will please okay ok so
+just now then also tell telling told mentioned said suggested found flagged brought up recommended offered agent
+assistant hermes thing one""".split())
+BACK_REF_WINDOW_S = 30 * 60
+
+
+def refers_back(request: str, tasks: list[OpenTask]) -> OpenTask | None:
+    """The one recent task whose own words the request points back to ("fix that helper the agent was
+    telling me about" after a task said the helper was broken). None unless exactly one task matches."""
+    if not tasks or not _BACK_REF.search(request):
+        return None
+    recent = [t for t in tasks if t.age_s is None or t.age_s <= BACK_REF_WINDOW_S]
+    asked = {w for w in re.findall(r"[a-z0-9']+", request.lower()) if w not in _STOP and len(w) > 2}
+    hits = [t for t in recent if asked & set(re.findall(r"[a-z0-9']+", (t.request + " " + t.result).lower()))]
+    if len(hits) == 1:
+        return hits[0]
+    if not asked and len(recent) == 1:
+        return recent[0]
+    return None
+
+
 def route(request: str, tasks: list[OpenTask], marked_task_id: Any = None) -> list[Part]:
     """One Part: the request as a new task, or a follow-up to one open task."""
     request = (request or "").strip()
@@ -323,7 +350,8 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
     open_lines = "\n".join(f"- {t.task_id}: {t.request[:200]} ({t.status}"
                            + (f", started {int(t.age_s)}s ago" if t.age_s is not None else "") + ")"
                            + (f"\n    the assistant's last spoken answer came from this task: \"{t.result[:300]}\""
-                              if t.task_id == replied_task_id and t.result else "")
+                              if t.task_id == replied_task_id and t.result else
+                              f"\n    what this task has told the user: \"{t.result[-300:]}\"" if t.result else "")
                            for t in tasks[-MAX_OPEN_TASKS:]) or "none"
     channel_lines = "\n".join(f"- {c.label}: {c.topic or 'no description'}" for c in topics) or "none"
     return [
@@ -334,7 +362,10 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
             "follow_up_task_id: the id of an open task ONLY when the request clearly adds to, changes, corrects "
             "or asks about that task; else null. A reply to what the assistant just said (agreeing, disagreeing, "
             "correcting it, pushing back, answering its question: \"no, Hermes can\", \"you're missing a couple\", "
-            "\"that's wrong\") is a follow-up to the task that answer came from, never a new task or conversation. People pause mid-thought: a short fragment said seconds after "
+            "\"that's wrong\") is a follow-up to the task that answer came from, never a new task or conversation. "
+            "A request that points back at something a task told the user (\"fix that script you found\", \"do the "
+            "thing it suggested\", \"send the one you mentioned\") is a follow-up to that task, even when the task "
+            "has finished: it continues in that task's thread. People pause mid-thought: a short fragment said seconds after "
             "a task started that only makes sense as the end of that request (\"...and am I gonna win?\") is a "
             "follow-up to it, never a new task. Decide by topic, never by timing: a request that starts with "
             "\"and\", \"also\" or \"oh\" but brings a different subject (\"and also, are we pulling the new model?\" "
@@ -647,6 +678,9 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
     tail = continues_newest(request, open_tasks)
     if tail is not None and marked_task_id in (None, "", tail.task_id):
         return Decision([Part("follow_up", request, tail.task_id)], None, "fragment")
+    back = refers_back(request, open_tasks)
+    if back is not None:
+        return Decision([Part("follow_up", request, back.task_id)], None, "refers_back")
     started = time.monotonic()
     decision = None
     if jev_place is not None and not open_tasks:
