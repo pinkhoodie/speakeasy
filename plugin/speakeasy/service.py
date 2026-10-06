@@ -529,6 +529,22 @@ class VoiceService:
         task_id = future.result(10)
         return {"interaction_id": interaction_id, "task_id": task_id}
 
+    def answer(self, interaction_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """A tap on a question card's option (or a typed answer): back to that task as a follow-up."""
+        if not isinstance(body, dict) or set(body) != {"task_id", "text"}:
+            raise ServiceError(400, "body must contain only task_id and text")
+        task_id, text = body["task_id"], body["text"]
+        if not isinstance(task_id, str) or not isinstance(text, str) or not text.strip() or len(text) > 400:
+            raise ServiceError(400, "task_id and text must be short strings")
+        worker = self.interaction(interaction_id).worker
+        if worker is None or worker.loop is None or worker.loop.is_closed():
+            raise ServiceError(409, "this call has ended; answer in the task's chat thread")
+        future = asyncio.run_coroutine_threadsafe(worker.answer(task_id, text), worker.loop)
+        sent = future.result(15)
+        if not sent:
+            raise ServiceError(404, "that task isn't in this call")
+        return {"interaction_id": interaction_id, "task_id": task_id, "sent": True}
+
     def mic_check(self, interaction_id: str, body: dict[str, Any]) -> dict[str, Any]:
         """The app found the call's mic wasn't getting through and reopened the connection.
         Logged (no audio, no words) so dead-mic calls show up in the logs with a reason."""

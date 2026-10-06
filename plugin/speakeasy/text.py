@@ -511,6 +511,8 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
     output, cards = product_cards(output)
     from .views import extract as extract_views
     output, views = extract_views(output)
+    from .views import extract_question, spoken_question
+    output, question = extract_question(output)
     output, images, media_tags = media_images(output, image_roots)
     cards = (cards + images)[:MAX_CARDS]
     full = safe_full_text(output)
@@ -523,7 +525,21 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
         spoken = "There's a command for you to run. It's in the app and in chat, ready to copy."
     if not spoken:
         spoken = fallback_spoken
+    if question:
+        # The decision is the point: a one-line status, then the question, so the user answers it.
+        lead = re.split(r"(?<=[.!?])\s+", spoken.strip())[0] if spoken != fallback_spoken else ""
+        if lead.endswith("?"):
+            lead = ""
+        spoken = safe_user_text((lead + " " + spoken_question(question)).strip(), 500) or spoken_question(question)
+        views = [question] + [v for v in views if v.get("kind") != "question"]
+    if question:
+        # The written answer (chat, task details) keeps the question so it can be answered there too.
+        listed = "\n".join(f"{i + 1}. {o}" + (" (recommended)" if question.get("recommended") == i else "")
+                           for i, o in enumerate(question["options"]))
+        full = ((full or "") + f"\n\n**{question['question']}**\n{listed}").strip()
     result: dict[str, Any] = {"spoken": spoken, "full": full or spoken}
+    if question:
+        result["question"] = question
     if cards:
         result["cards"] = cards
     if views:

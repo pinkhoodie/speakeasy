@@ -92,6 +92,8 @@ CATALOG: dict[str, dict[str, Any]] = {
                                        "entity_id": S}, 16)},
     "thermostat": {"name": S, "current": N, "target": N, "mode": S, "unit": S, "humidity": N},
     "camera": {"name": S, "image_url": URL, "when": S},
+    # A decision the task needs from the user; the app shows numbered answers (tap, 1-4, or say it).
+    "question": {"question": S, "options": (S, 4), "recommended": N, "task_id": S},
 }
 
 
@@ -178,3 +180,39 @@ def extract(output: str) -> tuple[str, list[dict[str, Any]]]:
     except ValueError:
         views = []
     return (output[:match.start()] + output[match.end():]).strip(), views
+
+
+def extract_question(output: str) -> tuple[str, dict[str, Any] | None]:
+    """Strip an optional ```speakeasy-question block: {"question", "options": [2-4], "recommended": i}."""
+    match = re.search(r"(?s)\n?```speakeasy-question\s*\n(.*?)\n```", output or "")
+    if not match:
+        return output, None
+    rest = (output[:match.start()] + output[match.end():]).strip()
+    try:
+        raw = json.loads(match.group(1))
+    except ValueError:
+        return rest, None
+    if not isinstance(raw, dict):
+        return rest, None
+    view = clean({**raw, "kind": "question"})
+    if not view or not view.get("question") or len(view.get("options") or []) < 2:
+        return rest, None
+    rec = view.get("recommended")
+    if isinstance(rec, (int, float)) and 0 <= int(rec) < len(view["options"]):
+        view["recommended"] = int(rec)
+    else:
+        view.pop("recommended", None)
+    return rest, view
+
+
+def spoken_question(view: dict[str, Any]) -> str:
+    """How the voice reads a question card: the question, the options, and the suggestion."""
+    opts = [o.rstrip(".") for o in view["options"]]
+    said = view["question"].rstrip()
+    if not said.endswith("?"):
+        said = said.rstrip(".") + "?"
+    listed = ", ".join(opts[:-1]) + f", or {opts[-1]}" if len(opts) > 2 else f"{opts[0]} or {opts[1]}"
+    out = f"Quick question: {said[0].lower() + said[1:]} {listed}."
+    if "recommended" in view:
+        out += f" I'd go with {opts[view['recommended']].lower()}."
+    return out

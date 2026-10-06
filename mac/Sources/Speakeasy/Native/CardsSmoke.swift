@@ -36,6 +36,8 @@ enum CardsSmoke {
                 // A real window (not ImageRenderer): maps, links, buttons and remote logos only draw there.
                 let view = ViewCardView(card)
                     .environment(\.draftActions, DraftActions(onSend: { _ in }, onEdit: { _ in }))
+                    .environment(\.questionActions, QuestionActions(onAnswer: { _ in },
+                                                                    answered: card["answered"].string))
                     .padding(12)
                     .frame(width: 380)
                     .background(scheme == .dark ? Color(white: 0.13) : Color(white: 0.97))

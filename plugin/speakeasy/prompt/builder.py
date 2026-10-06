@@ -300,6 +300,15 @@ VIEWS_RULE = (
     "Use https URLs only, never invent images or numbers, and skip the block when nothing is worth showing. "
 )
 
+QUESTION_RULE = (
+    "When you can't go on without a decision from {user_name} (which option, which file, go ahead or not), "
+    "don't guess on anything that matters: do everything you can first, then end your answer with a fenced block "
+    "labeled `speakeasy-question` holding one JSON object: {\"question\": \"<one short question>\", \"options\": "
+    "[\"<2 to 4 short answers, a few words each>\"], \"recommended\": <index of the one you'd pick, or omit>}, "
+    "then stop. {user_name} answers with one tap or by voice, and the answer comes back to you here. Ask at most "
+    "one question, only for a real decision, never to confirm something you were already asked to do. "
+)
+
 VISUAL_RESULTS_RULE = (
     "When the task creates or edits anything visual (a design, UI, chart, page, image or diagram), render or screenshot "
     "the finished result and include it as MEDIA:<absolute path> in your answer so {user_name} can review it in the app; "
@@ -369,7 +378,8 @@ def build_task_prompt(names: Names, revision: int, context: str, focus: str | No
         "another board or session. "
         + truthfulness(names) + " "
         "Do not auto-approve consequential actions. Return concise verified facts and status suitable for speech. "
-        + PRODUCT_CARDS_RULE + VIEWS_RULE + render(VISUAL_RESULTS_RULE, names) + render(EMAIL_DRAFT_RULE, names)
+        + PRODUCT_CARDS_RULE + VIEWS_RULE + render(VISUAL_RESULTS_RULE, names) + render(QUESTION_RULE, names)
+        + render(EMAIL_DRAFT_RULE, names)
         + (render("Your task: ", names) + f"{focus} " + render(
             "Other parts of what {user_name} said run as separate tasks; do not do them, and do not "
             "redo or cancel another task's work. ", names) if focus else
@@ -397,7 +407,8 @@ def continuation_message(names: Names, request: str, summary: str) -> str:
         "\" so this conversation shows what was asked, then do the work as you normally would here. "
         "Approval prompts cannot be answered from voice on this path: if a step needs {possessive_approval}, stop before "
         "it and ask {user_name} to confirm here. Lead with the outcome in one or two plain sentences.", names,
-        possessive_approval=f"{names.possessive} explicit approval") + " " + render(COPYABLE_RULE, names)
+        possessive_approval=f"{names.possessive} explicit approval") + " " + render(COPYABLE_RULE, names) \
+        + " " + render(QUESTION_RULE, names)
 
 
 def thread_task_message(names: Names, request: str, summary: str, context: str) -> str:
@@ -413,6 +424,7 @@ def thread_task_message(names: Names, request: str, summary: str, context: str) 
                 possessive_approval=f"{names.possessive} explicit approval")
             + "\n\n" + render(COPYABLE_RULE, names)
             + "\n\n" + render(VISUAL_RESULTS_RULE, names)
+            + "\n\n" + render(QUESTION_RULE, names)
             + "\n\n" + render(THREAD_EMAIL_DRAFT_RULE, names))
 
 
@@ -747,3 +759,9 @@ def quick_note(spoken: str) -> str:
 def quick_log(request: str, spoken: str) -> str:
     """The voice channel's line for a quick answer (no thread)."""
     return f"Quick answer: {request.strip()[:200]} → {spoken.strip()[:400]}"
+
+
+def answered_note(text: str) -> str:
+    """Told to the voice (not spoken) when the user answered a task's question by tapping."""
+    return (f"The user tapped an answer on a task's question card: \"{text}\". It is already on its way to "
+            "that task; don't ask the question again. A short \"Got it\" is enough if anything.")

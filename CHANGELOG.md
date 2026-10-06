@@ -2,6 +2,12 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.2.46 — Questions you answer in one tap
+
+- **When a task needs a decision, it asks you.** Instead of guessing or burying the question in its answer, Hermes ends with one short question and 2–4 options, marking the one it would pick. The voice reads it out ("Quick question: which layout should I build? Three tiers, one plan, or a comparison table. I'd go with three tiers.").
+- **Answer however's easiest:** say it, tap an option on the card, or press its number (Mac app, next release). The answer goes back to the same task, which carries on from there.
+- In chat threads, the question appears as a numbered list, so you can reply there too.
+
 ## Plugin 0.2.45 — Choose where voice work goes
 
 - **New setting: where voice work goes.** Three choices:
@@ -40,6 +46,7 @@ Speakeasy has two parts that update separately: the **Mac app** (updates through
 ## Mac (next)
 
 - Settings › Where work goes: pick one place, default plus approved threads, or sorted by topic.
+- Question cards: a task's question shows with numbered answers and a Recommended pick; tap one or press 1–4. Unanswered questions stay on screen until you answer.
 
 ## Mac 0.2.16 + Plugin 0.2.39 — Says why a task failed
 

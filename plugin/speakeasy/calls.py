@@ -691,6 +691,23 @@ class SidebandWorker:
             return
         await self._send(kind, delegation_id, content[:2000])
 
+    async def answer(self, task_id: str, text: str) -> str | None:
+        """An answer tapped on a task's question card: it goes back to that task as a follow-up, the
+        same as saying it, and the voice hears what was picked so it doesn't ask again."""
+        text = clean_transcript(text or "").strip()[:400]
+        with self.interaction.lock:
+            known = task_id in self.interaction.runs
+        if not text or not known:
+            return None
+        delegation_id = "answer_" + secrets.token_hex(8)
+        self.delegations.add(delegation_id)
+        self.touch()
+        self.fragments.append({"speaker": "user", "text": text, "at": time.monotonic(), "start_ms": 0, "end_ms": 0})
+        if self.call_connected():
+            await self.append("session.thinking.append", None, P.answered_note(text))
+        await self.follow_up(delegation_id, 0, f"User: {text}", router.Part("follow_up", text, task_id))
+        return delegation_id
+
     async def early_request(self, text: str) -> str | None:
         """Words the app heard while the call was still connecting (transcribed on the device).
         They become the call's first request, handled like any handoff, and the voice is told so it

@@ -50,6 +50,16 @@ public final class VoicePanelModel: ObservableObject {
     public var onToggleWork: () -> Void = {}
     public var onTogglePause: () -> Void = {}
     public var onStopTask: (String) -> Void = { _ in }
+    /// Answer a task's question card (task id, picked option).
+    public var onAnswer: (String, String) -> Void = { _, _ in }
+    /// Answers already given, by task id, so a card stays settled after the tap.
+    @Published public var answers: [String: String] = [:]
+    public func questionActions(for taskID: String) -> QuestionActions {
+        QuestionActions(onAnswer: { [weak self] text in
+            self?.answers[taskID] = text
+            self?.onAnswer(taskID, text)
+        }, answered: answers[taskID])
+    }
     /// nil shows the task list; an id opens that task.
     public var onSelectTask: (String?) -> Void = { _ in }
     /// Clear finished tasks (run ids) from the list.
@@ -90,6 +100,11 @@ public final class VoicePanelModel: ObservableObject {
     /// The newest task with cards, shown in the call panel while it's fresh: a quick answer's card
     /// appears as it is spoken and stays until closed or until it's three minutes old.
     public var pinnedViews: (taskID: String, views: [ViewCard])? {
+        // An unanswered question stays up (it's waiting on you); other cards fade after three minutes.
+        if let asking = state.tasks.last(where: { t in t.info.views.contains { $0.kind == "question" }
+                && answers[t.id] == nil && !dismissedViewTasks.contains(t.id) && t.info.isTerminal }) {
+            return (asking.id, asking.info.views)
+        }
         guard let task = state.tasks.last(where: { !$0.info.views.isEmpty && !dismissedViewTasks.contains($0.id) }) else { return nil }
         if let at = task.info.updatedAt, Date().timeIntervalSince(at) > 180 { return nil }
         return (task.id, task.info.views)

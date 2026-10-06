@@ -131,6 +131,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         model.onCloseWork = { [weak self] in self?.closeWorkView() }
         model.onTogglePause = { [weak self] in self?.togglePause() }
         model.onStopTask = { [weak self] runID in self?.stopWork(runID: runID) }
+        model.onAnswer = { [weak self] taskID, text in self?.answerQuestion(taskID: taskID, text: text) }
         model.onSelectTask = { [weak self] id in self?.selectTask(id) }
         model.onDismissTasks = { [weak self] runIDs in self?.dismissTasks(runIDs) }
         model.onDismissReview = { [weak self] runID in self?.dismissReview(runID) }
@@ -967,6 +968,17 @@ public final class NativeVoiceClient: VoiceCallClient {
         Task { [weak self] in
             do { try await api.dismissReview(runID: runID, cards: cards) }
             catch { self?.dispatch(.error("Couldn't dismiss: \(error.localizedDescription)")) }
+        }
+    }
+
+    private func answerQuestion(taskID: String, text: String) {
+        guard let api, !previewMode, let id = model.state.interactionID ?? model.state.resumeFrom else { return }
+        Task { [weak self] in
+            do { try await api.answer(interactionID: id, taskID: taskID, text: text) }
+            catch {
+                self?.model.answers[taskID] = nil
+                self?.dispatch(.error("Couldn't send that answer. Say it instead."))
+            }
         }
     }
 

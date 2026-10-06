@@ -45,6 +45,7 @@ public struct ViewCardView: View {
             case "news": NewsCard(card: card)
             case "home", "thermostat": HomeCard(card: card)
             case "camera": CameraCard(card: card)
+            case "question": QuestionCard(card: card)
             default: EmptyView()
             }
         }

@@ -242,6 +242,11 @@ public final class ServerClient: @unchecked Sendable {
         _ = try await json("/voice/interactions/\(escape(interactionID))/skip-tour", method: "POST", body: Data("{}".utf8))
     }
 
+    /// A tapped answer on a task's question card; it reaches the task as a follow-up.
+    public func answer(interactionID: String, taskID: String, text: String) async throws {
+        _ = try await post("/voice/interactions/\(escape(interactionID))/answer", ["task_id": taskID, "text": text])
+    }
+
     public func cancelBackend(interactionID: String, runID: String) async throws {
         _ = try await post("/voice/interactions/\(escape(interactionID))/cancel-backend", ["run_id": runID])
     }

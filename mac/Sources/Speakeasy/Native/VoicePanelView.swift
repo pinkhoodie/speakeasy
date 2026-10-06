@@ -392,6 +392,7 @@ struct VoicePanelView: View {
             if !(model.workExpanded || model.state.workOnly), let pinned = model.pinnedViews {
                 VStack(spacing: 8) {
                     ForEach(pinned.views.prefix(2)) { card in ViewCardView(card) }
+                        .environment(\.questionActions, model.questionActions(for: pinned.taskID))
                 }
                 .overlay(alignment: .topTrailing) {
                     Button { model.dismissPinnedViews(pinned.taskID) } label: {
@@ -996,6 +997,7 @@ struct WorkDetailView: View {
                     if let views = info?.views, !views.isEmpty {
                         VStack(spacing: 8) {
                             ForEach(views) { card in ViewCardView(card) }
+                                .environment(\.questionActions, model.questionActions(for: model.selectedTask?.id ?? ""))
                         }
                     }
                     if let full = info?.result?.full ?? info?.result?.spoken {
