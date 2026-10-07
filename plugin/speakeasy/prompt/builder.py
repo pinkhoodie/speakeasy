@@ -778,6 +778,47 @@ def capture_missing_line(reason: str | None) -> str | None:
     return f"I couldn't get your screen — {why} — so I sent your request without it." if why else None
 
 
+def sharing_note(kind: str, value: Any) -> str:
+    """The silent note for one change ``CallAttachments.take_notes`` reports: sharing turned on or
+    off, or what waits on the panel (counts)."""
+    if kind == "screen":
+        return SCREEN_ON_NOTE if value else SCREEN_OFF_NOTE
+    return attachment_note(*value)
+
+
+# -- look at this: requests that wait for the screen, and spoken screen intents ---------------------
+
+# The Mac's default screen shortcut (⌃⌥S, re-recordable in its Settings); the plugin isn't told a custom one.
+SCREEN_SHORTCUT = "Control-Option-S"
+# The panel's hold line (the snapshot's ``hold.text``), while a request waits and once it ended unsent.
+HOLD_WAITING = "Waiting for your screen"
+HOLD_NOT_SENT = "Not sent: screen sharing was off"
+
+
+def screen_off_hint() -> str:
+    """Spoken when a request needs the screen and sharing is off: it waits for the button."""
+    return f"Turn on the eye in my panel — or press {SCREEN_SHORTCUT} — and I'll take a look."
+
+
+def share_hint() -> str:
+    """Spoken for "share my screen" while sharing is off: only the button turns it on."""
+    return (f"The eye in my panel shares your screen — or press {SCREEN_SHORTCUT}. "
+            "I can't turn it on myself.")
+
+
+SCREEN_PERMISSION_HINT = "Screen Recording is off for me — turn it on in Speakeasy's Settings, then relaunch."
+SCREEN_ALREADY_SHARED = "Your screen's already shared — I'll take it along with each request."
+SCREEN_STOPPED = "Okay, I've stopped looking at your screen."
+SCREEN_HOLD_CANCELLED = "Okay, I won't look at your screen."
+SCREEN_ALREADY_OFF = "I'm not looking at your screen — sharing is off."
+HOLD_RELEASED_NOTE = ("Fact, not to read aloud: they turned screen sharing on, so their request that was waiting for "
+                      "the screen has gone ahead with it. If you say anything, keep it to a few words (\"Taking a look "
+                      "now\"); you haven't seen the screen: never describe it before a result arrives.")
+HOLD_DROPPED_NOTE = ("Fact, not to read aloud: their earlier request that was waiting for the screen won't run, "
+                     "because screen sharing stayed off. If they ask about it, say it wasn't sent: they can turn on "
+                     "the eye and ask again.")
+
+
 STOPPED_SPOKEN = "I stopped that task. I'm still here."
 FAILED_SPOKEN = "I couldn't finish that one; the app shows what went wrong."
 NO_TRANSCRIPT_SPOKEN = "I did not receive enough transcript to act. Please repeat the request."

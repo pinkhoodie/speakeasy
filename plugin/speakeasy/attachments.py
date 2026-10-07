@@ -129,7 +129,8 @@ class CallAttachments:
 
     **Sharing.** ``set_screen(on, seq)`` mirrors the panel's button. Older sequence numbers are
     ignored, so a late request can't undo a newer one. Turning sharing off closes every capture
-    request (reason ``sharing_off``) and drops any capture not yet taken.
+    request (reason ``sharing_off``) and drops any capture not yet taken. ``stop_sharing`` turns it
+    off from the plugin's side (a spoken "stop looking"), taking the next sequence number.
 
     **Pictures and files** wait as *pending* until a handoff claims them: ``bind_pending`` moves them
     to that handoff, ``release`` puts them back (the request ended up needing no attachments),
@@ -222,6 +223,21 @@ class CallAttachments:
                         self._close(capture, "sharing_off")
             self._cond.notify_all()
             return changed
+
+    def stop_sharing(self) -> dict[str, object] | None:
+        """Turn sharing off from the plugin's side ("stop looking at my screen"), the same as the button
+        would: capture requests close (reason ``sharing_off``). It takes the next sequence number, so the
+        app adopts the change (``screen.state``) and its next toggle comes after it. Returns the new
+        ``{on, seq}``, or None when sharing wasn't on."""
+        with self._cond:
+            if not self._on or self._ended is not None:
+                return None
+            self._seq, self._on = max(self._seq, 0) + 1, False
+            for capture in self._captures.values():
+                if capture.state in _HELD:
+                    self._close(capture, "sharing_off")
+            self._cond.notify_all()
+            return {"on": False, "seq": self._seq}
 
     # -- pictures and files ----------------------------------------------------------------
     def check_room(self, kind: str, size: int) -> None:

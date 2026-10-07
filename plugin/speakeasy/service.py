@@ -825,6 +825,8 @@ class VoiceService:
             logger.info("speakeasy: screen sharing %s on %s", "on" if on else "off", interaction_id[:10])
             publish_state(self.store, interaction, self.settings.get()["assistant_name"])
             self._sync_notes(interaction)
+            if on and interaction.worker is not None:
+                interaction.worker.sharing_turned_on()  # a request waiting for the screen goes now
         return interaction.attachments.screen_state()
 
     def capture_status(self, interaction_id: str, capture_id: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -873,11 +875,7 @@ class VoiceService:
     @staticmethod
     def _speak_notes(interaction: Interaction, worker: Any) -> None:
         for kind, value in interaction.attachments.take_notes():
-            if kind == "screen":
-                note = P.SCREEN_ON_NOTE if value else P.SCREEN_OFF_NOTE
-            else:
-                note = P.attachment_note(*value)  # type: ignore[misc]
-            worker.speak_from_thread("session.thinking.append", note)
+            worker.speak_from_thread("session.thinking.append", P.sharing_note(kind, value))
 
     def _live_shared_paths(self) -> set[str]:
         with self.lock:

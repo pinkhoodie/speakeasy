@@ -288,7 +288,10 @@ class Interaction:
     # What the client can share, the screen toggle, pending pictures and files, capture requests.
     # A resumed call starts with a fresh one (sharing off, nothing pending); the app re-sends.
     attachments: CallAttachments = dataclasses.field(default_factory=CallAttachments, repr=False)
-    hold: dict[str, Any] | None = None  # a request waiting for screen sharing to come on (one at a time)
+    # A request waiting for screen sharing to come on (one at a time), as the app shows it:
+    # {"state": "waiting" | "not_sent", "text": its line, "since": epoch seconds}; "not_sent" clears
+    # after HOLD_OUTCOME_S. Set by the worker (hold_request, end_hold), never mutated in place.
+    hold: dict[str, Any] | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -383,6 +386,11 @@ def publish_state(store: Any, interaction: Interaction, assistant_name: str = "H
 # -- look at this: what a handoff carries besides its words ----------------------------------------
 
 KEEP_CAPTURE_S = 60.0  # a request that asked a question first: its capture waits this long for the answer
+HOLD_S = 30.0          # a request that needs the screen waits this long for sharing to come on
+HOLD_OUTCOME_S = 8.0   # ... and its "Not sent" line stays this long once it ended unsent
+STOP_HEARD_SETTLE_S = 0.6  # "stop looking at my screen" heard in the transcript: act once the words settle
+STOP_WINDOW_S = 8.0    # the transcript words a stop phrase is looked for in
+STOP_DEBOUNCE_S = 15.0 # heard and handed off for the same words: one confirmation
 
 
 def _base(task_id: str) -> str:
@@ -420,6 +428,20 @@ class Shared:
             image.data = None
 
 
+@dataclasses.dataclass
+class Held:
+    """A request that needs the user's screen, waiting (HOLD_S) for sharing to come on; one per call.
+    It holds nothing the user shared: the handoff gave everything back when it was held, and binds
+    again (with a fresh capture) once it goes."""
+    delegation_id: str
+    revision: int
+    context: str
+    marked: Any
+    request: str               # the whole request, settled
+    since: float = dataclasses.field(default_factory=time.time)  # epoch seconds, as the snapshot shows it
+    token: int = 0
+
+
 def _fits(images: list[Attachment]) -> bool:
     """Inside one request's image budget (read at call time from attachments.py)."""
     sizes = [len(a.data or b"") for a in images]
@@ -442,8 +464,11 @@ def _data_url(image: Attachment) -> str:
 def end_shared(rt: Runtime, interaction: Interaction, reason: str) -> None:
     """The call ended or paused: no more capture requests or uploads. Pictures and files that were
     only waiting on the panel are dropped (the app re-sends them to a resumed call), and so are
-    Speakeasy's copies of those files unless a task or another call still uses them."""
+    Speakeasy's copies of those files unless a task or another call still uses them. A request
+    waiting for the screen ends unsent."""
     dropped = interaction.attachments.end(reason)
+    if interaction.worker is not None:
+        interaction.worker.end_hold(reason)
     paths = [a.path for a in dropped if a.path]
     if paths and rt.discard_files is not None:
         try:
@@ -567,6 +592,14 @@ class SidebandWorker:
         self.no_capture: set[str] = set()        # handoffs whose capture was given up (routed to a group)
         self.kept_capture: tuple[str, float] | None = None  # a question's capture, waiting for the answer
         self.capture_announced = False           # the call's first unasked-for capture was said aloud
+        # A request waiting for the screen (interaction.hold is what the app sees), and "stop looking at
+        # my screen" heard in the transcript: words up to stop_words_after are spent; stopped_at is when
+        # sharing last went off (or a hold ended) by voice, so the same words act once.
+        self.held: Held | None = None
+        self.hold_token = 0
+        self.stop_words_after = 0.0
+        self.stopped_at = float("-inf")
+        self.stop_check: asyncio.Task[Any] | None = None
         self.delegations: set[str] = set()
         self.dispatch_tasks: set[asyncio.Task[Any]] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -719,6 +752,8 @@ class SidebandWorker:
             speaker = "user" if kind.startswith("session.input") else "assistant"
             self.fragments.append({"speaker": speaker, "text": delta, "at": time.monotonic(),
                                    "start_ms": int(event.get("start_ms", 0)), "end_ms": int(event.get("end_ms", 0))})
+            if speaker == "user":
+                self.listen_for_stop()
             return
         if kind == "session.delegation.created":
             delegation = event.get("delegation") or {}
@@ -1040,6 +1075,23 @@ class SidebandWorker:
             logger.info("speakeasy: handoff already folded into the task before it; not started twice")
             await self._drop(delegation_id, revision, "Added to the previous request", None)
             return
+        # "Stop looking at my screen" and "share my screen" are about sharing itself, never work: answered
+        # here, in calls whose app said it can share (others go on as words, as before).
+        intent = router.screen_intent(last_request) if self.interaction.attachments.declared else None
+        if intent is not None:
+            rest = router.after_stop(last_request) if intent == "stop" else ""
+            await self.screen_words(delegation_id, intent, more=bool(rest))
+            if not rest:
+                return
+            last_request = rest  # sharing is off now; the rest of what they asked still goes ahead
+        held = self.held
+        if held is not None and (router.acknowledges(last_request) or _same_words(last_request, held.request)):
+            # "Ok, one sec" while they turn sharing on, or the same words handed off again: the request
+            # waiting for the screen keeps waiting, and this one never becomes a task.
+            self.handoff_at.pop(delegation_id, None)
+            await self._drop(delegation_id, revision, "Waiting for the screen", None)
+            return
+        self.end_hold("superseded")  # a newer request ends one waiting for the screen
         # Pointing at their own screen, or with pictures waiting on the panel, "show me this" is about
         # what they're showing; only "show me what you're looking at" still means a task's own view.
         showing = router.refers_to_screen(last_request) or bool(self.interaction.attachments.pending())
@@ -1053,25 +1105,28 @@ class SidebandWorker:
         if (not marked or home_follow) and await self.home_control(delegation_id, revision, last_request):
             return
         showing = self.bind_shared(delegation_id, last_request)
-        # U4 seam: in a call that declared ``ready`` but isn't sharing, a request that refers to the
-        # screen (share_refs) is held here until sharing comes on, instead of going on without it.
+        # In a call that declared ``ready`` but isn't sharing, a request that needs the screen waits for
+        # it once settled (``wait_for_screen``, in _dispatch_bound), instead of going on without it.
         try:
             await self._dispatch_bound(delegation_id, revision, context, marked, last_request, showing)
         finally:
             self.finish_shared(delegation_id)
 
     async def _dispatch_bound(self, delegation_id: str, revision: int, context: str, marked: Any,
-                              last_request: str, showing: bool) -> None:
+                              last_request: str, showing: bool, released: bool = False) -> None:
         """The rest of a handoff, once it holds what the user shared with it (``bind_shared``).
         ``showing``: it carries pictures or files or points at the screen, so the quick lanes and a
-        task's own picture are never what it means."""
+        task's own picture are never what it means. ``released``: a held request going now that
+        sharing is on (already settled, never held again)."""
         # Home commands stay instant. Anything else waits a beat in case the user is still talking,
         # so a breath mid-thought doesn't send half a request.
-        if not marked and router.continues_newest(last_request, self.open_tasks()) is None:
+        if not released and not marked and router.continues_newest(last_request, self.open_tasks()) is None:
             settled = await self.settle(last_request)
             if settled != last_request and router.refers_to_screen(settled):
                 self.share_refs[delegation_id] = showing = True  # "what's" ... "this error?"
             last_request = settled
+        if not released and await self.wait_for_screen(delegation_id, revision, context, marked, last_request):
+            return
         if not marked and not showing and await self.quick_answer(delegation_id, revision, last_request):
             return
         candidates = await self.conversation_candidates(last_request)
@@ -1564,6 +1619,209 @@ class SidebandWorker:
         last = None if screen else self.store.last_screen_at(session_id)
         return " ".join(p for p in (P.shared_block(self.names, items, attached),
                                     P.stale_screen_line(last) if last else "") if p)
+
+    # -- look at this: requests that wait for the screen, and spoken screen intents ---------------
+    async def wait_for_screen(self, delegation_id: str, revision: int, context: str, marked: Any,
+                              request: str) -> bool:
+        """A settled request that needs the user's screen (``router.needs_screen``) in a call that can
+        share but isn't sharing, carrying nothing else (no pictures or files, no capture): in a
+        ``ready`` call it waits for the button (``hold_request``); in a ``no_permission`` call the
+        voice says where to allow Screen Recording and nothing runs. True when it went no further.
+        Calls that never said they can share (an iPhone, an older Mac) go on as words."""
+        attachments = self.interaction.attachments
+        if (attachments.declared not in A.DECLARATIONS or attachments.screen_on
+                or delegation_id in self.capture_ids or attachments.bound(delegation_id)
+                or not router.needs_screen(request)):
+            return False
+        self.handoff_at.pop(delegation_id, None)
+        if attachments.declared == "no_permission":
+            logger.info("speakeasy: a request needs the screen but Screen Recording is off; nothing started")
+            self.interaction.feed.publish("screen.hint", {"reason": "no_permission"})
+            await self.append("session.commentary.append", delegation_id, P.SCREEN_PERMISSION_HINT)
+            return True
+        await self.hold_request(Held(delegation_id, revision, context, marked, request))
+        return True
+
+    async def hold_request(self, held: Held) -> None:
+        """Hold a request until sharing comes on: the panel shows "Waiting for your screen" (the
+        snapshot's ``hold``), the button pulses (``screen.hint``) and the voice says how to turn it on.
+        Sharing on within HOLD_S sends it through the usual path with a capture (``sharing_turned_on``);
+        otherwise it ends unsent (``end_hold``). One at a time: a newer hold ends the older one."""
+        self.end_hold("superseded")
+        with self.interaction.lock:
+            self.hold_token += 1
+            held.token = self.hold_token
+            self.held = held
+            self.interaction.hold = {"state": "waiting", "text": P.HOLD_WAITING, "since": held.since}
+            self.stop_words_after = time.monotonic()  # words said before it can't call it off
+        attachments = self.interaction.attachments
+        if attachments.screen_on:
+            self.sharing_turned_on()  # it came on while this request was settling
+            return
+        timer = threading.Timer(HOLD_S, self.end_hold, args=("expired", held.token))
+        timer.daemon = True
+        timer.start()
+        logger.info("speakeasy: request held until screen sharing comes on (up to %d s)", int(HOLD_S))
+        self.publish()
+        self.interaction.feed.publish("screen.hint", {"reason": "screen_off"})
+        await self.append("session.commentary.append", held.delegation_id, P.screen_off_hint())
+        if attachments.ended:
+            self.end_hold("ended", held.token)  # the call paused or ended meanwhile
+
+    def end_hold(self, reason: str, token: int | None = None) -> bool:
+        """The request waiting for the screen won't run: HOLD_S passed (``expired``), a newer request
+        came (``superseded``), "stop looking" (``stopped``), or the call paused or ended. Its line
+        reads "Not sent: screen sharing was off" for HOLD_OUTCOME_S, then clears. ``token``: only that
+        hold. Thread-safe (the expiry timer, HTTP threads, the call's loop). True when one ended."""
+        with self.interaction.lock:
+            held = self.held
+            if held is None or token is not None and held.token != token:
+                return False
+            self.held = None
+            outcome = {"state": "not_sent", "text": P.HOLD_NOT_SENT, "since": time.time()}
+            self.interaction.hold = outcome
+        logger.info("speakeasy: held request not sent (%s)", reason)
+        clear = threading.Timer(HOLD_OUTCOME_S, self._clear_hold_outcome, args=(outcome,))
+        clear.daemon = True
+        clear.start()
+        self.publish()
+        if reason in {"expired", "superseded"}:
+            self.speak_from_thread("session.thinking.append", P.HOLD_DROPPED_NOTE)
+        return True
+
+    def _clear_hold_outcome(self, outcome: dict[str, Any]) -> None:
+        with self.interaction.lock:
+            if self.interaction.hold is not outcome:
+                return  # a newer hold, or already cleared
+            self.interaction.hold = None
+        self.publish()
+
+    def sharing_turned_on(self) -> None:
+        """Sharing just came on (the panel's button, on an HTTP thread): a request waiting for the
+        screen goes now, through the usual path, so it gets a capture of its own. Words said before
+        now can't turn sharing off. Thread-safe."""
+        loop = self.loop
+        with self.interaction.lock:
+            self.stop_words_after = time.monotonic()
+            held = self.held
+            if held is None or loop is None or loop.is_closed():
+                return  # nothing waiting (a call whose loop is gone ends its hold with end_shared)
+            self.held, self.interaction.hold = None, None
+        logger.info("speakeasy: screen sharing came on; the held request goes now")
+        self.publish()
+        try:
+            loop.call_soon_threadsafe(self._start_release, held)
+        except RuntimeError:  # the call's loop closed just now
+            with self.interaction.lock:
+                self.held = held
+            self.end_hold("ended", held.token)
+
+    def _start_release(self, held: Held) -> None:
+        task = asyncio.get_running_loop().create_task(self.dispatch_held(held))
+        self.dispatch_tasks.add(task)
+        task.add_done_callback(self.dispatch_tasks.discard)
+
+    async def dispatch_held(self, held: Held) -> None:
+        """The held request, now that sharing is on: it claims what's waiting on the panel and asks for
+        a capture like any handoff (``bind_shared``), then goes on from where it was held. Ends visibly
+        like ``dispatch``."""
+        try:
+            await self.append("session.thinking.append", held.delegation_id, P.HOLD_RELEASED_NOTE)
+            showing = self.bind_shared(held.delegation_id, held.request)
+            try:
+                await self._dispatch_bound(held.delegation_id, held.revision, held.context, held.marked,
+                                           held.request, showing, released=True)
+            finally:
+                self.finish_shared(held.delegation_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("speakeasy: held request failed before its task started (%s: %s)",
+                           type(exc).__name__, str(exc)[:200])
+            await self._handoff_failed(held.delegation_id, held.revision, exc)
+
+    async def screen_words(self, delegation_id: str, intent: str, more: bool = False) -> None:
+        """A handoff about screen sharing itself (``router.screen_intent``), answered here: ``stop``
+        turns it off (``stop_looking``); ``share`` explains the button, since the voice can never turn
+        sharing on. A request waiting for the screen keeps waiting on ``share``. No task starts for
+        these words; ``more``: the handoff asked for something else too, which the caller dispatches."""
+        if not more:
+            self.handoff_at.pop(delegation_id, None)
+        attachments = self.interaction.attachments
+        logger.info("speakeasy: spoken screen intent (%s); no task started", intent)
+        if intent == "stop":
+            await self.stop_looking(delegation_id, handoff=True)
+        elif attachments.declared == "no_permission":
+            self.interaction.feed.publish("screen.hint", {"reason": "no_permission"})
+            await self.append("session.commentary.append", delegation_id, P.SCREEN_PERMISSION_HINT)
+        elif attachments.screen_on:
+            await self.append("session.commentary.append", delegation_id, P.SCREEN_ALREADY_SHARED)
+        else:
+            self.interaction.feed.publish("screen.hint", {"reason": "share_request"})
+            await self.append("session.commentary.append", delegation_id, P.share_hint())
+
+    async def stop_looking(self, delegation_id: str | None, handoff: bool) -> bool:
+        """"Stop looking at my screen": sharing goes off from the plugin's side (the app adopts it from
+        ``screen.state``; open capture requests close), a request waiting for the screen ends unsent,
+        and one short line confirms it. Heard in the transcript and handed off for the same words, it
+        acts once. A handoff while sharing was off anyway gets a brief answer. Never a Hermes task.
+        True when something changed."""
+        attachments = self.interaction.attachments
+        state = attachments.stop_sharing()
+        cancelled = self.end_hold("stopped")
+        now = time.monotonic()
+        if state is not None:
+            logger.info("speakeasy: screen sharing turned off by voice on %s", self.interaction.interaction_id[:10])
+            self.publish()  # the snapshot first, so a polling app sees it too
+            self.interaction.feed.publish("screen.state", state)
+            for kind, value in attachments.take_notes():
+                await self.append("session.thinking.append", None, P.sharing_note(kind, value))
+            line: str | None = P.SCREEN_STOPPED
+        elif cancelled:
+            line = P.SCREEN_HOLD_CANCELLED
+        elif handoff and now - self.stopped_at > STOP_DEBOUNCE_S:
+            line = P.SCREEN_ALREADY_OFF
+        else:
+            line = None  # heard in the transcript and handed off too: confirmed once already
+        if state is not None or cancelled:
+            self.stopped_at = now
+        if line:
+            await self.append("session.commentary.append", delegation_id, line)
+        return state is not None or cancelled
+
+    def _recent_user_words(self) -> tuple[list[str], float]:
+        """The user's words not spent yet from the last STOP_WINDOW_S, as two readings (pieces run
+        together, for word pieces; and spaced, for whole turns), and when the newest piece arrived."""
+        now = time.monotonic()
+        recent = [f for f in list(self.fragments) if f["speaker"] == "user" and f["at"] > self.stop_words_after
+                  and now - f["at"] <= STOP_WINDOW_S]
+        if not recent:
+            return [], 0.0
+        return ["".join(f["text"] for f in recent)[-600:], " ".join(f["text"] for f in recent)[-600:]], recent[-1]["at"]
+
+    def listen_for_stop(self) -> None:
+        """Each piece of the user's transcript as it arrives (both voice backends): "stop looking at my
+        screen" turns sharing off even when the voice answers without handing it off. Only while
+        sharing is on or a request waits for it, and acted on STOP_HEARD_SETTLE_S later, so words that
+        follow ("... in Zoom") can still rule it out."""
+        attachments = self.interaction.attachments
+        if attachments.declared != "ready" or not (attachments.screen_on or self.held is not None):
+            return
+        if self.stop_check is not None and not self.stop_check.done():
+            return
+        texts, _ = self._recent_user_words()
+        if any(router.stops_looking(text) for text in texts):
+            self.stop_check = asyncio.get_running_loop().create_task(self._stop_heard())
+
+    async def _stop_heard(self) -> None:
+        await asyncio.sleep(STOP_HEARD_SETTLE_S)
+        texts, newest = self._recent_user_words()
+        if not any(router.stops_looking(text) for text in texts):
+            return  # the words that followed made it something else
+        with self.interaction.lock:
+            self.stop_words_after = max(self.stop_words_after, newest)  # these words are spent
+        logger.info("speakeasy: heard a stop-looking phrase in the transcript")
+        await self.stop_looking(None, handoff=False)
 
     async def start_parts(self, delegation_id: str, revision: int, context: str, parts: list[str],
                           choice: channels.Choice) -> None:

@@ -329,6 +329,135 @@ def about_task_view(request: str) -> bool:
     return bool(_TASK_VIEW.search(request or ""))
 
 
+# -- spoken screen intents: "stop looking at my screen", "share my screen" ----------------------------
+
+_SCREEN_NOUN = r"(?:screen|display)s?"
+# Where else a screen gets shared: "stop sharing my screen in Zoom" is about that app, not Speakeasy.
+_ELSEWHERE = (r"(?:zoom|teams|microsoft teams|google meet|meet|webex|slack|discord|facetime|skype|whereby|tv|"
+              r"(?:the|a|my|this|our) (?:meeting|call|presentation|huddle|webinar|class|stream|tv|projector))")
+_STOP_LOOKING = re.compile(
+    rf"(?i)\b(?:stop|quit|cease) (?:looking at|watching|seeing|reading|sharing|capturing|recording|taking) "
+    rf"(?:my|the) {_SCREEN_NOUN}\b"
+    rf"|\b(?:don't|dont|do not|no more|never) (?:look(?:ing)? at|watch(?:ing)?|shar(?:e|ing)|captur(?:e|ing)|"
+    rf"tak(?:e|ing)) (?:my|the) {_SCREEN_NOUN}\b"
+    r"|\b(?:turn|switch|shut) off (?:the )?(?:screen ?shar(?:e|ing)|eye)\b"
+    r"|\b(?:turn|switch|shut) (?:the )?(?:screen ?shar(?:e|ing)|eye) off\b"
+    r"|\b(?:stop|end|disable|pause|quit|cancel|no more) (?:the )?screen ?shar(?:e|ing)\b"
+    rf"|\bunshare (?:my|the) {_SCREEN_NOUN}\b")
+# Earlier in the sentence: a question about how, or an errand for someone else ("how do I stop sharing
+# my screen", "remind me to turn off screen sharing"). Right before it: a negation ("don't stop looking").
+_STOP_ASKED_ABOUT = re.compile(
+    r"(?i)\b(?:how|why|what happens|what if|remind|reminder|remember to|forget to|(?:tell|ask) (?:\w+ ){1,3}to|"
+    r"text \w+|email \w+|message \w+)\b[^.!?]*$")
+_STOP_NEGATED = re.compile(r"(?i)\b(?:don't|dont|do not|never|not|can't|cannot|couldn't|won't|wouldn't|doesn't)\s*$")
+_STOP_ELSEWHERE = re.compile(rf"(?i)^\W*(?:in|on|during|for|from|with|to|over) {_ELSEWHERE}\b")
+# "Share my screen" and the like, said on their own (fillers allowed): an ask to turn sharing on,
+# which only the button can do. Anchored, so "share my screen with Sam in Zoom" is a request as usual.
+_LEAD = r"(?:(?:hey|ok|okay|so|um+|uh+|and|alright|all right|please|now|yeah|yes|oh|well|actually|hmm+)[,.!\s]+)*"
+_ASK = (r"(?:(?:can|could|would|will) you (?:please )?|please |go ahead and |let me |let's |lets |"
+        r"i(?: want| need| would like|'d like| wanna)(?: you)? to |i(?:'m going to|'m gonna|'ll) )?")
+_SHARE_REQUEST = re.compile(
+    rf"(?i)^\W*{_LEAD}{_ASK}(?:"
+    rf"(?:share|start sharing|begin sharing) (?:my|the) {_SCREEN_NOUN}(?: with you)?"
+    r"|(?:turn|switch) on (?:the )?(?:screen ?shar(?:e|ing)|eye)|(?:turn|switch) (?:the )?(?:screen ?shar(?:e|ing)|eye) on"
+    r"|(?:start|enable|begin|use) (?:the )?screen ?shar(?:e|ing)"
+    rf"|(?:look at|watch|see|follow|keep an eye on) my {_SCREEN_NOUN} (?:while|as) (?:we|i)(?:'re| are|'m| am)? "
+    r"(?:talk|chat|work|go)(?:ing)?"
+    rf"|(?:look at|watch|keep an eye on) my {_SCREEN_NOUN} from now on"
+    r")(?: (?:please|now|for me|with you|for a (?:bit|sec|second|minute|while)))*\W*$")
+# Talk about a screen itself, which a look at it can't answer: the device ("my screen keeps flickering"),
+# sharing it somewhere else ("how do I share my screen in Zoom"), how-to questions ("how do I record
+# my screen").
+_DEVICE_TROUBLE = (r"flicker\w*|black|blank|dark|dim|frozen|froze|freez\w*|cracked|broken|broke|blurry|fuzzy|"
+                   r"glitch\w*|dead|tearing|upside down|sideways|too (?:bright|dark|dim)|turned off|shaking|stuck|"
+                   r"unresponsive|not working|isn't working|won't turn on|won't wake up|"
+                   r"(?:turning|going|went) (?:off|black|dark|blank)")
+_SCREEN_ITSELF = re.compile(
+    rf"(?i)\b(?:my|the) {_SCREEN_NOUN}(?:'s| is| was| has been| keeps| kept| just| seems| looks| got| is all)*"
+    rf" (?:{_DEVICE_TROUBLE})\b"
+    r"|\b(?:share|sharing|record|recording|mirror|mirroring|cast|casting|present|presenting|project|projecting)"
+    rf" (?:my|the) {_SCREEN_NOUN}(?= (?:in|on|during|for|from|with|to|onto|over) {_ELSEWHERE}\b)"
+    r"|\bhow (?:do|can|could|should|would|to|does|did)(?: i| we| you| one)?(?: \w+)? (?:share|record|mirror|cast|"
+    r"capture|screenshot|clean|calibrate|rotate|brighten|dim|lock|unlock|split|extend|fix|reset|wake(?: up)?|"
+    rf"turn (?:on|off)|take a screenshot of|zoom in on) (?:my|the) {_SCREEN_NOUN}\b")
+
+
+# Said while turning sharing on after being asked to ("ok, one sec", "there, it's on"): not a newer
+# request, so a request waiting for the screen keeps waiting.
+_ACKNOWLEDGE = re.compile(
+    r"(?i)^\W*(?:(?:uh|um|oh|okay|ok|yeah|yes|yep|sure|alright|all right|right|got it|cool|great|thanks|thank you|"
+    r"one (?:sec|second|moment|minute)|just a (?:sec|second|moment|minute)|hold on|hang on|wait|"
+    r"give me a (?:sec|second|moment)|on it|doing it|done|there|there you go|it's on|it is on|now it's on|"
+    r"(?:i'm |i am )?turning it on|i turned it on|let me (?:turn it on|do that|find it)|will do)\W*)+$")
+
+
+def _plain(text: str | None) -> str:
+    """Whitespace collapsed; a curly apostrophe (transcripts use both) reads as a straight one."""
+    return " ".join((text or "").replace("\u2019", "'").split())
+
+
+def acknowledges(request: str) -> bool:
+    """Only an acknowledgement ("ok, one sec", "there, it's on"): a request waiting for the screen keeps
+    waiting through it."""
+    return bool(_ACKNOWLEDGE.match(_plain(request)))
+
+
+def stops_looking(request: str) -> bool:
+    """"Stop looking at my screen", "don't look at my screen", "turn off screen sharing": turn
+    Speakeasy's screen sharing off. Matched on the user's transcript as it arrives as well as on
+    handoffs, so it works even when the voice answers without handing it off. Questions and errands
+    ("how do I stop sharing my screen", "remind me to turn off screen sharing"), "don't stop looking"
+    and another app's sharing ("stop sharing my screen in Zoom") never match."""
+    text = _plain(request)
+    for match in _STOP_LOOKING.finditer(text):
+        before, after = text[:match.start()], text[match.end():]
+        if _STOP_ASKED_ABOUT.search(before) or _STOP_NEGATED.search(before) or _STOP_ELSEWHERE.match(after):
+            continue
+        return True
+    return False
+
+
+# Words that join a stop phrase to the rest of what was said, or carry nothing on their own.
+_STOP_JOINER = re.compile(r"(?i)^(?:[\s,.;:!-]|\b(?:and then|and|then|also|but|so|please|ok(?:ay)?|now)\b)+"
+                          r"|(?:[\s,.;:!-]|\b(?:and then|and|then|also|but|so|please|now|thanks|thank you)\b)+$")
+
+
+def after_stop(request: str) -> str:
+    """What else was asked alongside "stop looking at my screen" ("… and set a timer for ten
+    minutes"): the words around the stop phrase without the joiners. Empty when the stop phrase was
+    all of it, so a stop never swallows a real request."""
+    text = _plain(request)
+    for match in _STOP_LOOKING.finditer(text):
+        before, after = text[:match.start()], text[match.end():]
+        if _STOP_ASKED_ABOUT.search(before) or _STOP_NEGATED.search(before) or _STOP_ELSEWHERE.match(after):
+            continue
+        rest = " ".join(f"{_STOP_JOINER.sub('', before)} {_STOP_JOINER.sub('', after)}".split())
+        rest = _STOP_JOINER.sub("", rest).strip()
+        return rest if len(rest.split()) >= 2 else ""
+    return ""
+
+
+def screen_intent(request: str) -> str | None:
+    """A spoken instruction about screen sharing itself, never work for Hermes: ``stop`` (see
+    ``stops_looking``) or ``share`` ("share my screen", "turn on screen sharing", "look at my screen
+    while we talk", on their own: only the panel's button turns sharing on). None otherwise."""
+    if stops_looking(request):
+        return "stop"
+    if _SHARE_REQUEST.match(_plain(request)):
+        return "share"
+    return None
+
+
+def needs_screen(request: str) -> bool:
+    """A request that needs a look at the user's screen to be answered, so it waits for sharing to come
+    on rather than going without it: ``refers_to_screen``, except the spoken intents (``screen_intent``),
+    the task's own view (``about_task_view``) and talk about a screen itself ("my screen keeps
+    flickering", "how do I share my screen in Zoom"), which go on as words."""
+    if screen_intent(request) or about_task_view(request):
+        return False
+    return refers_to_screen(_SCREEN_ITSELF.sub(" ", _plain(request)))
+
+
 def show_me_target(request: str, tasks: list[OpenTask], has_image: set[str]) -> OpenTask | None:
     """Which task 'show me' is about: one the words name, else the newest task with something to
     show, else the newest running task (it will be asked for a screenshot)."""
