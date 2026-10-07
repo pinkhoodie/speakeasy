@@ -26,6 +26,11 @@ The user's Hermes writes the brief, which only adds personal context. Speakeasy 
      "send it" does not approve; changes go to the task as a follow-up.
    - The task prompt (`build_task_prompt`) tells Hermes to return email drafts as a fenced
      `email-draft` JSON block instead of sending (see API.md → Email drafts).
+   - Screen: the voice never sees the screen. It speaks in first person ("I'll take your screen
+     along with that"), never describes or claims to have seen what's on screen before a result,
+     always hands off requests to look at, share or stop sharing the screen, and never says sharing
+     started or stopped until a note says so. Notes tell it what went with a request (never names
+     or contents) and, aloud, why a capture didn't.
 
 2. **Voice brief** (written by the user's Hermes, stored at `<HERMES_HOME>/speakeasy/voice-brief.md`)
    - Who the user is: name, how to address them, time zone, languages.

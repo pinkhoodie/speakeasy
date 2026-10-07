@@ -4,12 +4,14 @@ The Speakeasy server runs inside the Hermes gateway as the `voice` platform plug
 `127.0.0.1` only (default port `8795`, set by `gateway.platforms.voice.extra.port`). To reach it
 from another machine, put a TLS proxy you trust in front of it.
 
-- JSON in and out (`Content-Type: application/json`). Request bodies are at most 128 KB.
+- JSON in and out (`Content-Type: application/json`). Request bodies are at most 128 KB, except
+  attachment uploads, which send raw bytes with their own limits (see Look at this).
 - **Auth:** every route except `GET /health` and `POST /voice/pair` needs
   `Authorization: Bearer <device token>`. Tokens come from pairing; only their SHA-256 is stored
   (`<HERMES_HOME>/speakeasy/devices.json`, 0600). A missing, wrong or revoked token gets `401 {"error": "unauthorized"}`.
 - **Errors:** `{"error": "<short reason>"}` with 400 (bad body), 401, 403 (pairing), 404, 409
   (stale/conflicting state), 422 (brief rejected), 502 (Hermes or the voice provider failed).
+  Some errors add a machine-readable `reason` (`{"error", "reason"}`); the attachment routes list theirs.
 - IDs: `interaction_id` = `vi_<32 hex>`, `run_id` = the Hermes run ID, `task_id` = the voice
   model's handoff/call ID, `draft_id` = `ed_<24 hex>`.
 - No route ever returns an API key, the Hermes `API_SERVER_KEY`, a device token (except once, at
@@ -32,10 +34,15 @@ used in the tests (timestamps and IDs will differ).
 | POST | `/voice/interactions/{id}/approval` | device | Answer a Hermes tool approval |
 | POST | `/voice/interactions/{id}/cancel-backend` | device | Stop a task's Hermes run |
 | POST | `/voice/interactions/{id}/skip-tour` | device | End the first-call tour |
+| POST | `/voice/interactions/{id}/screen` | device | Turn screen sharing on or off for this call |
+| POST | `/voice/interactions/{id}/captures/{capture_id}` | device | Report on a capture request |
+| POST | `/voice/interactions/{id}/attachments` | device | Upload a capture, picture or file (raw bytes) |
+| DELETE | `/voice/interactions/{id}/attachments/{attachment_id}` | device | Remove a pending picture or file |
 | GET | `/voice/work/latest` | device | Latest task + task list + recap |
 | GET | `/voice/work/{run_id}` | device | One task |
 | POST | `/voice/tasks/dismiss` | device | Hide finished tasks |
 | GET | `/voice/card-image/{run_id}/{1-8}` | device | Image bytes for an image card |
+| GET | `/voice/shared-image/{run_id}/{n}` | device | An image the user shared with a task |
 | POST | `/voice/drafts/{draft_id}` | device | Approve / deny / revise an email draft |
 | GET, PATCH | `/voice/settings` | device | Server settings |
 | GET, PUT | `/voice/brief` | device | The voice brief |
@@ -96,6 +103,12 @@ retry with the same key and body returns the same session instead of starting a 
 {"sdp": "v=0\r\n...", "resume_from": "vi_2436cf97524f58de64775b5a9ecc3e58"}
 ```
 
+`screen` (optional): `"ready"` when this app can share the user's screen, `"no_permission"` when it
+could but Screen Recording isn't allowed yet. Only calls that send it get capture requests, holds and
+screen hints (see Look at this); calls without it (the iPhone app, older Mac apps) work as before.
+Send it only when `GET /voice/status` reports `attachments`. A resume without it keeps the paused
+call's value; any other value is a 400.
+
 `tour` (optional, ignored with `resume_from`) starts the call with the one-time first-call tour:
 the voice walks the user through a real task, the controls and where results go, in its own
 words, and drops it the moment they say skip. Its value names the shortcuts to mention, all
@@ -137,9 +150,20 @@ Snapshot of one call. `run_id`/`status` describe the most recent task; `approval
   "finalization": "open",
   "error": null,
   "paused": false,
-  "resumed_from": null
+  "resumed_from": null,
+  "screen": {"on": false, "seq": 0, "declared": "ready"},
+  "captures": [],
+  "attachments": [],
+  "hold": null
 }
 ```
+
+`screen`, `captures`, `attachments` and `hold` are the call's Look at this state: sharing on or off
+(with the last applied `seq`), open capture requests (`[{"capture_id"}]`, so a client on the
+polling fallback still gets them), pictures and files waiting for the next request
+(`[{"id", "kind", "name", "app", "state": "pending" | "sending"}]`) and the held "look at my
+screen" request (`{"state": "waiting" | "not_sent", "text", "since"}` or `null`). Sharing is off
+at the start of every call and every resume.
 
 ## GET /voice/interactions/{id}/events (SSE)
 
@@ -157,6 +181,9 @@ The stream ends after `closed`.
 | `approval` | `{"run_id", "request_id", "description", "choices": ["once", "deny"]}` or `null` |
 | `email_drafts` | every visible draft of the call's tasks, each with `task_id` and `run_id` added; published whenever a draft appears or changes status |
 | `closed` | `{"finalization": "complete" \| "incomplete", "error"}` |
+| `capture` | `{"capture_id"}`: capture the user's window for one request (see Look at this) |
+| `screen.hint` | `{"reason": "screen_off" \| "no_permission" \| "share_request"}`: draw the user's eye to the screen button |
+| `screen.state` | `{"on", "seq"}`: sharing changed on the server side ("stop looking at my screen") |
 
 ```
 id: 1
@@ -431,6 +458,76 @@ Hermes `MEDIA:` output and are served only when they live under `image_roots` (d
 Hermes home), are regular files (no symlinks) and are at most 8 MB. Remote product images are
 fetched over HTTPS only, with no redirects to private addresses. 404 otherwise.
 
+## GET /voice/shared-image/{run_id}/{n}
+
+`n` is 1-99, the position in that task's `shared` list (screens and pictures; a file there is 404).
+Returns the bytes Speakeasy kept of an image the user shared with the task, from the speakeasy
+`shared` folder, with its `Content-Type`. Tasks list what they carried as
+`"shared": [{"kind": "screen" | "picture" | "file", "app"?, "name"?}]` (only when non-empty;
+never a path).
+
+## Look at this: screen, pictures and files
+
+During a call the user can let Hermes see their screen, or drop or paste pictures and files onto the
+panel. Everything goes from the app to this server to the user's own Hermes, never to the voice
+model, the routing and naming models, quick-answer search, chat notices or logs.
+
+- **Screen sharing** is per call and off at the start of every call and resume. While it's on, each
+  new Hermes run started from speech (a new task, a follow-up that starts a new run, a continued DM
+  chat) carries one capture of the frontmost window, taken for that request.
+- **The server asks for each capture.** When a request heads for Hermes it publishes a `capture`
+  event (and lists the request under the snapshot's `captures`). The app first posts `capturing`;
+  only on `200` does it capture and upload. A closed request answers `410`, so a late or replayed
+  event never captures anything. The server waits up to 2.5 s for the upload (6 s once the app
+  reports `uploading`), then the work goes ahead with words only and the voice says why.
+- **Pictures and files** wait on the panel (up to 3) and go with the next Hermes request, whether or
+  not sharing is on. Pictures go to Hermes as images; other files are saved on the Hermes machine and
+  named in the task so Hermes opens them with its own tools.
+- **Where they may go:** never into a group chat's Hermes session, a chat thread, or a channel the
+  user didn't name. A request that carries them is answered home (or in a channel the user named).
+  A capture that only rides along because sharing is on is dropped at such destinations instead.
+
+Limits: images are `image/jpeg` or `image/png`, at most 2.5 MB each, at most 4 per request and
+6.5 MB in total (a capture that won't fit is left out, with a spoken reason); files at most 10 MB.
+
+### POST /voice/interactions/{id}/screen
+
+Body exactly `{"on": true | false, "seq": <int ≥ 0>}`. `seq` only goes up within a call; an older
+one is ignored and the reply reports the state in force. Turning sharing off closes every open
+capture request. `200 {"on", "seq"}`; `409` with `reason` `ended`, `permission` (the call declared
+`no_permission`) or `not_declared` (the call never declared `screen`).
+
+### POST /voice/interactions/{id}/captures/{capture_id}
+
+Body `{"status": "capturing" | "uploading" | "failed", "reason"?}`. `capturing` asks whether the
+request is still wanted (`200`, else `410 {"reason": "closed"}`); `uploading` extends the wait;
+`failed` closes the request and needs one of `permission`, `no_window`, `speakeasy_window`,
+`password_manager`, `secure_input`, `blank`, `too_large`, `timeout`, `unsupported`.
+
+### POST /voice/interactions/{id}/attachments
+
+Raw bytes, metadata in headers. `Content-Length` is required (no chunked bodies) and checked before
+any of the body is read.
+
+| Header | |
+|---|---|
+| `X-Speakeasy-Kind` | `screen`, `picture` or `file` |
+| `Content-Type` | `image/jpeg` or `image/png` for a screen or picture; anything for a file |
+| `X-Speakeasy-Capture-Id` | required for `screen`, not allowed otherwise |
+| `X-Speakeasy-Filename` | required for `file`; percent-encoded UTF-8 |
+| `X-Speakeasy-App` | optional: the captured app's name |
+
+`200 {"id", "kind"}`; uploading the same capture again returns the same id. Errors: `400` bad
+headers, `404` unknown call, `408` the body stalled, `409` with `reason` `ended`, `too_many` or
+`too_large` (no room left in the request), `410 {"reason": "closed"}` the capture request is no
+longer open, `413 {"reason": "too_large"}`, `415 {"reason": "unsupported"}` (image bytes that
+aren't the declared type).
+
+### DELETE /voice/interactions/{id}/attachments/{attachment_id}
+
+Removes a pending picture or file. `200 {"id", "removed": true}`; `404` unknown; `409 {"reason":
+"sent"}` once it went with a request.
+
 ## Email drafts
 
 When a task writes an email for the user, Hermes is told **not** to send it and to end its answer
@@ -661,6 +758,10 @@ then marked edited, so auto-refresh leaves it alone). Calls are kept locally in 
 ## GET /voice/status
 
 Readiness. `voice_ready` is true when the chosen provider can start a call. When Codex is missing or signed out, `codex_message` says what to do. `threads_supported` reports whether this Hermes can open a new thread per task (its webhook platform must be on; `threads_reason` says why not). `routing_model` names the model task routing uses (`auxiliary.speakeasy_router`), `routing_hint` how to change it. `advertised_url` / `tailscale_name` are the address setup advertised (empty = local only).
+`attachments` says whether runs can carry images (`images`) and how Hermes reads them (`vision`:
+`native` the main model sees them, `described` an auxiliary vision model describes them, `none`, or
+`unknown` until the first check), plus the Look at this limits. Apps hide screen sharing and refuse
+drops when it's missing, `images` is false or `vision` is `none`.
 
 `200`
 ```json
@@ -687,6 +788,8 @@ Readiness. `voice_ready` is true when the chosen provider can start a call. When
   "routing_hint": "Change it with `hermes model` → auxiliary tasks, or in your Hermes config under auxiliary → speakeasy_router.",
   "advertised_url": "",
   "tailscale_name": "",
+  "attachments": {"images": true, "vision": "native", "max_attachments": 3, "max_image_bytes": 2500000,
+                  "max_request_image_bytes": 6500000, "max_file_bytes": 10000000},
   "version": "0.2.0"
 }
 ```

@@ -105,6 +105,26 @@ Client-side (Mac app, UserDefaults; token in Keychain):
   user types the server address and 6-digit code into the app.
 - `hermes voice devices`, `hermes voice revoke <id>`.
 
+## Look at this (screen, pictures, files)
+
+Screen sharing is per call and off at the start of every call and resume. The user turns it on with
+the eye in the panel (or ⌃⌥S); the voice can turn it off ("stop looking at my screen") but never on.
+While it's on, the plugin asks the Mac for one capture of the frontmost window for each new Hermes
+run; the Mac captures only after the plugin confirms the request is still open, and never captures
+Speakeasy's own windows, a password manager, an app holding secure keyboard input, or anything while
+sharing is off. Pictures and files the user drops or pastes go with the next request.
+
+Where it goes: Mac → this plugin (device token) → the user's own Hermes, which may pass images to
+its model provider (or have an auxiliary vision model describe them). Never to the voice model, the
+routing or naming models, quick-answer search, chat notices, the call log or logs, and never into a
+group chat's Hermes session or a channel the user didn't name.
+
+How long it stays: a capture that isn't attached is discarded from memory. Speakeasy keeps a copy of
+what a task carried (`<HERMES_HOME>/cache/speakeasy/shared/`) so the app can show it, deleted when
+the task is cleared or after 7 days. Images sent to Hermes also stay in that task's (or continued
+DM's) Hermes session for as long as Hermes keeps it, and later runs in that session send them to
+the model again.
+
 ## Secrets rule
 
 No keys, tokens, personal names, hostnames, tailnet names, chat IDs or 1Password references in the
