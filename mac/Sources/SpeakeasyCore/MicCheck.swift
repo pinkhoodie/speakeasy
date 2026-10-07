@@ -32,6 +32,10 @@ public struct MicCheck: Sendable {
     public static let speechLevel = 0.05
     /// A newly live, unmuted call must show sound and outgoing audio within this long.
     public static let firstSoundWithin: TimeInterval = 2.5
+    /// iPhone/Vision Pro: after the on-device listener hands the mic over, the call's audio unit
+    /// has to start (and AirPods switch to call mode, 1–3 s). 2.5 s read that start-up as a dead
+    /// mic and reconnected every call. Give it room; a really dead mic still shows by then.
+    public static let firstSoundWithinHandheld: TimeInterval = 7
     /// Later: this long of flat zero, or of no audio sent, means the mic died mid-call.
     public static let deadAfter: TimeInterval = 4
     /// Speech at least this long counts as talking to the assistant…
@@ -58,7 +62,16 @@ public struct MicCheck: Sendable {
     /// mid-conversation can't trigger needless reconnects.
     private var heardAny = false
 
-    public init() {}
+    /// How long a new connection may stay silent before it counts as dead.
+    public var firstSoundGrace: TimeInterval
+    /// The last sample judged (for the repair report).
+    public private(set) var lastLevel: Double?
+    public private(set) var lastPacketCount: Int?
+    public private(set) var watchedFor: TimeInterval = 0
+
+    public init(firstSoundGrace: TimeInterval = MicCheck.firstSoundWithin) {
+        self.firstSoundGrace = firstSoundGrace
+    }
 
     /// A voice connection is live (call start, or after a repair): judge it afresh.
     public mutating func connectionOpened() {
@@ -91,6 +104,7 @@ public struct MicCheck: Sendable {
         }
         if watchingSince == nil { watchingSince = now }
         let since = watchingSince!
+        lastLevel = level; lastPacketCount = packetsSent; watchedFor = now.timeIntervalSince(since)
         if let packetsSent {
             if lastPackets == nil || packetsSent > lastPackets! { lastPacketsGrew = now }
             lastPackets = packetsSent
@@ -103,7 +117,7 @@ public struct MicCheck: Sendable {
         let sendingOK = packetsSent == nil || (lastPacketsGrew.map { now.timeIntervalSince($0) < Self.deadAfter } ?? false)
         if soundOK && sendingOK && health == .checking { health = .ok }
 
-        let grace = lastSound == nil ? Self.firstSoundWithin : Self.deadAfter
+        let grace = lastSound == nil ? firstSoundGrace : Self.deadAfter
         if now.timeIntervalSince(since) >= grace {
             // Once the voice has heard you on this connection, the mic is proven: a stretch of
             // pure zeros after that is a headset gating silence while you pause (AirPods do),

@@ -92,7 +92,20 @@ public final class NativeVoiceClient: VoiceCallClient {
     private var ticker: Timer?
     private var levelTimer: Timer?
     /// Checks the call's mic really gets through (see MicCheck); runs even with the screen off.
-    private var micCheck = MicCheck()
+    private var micCheck = NativeVoiceClient.freshMicCheck()
+    /// A mic repair happened on this call: reconnect without listen-while-connecting from now on,
+    /// so a repair never repeats the very mic handoff that may have failed.
+    private var skipEarlyCapture = false
+    /// Whether this connection started with the on-device listener (for the repair report).
+    private var connectionUsedEarlyCapture = false
+
+    private static func freshMicCheck() -> MicCheck {
+        #if os(iOS) || os(visionOS)
+        return MicCheck(firstSoundGrace: MicCheck.firstSoundWithinHandheld)
+        #else
+        return MicCheck()
+        #endif
+    }
     private var micTimer: Timer?
     /// Set while a dead mic is being repaired (pause → immediate resume).
     private var micRepairPending = false
@@ -202,12 +215,30 @@ public final class NativeVoiceClient: VoiceCallClient {
     /// This is what closing and reopening the app did, done for you within a few seconds.
     private func repairMic(_ fault: MicFault) {
         guard model.state.canPause, !micRepairPending, !reconnectAfterPause else { return }
+        let detail = micReportDetail()
         micCheck.repairStarted()
         micRepairPending = true
+        skipEarlyCapture = true
         dispatch(.micHealth(.repairing))
-        reportMic("repair \(micCheck.repairs): \(fault.rawValue)")
+        reportMic("repair \(micCheck.repairs): \(fault.rawValue) (\(detail))")
         reconnectAfterPause = true
         pause()
+    }
+
+    /// What the check saw, so a repair in the log says why (no audio content, just numbers).
+    private func micReportDetail() -> String {
+        var parts = [String(format: "watched %.1fs", micCheck.watchedFor),
+                     "level \(micCheck.lastLevel.map { String(format: "%.5f", $0) } ?? "none")",
+                     "packets \(micCheck.lastPacketCount.map(String.init) ?? "none")",
+                     connectionUsedEarlyCapture ? "after listen-while-connecting" : "direct"]
+        #if os(iOS) || os(visionOS)
+        let route = AVAudioSession.sharedInstance().currentRoute
+        let ins = route.inputs.map { $0.portType.rawValue }.joined(separator: "+")
+        let outs = route.outputs.map { $0.portType.rawValue }.joined(separator: "+")
+        parts.append("in " + (ins.isEmpty ? "none" : ins))
+        parts.append("out " + (outs.isEmpty ? "none" : outs))
+        #endif
+        return parts.joined(separator: ", ")
     }
 
     private func reportMic(_ note: String) {
@@ -318,7 +349,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         voiceProvider = "openai"
         codexStopRequested = false
         appliedMic = nil; appliedRemote = nil
-        micCheck = MicCheck(); micRepairPending = false
+        micCheck = NativeVoiceClient.freshMicCheck(); micRepairPending = false; skipEarlyCapture = false
         dwell = StatusDwell(minimumDwell: 1.5)
         model.workExpanded = false
         model.captionExpanded = false
@@ -360,7 +391,8 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func connect(_ api: ServerClient) {
-        startEarlyCapture()
+        if skipEarlyCapture { stopEarlyCapture() } else { startEarlyCapture() }
+        connectionUsedEarlyCapture = earlyCapture != nil
         let engine = NativeCallEngine()
         self.engine = engine
         if earlyCapture != nil { engine.holdAudio() }

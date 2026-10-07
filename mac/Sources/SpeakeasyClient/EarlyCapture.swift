@@ -14,7 +14,7 @@ import LiveKitWebRTC
 /// The mic tap is stopped as soon as the call's own audio takes over; only the final text is kept.
 @MainActor
 public final class EarlyCapture {
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var recognizer: SFSpeechRecognizer?
@@ -175,8 +175,10 @@ public final class EarlyCapture {
         audioOn = false
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        // Release the input unit entirely so the call's own audio can take the mic straight away.
+        // Release the input unit entirely so the call's own audio can take the mic straight away:
+        // a stopped engine still owns its input unit until it is deallocated, so replace it.
         engine.reset()
+        engine = AVAudioEngine()
     }
 
     private func finished() {

@@ -108,4 +108,28 @@ final class MicCheckTests: XCTestCase {
         s.connection = .ending; s.pausing = true; s.micHealth = .repairing
         XCTAssertEqual(present(s).primary, "Fixing the mic…")
     }
+
+    /// iPhone: the call's audio starts a few seconds after the handoff (AirPods switch to call mode).
+    /// Silence during that start-up is not a dead mic; the window counts from when listening began.
+    func testHandheldGraceCoversAudioStartup() {
+        var c = MicCheck(firstSoundGrace: MicCheck.firstSoundWithinHandheld); c.connectionOpened()
+        let t0 = Date()
+        // Mic still held by the on-device listener: nothing judged.
+        for i in 0..<12 { XCTAssertNil(c.sample(level: 0, packetsSent: 0, listening: false, now: t0.addingTimeInterval(Double(i) * 0.25))) }
+        let start = t0.addingTimeInterval(3)
+        // 5 s of zeros right after the handoff: still fine on a phone.
+        for i in 0...20 { XCTAssertNil(c.sample(level: 0, packetsSent: i, listening: true, now: start.addingTimeInterval(Double(i) * 0.25))) }
+        // Sound arrives: healthy, no fault ever.
+        XCTAssertNil(c.sample(level: 0.002, packetsSent: 30, listening: true, now: start.addingTimeInterval(5.5)))
+        XCTAssertEqual(c.health, .ok)
+    }
+
+    func testHandheldStillCatchesARealDeadMic() {
+        var c = MicCheck(firstSoundGrace: MicCheck.firstSoundWithinHandheld); c.connectionOpened()
+        let t0 = Date()
+        var fault: MicFault?
+        for i in 0...40 where fault == nil { fault = c.sample(level: 0, packetsSent: i, listening: true, now: t0.addingTimeInterval(Double(i) * 0.25)) }
+        XCTAssertEqual(fault, .noSound)
+        XCTAssertGreaterThanOrEqual(c.watchedFor, MicCheck.firstSoundWithinHandheld)
+    }
 }
