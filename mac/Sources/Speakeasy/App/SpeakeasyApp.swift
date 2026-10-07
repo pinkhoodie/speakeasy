@@ -33,8 +33,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pauseHotKey: GlobalHotKey?
     private var pauseShortcut: KeyShortcut?
     private var pauseShortcutProblem: String?
+    /// Screen sharing on/off: registered while a call that can share is open and not paused.
+    private var screenHotKey: GlobalHotKey?
+    private var screenShortcut: KeyShortcut?
+    private var screenShortcutProblem: String?
     private var callItem: NSMenuItem?
     private var muteItem: NSMenuItem?
+    private var screenItem: NSMenuItem?
     private var pauseItem: NSMenuItem?
     private var statusLine: NSMenuItem?
     private(set) var native: NativeVoiceClient!
@@ -88,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applyClientPrefs()
         resolveMuteShortcut()
         resolvePauseShortcut()
+        resolveScreenShortcut()
         configureClient()
         configureStatusItem()
         configureIdle()
@@ -161,13 +167,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             self.resolveMuteShortcut()
             self.resolvePauseShortcut()
+            self.resolveScreenShortcut()
             if self.active {  // swap live hotkeys without ending the call
-                self.unregisterMuteHotKey(); self.pauseHotKey = nil
+                self.unregisterMuteHotKey(); self.pauseHotKey = nil; self.screenHotKey = nil
                 if !self.native.isPaused { self.registerMuteHotKey() }
                 self.registerPauseHotKey()
+                self.syncScreenHotKey()
             }
             self.updateMenu()
         }.store(in: &bag)
+        // Screen sharing: the menu-bar icon tints while it's on, the shortcut exists only while
+        // the call can share, and the menu item follows the button.
+        native.model.$state
+            .map { ScreenMenuState(button: $0.sharing.button, paused: $0.connection == .paused) }
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] screen in
+                guard let self else { return }
+                self.statusItem?.button?.contentTintColor = screen.button == .on ? .systemPurple : nil
+                self.syncScreenHotKey()
+                self.updateMenu()
+            }.store(in: &bag)
         app.startCall = { [weak self] in
             guard let self, !self.active else { return }
             self.startConversation()
@@ -270,6 +290,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let mute = NSMenuItem(title: "Mute microphone", action: #selector(toggleMuteFromMenu), keyEquivalent: "")
         mute.target = self
         menu.addItem(mute); muteItem = mute
+        let screen = NSMenuItem(title: "Share screen", action: #selector(toggleScreenFromMenu), keyEquivalent: "")
+        screen.target = self
+        screen.isHidden = true
+        menu.addItem(screen); screenItem = screen
         let work = NSMenuItem(title: "Recent work", action: #selector(showRecentWork), keyEquivalent: "")
         work.target = self
         menu.addItem(work)
@@ -333,6 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateMenu() {
+        if app.inCall != active { app.inCall = active }
         if let version = app.pluginUpdateAvailable { updateItem?.title = "Hermes plugin update: \(version)…" }
         else if let release = app.updateAvailable { updateItem?.title = "Update available: \(release.version)…" }
         else { updateItem?.title = "Check for Updates…" }
@@ -359,6 +384,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             muteItem.title = (native.micMuted ? "Unmute microphone" : "Mute microphone") + shortcut
             muteItem.isEnabled = active && native.micControllable
             muteItem.toolTip = muteShortcutProblem
+        }
+        if let screenItem {
+            // Only during a call that can share its screen.
+            let button = native.model.screenState
+            let shortcut = screenShortcut.map { " (\($0.display))" } ?? ""
+            screenItem.isHidden = !active || button == .unavailable
+            screenItem.title = (button == .on ? "Stop sharing screen" : "Share screen") + shortcut
+            screenItem.isEnabled = active && !native.isPaused
+            screenItem.toolTip = screenShortcutProblem
         }
     }
 
@@ -434,6 +468,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.active = false
             self.unregisterMuteHotKey()
             self.pauseHotKey = nil
+            self.screenHotKey = nil
             self.updateMenu()
             let state = self.native.model.state
             // A delegated run whose first work update never arrived is still in flight.
@@ -501,6 +536,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         app.pauseShortcutProblem = pauseShortcutProblem
         native.model.pauseShortcutHint = pauseShortcut.map { "\($0.display): pause or resume the call" } ?? ""
     }
+
+    /// `defaults write <bundle id> screenShortcut "ctrl+opt+s"` (empty disables).
+    private func resolveScreenShortcut() {
+        let raw = UserDefaults.standard.string(forKey: Prefs.screenShortcut)
+        if raw?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+            screenShortcut = nil; screenShortcutProblem = "Screen shortcut disabled"
+        } else {
+            switch raw.map({ KeyShortcut.parse($0, reserved: app.callShortcut) }) ?? .success(.defaultScreen) {
+            case .failure(let error):
+                screenShortcut = nil; screenShortcutProblem = "Screen shortcut '\(raw ?? "")' rejected: \(error)"
+            case .success(let shortcut):
+                if shortcut == muteShortcut || shortcut == pauseShortcut {
+                    screenShortcut = nil
+                    screenShortcutProblem = "Screen shortcut \(shortcut.display) is the \(shortcut == muteShortcut ? "mute" : "pause") shortcut"
+                } else if GlobalHotKey.collidesWithSystemShortcut(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers) {
+                    screenShortcut = nil; screenShortcutProblem = "Screen shortcut \(shortcut.display) is used by a macOS system shortcut"
+                } else {
+                    screenShortcut = shortcut; screenShortcutProblem = nil
+                }
+            }
+        }
+        app.screenShortcutProblem = screenShortcutProblem
+        native.model.screenShortcutHint = screenShortcut.map { "\($0.display): share your screen or stop" } ?? ""
+    }
+
+    /// The screen shortcut is held only while it can do something: a call is open, not paused, and
+    /// can share its screen. Otherwise the key combination stays free for other apps.
+    private func syncScreenHotKey() {
+        let wanted = active && !native.isPaused && native.model.screenState != .unavailable
+        guard wanted, let shortcut = screenShortcut else { screenHotKey = nil; return }
+        guard screenHotKey == nil else { return }
+        do {
+            screenHotKey = try GlobalHotKey(keyCode: shortcut.keyCode, modifiers: shortcut.modifiers,
+                                            display: shortcut.display, exclusive: true,
+                                            callback: { [weak self] in self?.toggleScreen() })
+        } catch {
+            screenShortcutProblem = error.localizedDescription
+        }
+    }
+
+    /// The shortcut or menu item. Without Screen Recording the panel shows the Set up line, so a
+    /// hidden panel comes back to show it.
+    private func toggleScreen() {
+        guard active, !native.isPaused else { return }
+        if native.model.screenState == .needsPermission && !native.panelVisible { native.showPanel() }
+        native.toggleScreen()
+        updateMenu()
+    }
+
+    @objc private func toggleScreenFromMenu() { toggleScreen() }
 
     private func registerPauseHotKey() {
         guard pauseHotKey == nil, native.supportsPause, let shortcut = pauseShortcut else { return }
@@ -585,6 +670,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
     }
+}
+
+/// What the menu bar follows of the call's screen sharing.
+private struct ScreenMenuState: Equatable {
+    var button: ScreenButton
+    var paused: Bool
 }
 
 extension PairingLink.ParseError {

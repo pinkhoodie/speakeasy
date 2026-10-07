@@ -152,11 +152,16 @@ public final class VoicePanelModel: ObservableObject {
     public var screenHintReason: String? { state.sharing.hint }
     /// The screen button or shortcut.
     public var onToggleScreen: () -> Void = {}
-    /// System Settings › Screen Recording (the "Set up" on the needs-permission line).
+    /// Speakeasy Settings › General › Screen, where Screen Recording is allowed (the "Set up" on the
+    /// needs-permission line).
     public var onOpenScreenSettings: () -> Void = {}
+    /// e.g. "⌃⌥S: share your screen or stop". Empty when no shortcut.
+    @Published public var screenShortcutHint = ""
 
     /// This Hermes takes pictures and files (drops and pastes are offered).
     @Published public var attachmentsSupported = false
+    /// A drag the panel would take hovers over it (thin accent ring).
+    @Published public var dropTargeted = false
     /// Pictures and files waiting to go with the next request, in drop order.
     public var pendingAttachments: [PendingAttachmentItem] {
         state.sharing.visibleAttachments.map { item in

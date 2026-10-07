@@ -9,16 +9,16 @@ struct SettingsView: View {
     @EnvironmentObject var app: AppModel
 
     var body: some View {
-        TabView {
-            GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }
-            ShortcutSettings().tabItem { Label("Shortcuts", systemImage: "keyboard") }
-            VoiceSettings().tabItem { Label("Voice", systemImage: "waveform") }
-            BriefSettings().tabItem { Label("Voice brief", systemImage: "text.quote") }
-            BehaviorSettings().tabItem { Label("Behavior", systemImage: "slider.horizontal.3") }
-            DeliverySettings().tabItem { Label("Delivery", systemImage: "paperplane") }
-            HomeSettings().tabItem { Label("Home", systemImage: "house") }
-            ConnectionSettings().tabItem { Label("Connection", systemImage: "network") }
-            AboutSettings().tabItem { Label("About", systemImage: "info.circle") }
+        TabView(selection: $app.settingsTab) {
+            GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
+            ShortcutSettings().tabItem { Label("Shortcuts", systemImage: "keyboard") }.tag(SettingsTab.shortcuts)
+            VoiceSettings().tabItem { Label("Voice", systemImage: "waveform") }.tag(SettingsTab.voice)
+            BriefSettings().tabItem { Label("Voice brief", systemImage: "text.quote") }.tag(SettingsTab.brief)
+            BehaviorSettings().tabItem { Label("Behavior", systemImage: "slider.horizontal.3") }.tag(SettingsTab.behavior)
+            DeliverySettings().tabItem { Label("Delivery", systemImage: "paperplane") }.tag(SettingsTab.delivery)
+            HomeSettings().tabItem { Label("Home", systemImage: "house") }.tag(SettingsTab.home)
+            ConnectionSettings().tabItem { Label("Connection", systemImage: "network") }.tag(SettingsTab.connection)
+            AboutSettings().tabItem { Label("About", systemImage: "info.circle") }.tag(SettingsTab.about)
         }
         .frame(width: 560, height: 470)
         .task { await app.refresh() }
@@ -87,6 +87,7 @@ private struct GeneralSettings: View {
                 Toggle("Start calls muted", isOn: $startMuted)
                 Toggle("Follow the system's audio devices (AirPods etc.)", isOn: $followSystemAudio)
             }
+            ScreenSettingsSection()
             Section("Panel") {
                 Toggle("Show the panel when a call starts", isOn: $showPanelOnStart)
                 Toggle("Start calls in slim mode", isOn: $startSlim)
@@ -134,6 +135,52 @@ private struct GeneralSettings: View {
     }
 }
 
+/// Settings › General › Screen: Screen Recording for "Look at this" (the panel's Set up line opens
+/// Settings here). A grant only takes effect after Speakeasy relaunches, so Relaunch lives here too.
+private struct ScreenSettingsSection: View {
+    @EnvironmentObject var app: AppModel
+
+    /// Why the eye button won't show even with permission (an older plugin, a Hermes without vision).
+    private var unsupportedLine: String? {
+        guard let status = app.status, !status.attachmentsSupported else { return nil }
+        return shareRefusalLine(AttachmentSupport.refusalReason(status.attachments))
+    }
+
+    var body: some View {
+        Section {
+            LabeledContent("Screen Recording") {
+                if app.screenRecordingAllowed {
+                    Text("Allowed").foregroundStyle(.secondary)
+                } else {
+                    HStack(spacing: 8) {
+                        Button("Allow…") { app.allowScreenRecording() }
+                            .disabled(app.screenRecordingAsked || !ScreenCapture.mayPrompt)
+                            .help("Shows macOS's Screen Recording prompt")
+                        Button("Open System Settings") { ScreenCapture.openSettings() }
+                            .help("Privacy & Security › Screen & System Audio Recording: turn on Speakeasy")
+                    }
+                }
+            }
+            LabeledContent("A change applies after a relaunch") {
+                Button("Relaunch Speakeasy") { app.relaunch() }
+                    .disabled(app.inCall || !AppModel.canRelaunch)
+                    .help(app.inCall ? "End the call first" : "Quit and reopen Speakeasy")
+            }
+            if let unsupportedLine {
+                Text(unsupportedLine).font(.caption).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Screen")
+        } footer: {
+            Text("Sharing is off at the start of every call. macOS asks about once a month to keep allowing it.")
+        }
+        .onAppear { app.refreshScreenRecording() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            app.refreshScreenRecording()
+        }
+    }
+}
+
 // MARK: Shortcuts
 
 private struct ShortcutSettings: View {
@@ -141,12 +188,13 @@ private struct ShortcutSettings: View {
 
     private var mute: KeyShortcut? { AppModel.storedShortcut(Prefs.muteShortcut, default: .defaultMute) }
     private var pause: KeyShortcut? { AppModel.storedShortcut(Prefs.pauseShortcut, default: .defaultPause) }
+    private var screen: KeyShortcut? { AppModel.storedShortcut(Prefs.screenShortcut, default: .defaultScreen) }
 
     var body: some View {
         Form {
             Section {
                 LabeledContent("Start or end a call") {
-                    ShortcutRecorder(shortcut: app.callShortcut, taken: [mute, pause].compactMap { $0 }) { app.setCallShortcut($0) }
+                    ShortcutRecorder(shortcut: app.callShortcut, taken: [mute, pause, screen].compactMap { $0 }) { app.setCallShortcut($0) }
                 }
                 if let problem = app.callShortcutProblem { Text(problem).foregroundStyle(.orange) }
             } footer: {
@@ -155,7 +203,7 @@ private struct ShortcutSettings: View {
             Section {
                 LabeledContent("Mute or unmute") {
                     ShortcutRecorder(shortcut: mute, name: "Mute", defaultShortcut: .defaultMute,
-                                     taken: [app.callShortcut] + [pause].compactMap { $0 },
+                                     taken: [app.callShortcut] + [pause, screen].compactMap { $0 },
                                      onTurnOff: { app.setExtraShortcut(Prefs.muteShortcut, nil) }) {
                         app.setExtraShortcut(Prefs.muteShortcut, $0)
                     }
@@ -167,7 +215,7 @@ private struct ShortcutSettings: View {
             Section {
                 LabeledContent("Pause or resume") {
                     ShortcutRecorder(shortcut: pause, name: "Pause", defaultShortcut: .defaultPause,
-                                     taken: [app.callShortcut] + [mute].compactMap { $0 },
+                                     taken: [app.callShortcut] + [mute, screen].compactMap { $0 },
                                      onTurnOff: { app.setExtraShortcut(Prefs.pauseShortcut, nil) }) {
                         app.setExtraShortcut(Prefs.pauseShortcut, $0)
                     }
@@ -175,6 +223,18 @@ private struct ShortcutSettings: View {
                 if let problem = app.pauseShortcutProblem, pause != nil { Text(problem).foregroundStyle(.orange) }
             } footer: {
                 Text("A paused call stops listening and billing; tasks keep running.")
+            }
+            Section {
+                LabeledContent("Share screen or stop") {
+                    ShortcutRecorder(shortcut: screen, name: "Screen", defaultShortcut: .defaultScreen,
+                                     taken: [app.callShortcut] + [mute, pause].compactMap { $0 },
+                                     onTurnOff: { app.setExtraShortcut(Prefs.screenShortcut, nil) }) {
+                        app.setExtraShortcut(Prefs.screenShortcut, $0)
+                    }
+                }
+                if let problem = app.screenShortcutProblem, screen != nil { Text(problem).foregroundStyle(.orange) }
+            } footer: {
+                Text("Only active during a call that can share your screen.")
             }
             Section {
                 Button("Restore default shortcuts") { app.resetShortcuts() }

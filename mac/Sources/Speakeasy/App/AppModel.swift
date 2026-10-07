@@ -14,6 +14,8 @@ enum Prefs {
     static let callShortcutKey = "callShortcut"
     static let muteShortcut = "muteShortcut"
     static let pauseShortcut = "pauseShortcut"
+    /// Screen sharing on/off during a call (default ⌃⌥S; empty string = off).
+    static let screenShortcut = "screenShortcut"
     static let startMuted = "startMuted"
     static let showPanelOnStart = "showPanelOnStart"
     static let followSystemAudio = "followSystemAudio"
@@ -43,6 +45,11 @@ enum Prefs {
               case .success(let s) = KeyShortcut.parse(raw, reserved: nil) else { return .call }
         return s
     }
+}
+
+/// The Settings window's tabs, so other parts of the app can open it at the right one.
+enum SettingsTab: String, Hashable {
+    case general, shortcuts, voice, brief, behavior, delivery, home, connection, about
 }
 
 /// App-wide state shared by the menu bar, onboarding and Settings.
@@ -94,6 +101,12 @@ final class AppModel: ObservableObject {
     /// Whether the paired Hermes takes screens, pictures and files; nil from plugins before 0.2.48.
     /// The app delegate hands it to the call client whenever the status refreshes.
     var attachmentSupport: AttachmentSupport? { status?.attachments }
+    /// Settings › General › Allow was pressed this launch (macOS shows its prompt at most once).
+    @Published private(set) var screenRecordingAsked = false
+    /// A call is open (paused included); set by the app delegate. Relaunch waits for it to end.
+    @Published var inCall = false
+    /// The Settings tab showing (or to show next).
+    @Published var settingsTab: SettingsTab = .general
 
     /// The delegate re-wires the call client and hotkeys when these change.
     let configChanged = PassthroughSubject<AppConfig, Never>()
@@ -104,6 +117,7 @@ final class AppModel: ObservableObject {
     /// Why the mute / pause shortcut isn't active (set by the delegate), shown in Settings.
     @Published var muteShortcutProblem: String?
     @Published var pauseShortcutProblem: String?
+    @Published var screenShortcutProblem: String?
     /// Onboarding "Try it" and Settings ask the delegate to start a call.
     var startCall: () -> Void = {}
 
@@ -471,7 +485,7 @@ final class AppModel: ObservableObject {
     }
 
     func resetShortcuts() {
-        for key in [Prefs.muteShortcut, Prefs.pauseShortcut] { UserDefaults.standard.removeObject(forKey: key) }
+        for key in [Prefs.muteShortcut, Prefs.pauseShortcut, Prefs.screenShortcut] { UserDefaults.standard.removeObject(forKey: key) }
         setCallShortcut(.call)
         objectWillChange.send()
     }
@@ -493,6 +507,48 @@ final class AppModel: ObservableObject {
         let granted = await AVCaptureDevice.requestAccess(for: .audio)
         micAuthorization = AVCaptureDevice.authorizationStatus(for: .audio)
         return granted
+    }
+
+    // MARK: Screen Recording ("Look at this")
+
+    /// Settings, at `tab` (nil: wherever it was).
+    func showSettings(_ tab: SettingsTab? = nil) {
+        if let tab { settingsTab = tab }
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+    }
+
+    /// Settings › General › Screen › Allow: macOS's own prompt, at most once per launch. A grant
+    /// takes effect after Speakeasy relaunches.
+    func allowScreenRecording() {
+        screenRecordingAsked = true
+        screenRecordingAllowed = ScreenCapture.requestPermission()
+    }
+
+    /// Re-read Screen Recording (never prompts), e.g. when the user comes back from System Settings.
+    func refreshScreenRecording() {
+        let allowed = ScreenCapture.permitted
+        if allowed != screenRecordingAllowed { screenRecordingAllowed = allowed }
+    }
+
+    /// Only the real app bundle can reopen itself (a bare debug binary has nothing to `open`).
+    static var canRelaunch: Bool { Bundle.main.bundleURL.pathExtension == "app" }
+
+    /// Quits and reopens Speakeasy so a new Screen Recording grant takes effect. Never during a call.
+    /// A small shell waits for this process to exit, then opens the same app bundle again.
+    func relaunch() {
+        guard Self.canRelaunch, !inCall else { return }
+        let waiter = Process()
+        waiter.executableURL = URL(fileURLWithPath: "/bin/sh")
+        waiter.arguments = ["-c", "while /bin/kill -0 \"$0\" 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open \"$1\"",
+                            String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundleURL.path]
+        do {
+            try waiter.run()
+        } catch {
+            lastError = "Couldn't relaunch Speakeasy: \(error.localizedDescription)"
+            return
+        }
+        NSApp.terminate(nil)
     }
 
     static func openMicrophonePrivacySettings() {

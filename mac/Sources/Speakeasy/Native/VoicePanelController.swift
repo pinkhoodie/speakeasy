@@ -10,9 +10,12 @@ final class VoicePanel: NSPanel {
     var onEscape: (() -> Void)?
     /// Left/right arrow: returns true when it stepped through images (then the key is consumed).
     var onArrow: ((Int) -> Bool)?
-    /// True while arrow keys would do something: a click then makes the panel key so they reach it.
-    /// Otherwise the panel stays non-key on click and never takes typing away from other apps.
+    /// True while arrow keys or ⌘V would do something (a review card's images; a call that takes
+    /// pictures and files): a click then makes the panel key so they reach it. Otherwise the panel
+    /// stays non-key on click and never takes typing away from other apps.
     var wantsKeysOnClick: (() -> Bool)?
+    /// ⌘V (or Edit › Paste): true when the panel took the pasteboard's pictures or files.
+    var onPaste: (() -> Bool)?
     /// Called once when a drag that moved the panel ends.
     var onMoved: (() -> Void)?
     /// Edge resize: live size delta (dx wider, dy taller) and end-of-drag commit.
@@ -30,6 +33,21 @@ final class VoicePanel: NSPanel {
     override var canBecomeMain: Bool { false }
     override func cancelOperation(_ sender: Any?) { onEscape?() }
     override func animationResizeTime(_ newFrame: NSRect) -> TimeInterval { 0.18 }
+
+    /// ⌘V while the panel is key (a click during a call makes it key): pictures and files go with
+    /// the next request. Other key equivalents, and arrow keys (`sendEvent`), are untouched.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.type == .keyDown, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "v", !(firstResponder is NSText), onPaste?() == true {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    /// Edit › Paste reaches the panel through the responder chain.
+    @objc func paste(_ sender: Any?) {
+        if onPaste?() != true { NSSound.beep() }
+    }
 
     /// Drag-to-move, handled at the window level because SwiftUI claims every
     /// mouse-down in the hosting view (so `isMovableByWindowBackground` never
@@ -191,11 +209,14 @@ final class ResizeHandleView: NSView {
 }
 
 /// The panel's content: SwiftUI, with resize handles laid over the right edge,
-/// bottom edge and bottom-right corner.
+/// bottom edge and bottom-right corner. Also the drop destination for pictures and files dragged
+/// onto the panel during a call (the SwiftUI content registers no drag types, so drags reach here).
 final class PanelContainerView: NSView {
     let right = ResizeHandleView(kind: .right)
     let bottom = ResizeHandleView(kind: .bottom)
     let corner = ResizeHandleView(kind: .corner)
+    /// The panel model drops go to (and whose `dropTargeted` lights the accent ring).
+    weak var dropModel: VoicePanelModel?
 
     init(content: NSView) {
         super.init(frame: .zero)
@@ -205,8 +226,36 @@ final class PanelContainerView: NSView {
         content.autoresizingMask = [.width, .height]
         addSubview(content)
         [bottom, right, corner].forEach(addSubview)   // corner last: topmost
+        registerForDraggedTypes(PanelAttachments.draggedTypes)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    // MARK: Drops ("Look at this")
+
+    /// `.copy` while a call takes attachments and the drag carries something attachable; nothing
+    /// otherwise (outside a call a drop never starts one).
+    private func dropOperation(_ info: NSDraggingInfo) -> NSDragOperation {
+        guard let model = dropModel, PanelAttachments.accepting(model),
+              PanelAttachments.hasAttachable(info.draggingPasteboard) else {
+            if dropModel?.dropTargeted == true { dropModel?.dropTargeted = false }
+            return []
+        }
+        if !model.dropTargeted { model.dropTargeted = true }
+        return .copy
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { dropOperation(sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { dropOperation(sender) }
+    override func draggingExited(_ sender: NSDraggingInfo?) { dropModel?.dropTargeted = false }
+    override func draggingEnded(_ sender: NSDraggingInfo) { dropModel?.dropTargeted = false }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { dropOperation(sender) == .copy }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let model = dropModel, PanelAttachments.accepting(model) else { return false }
+        model.dropTargeted = false
+        PanelAttachments.take(from: sender.draggingPasteboard, into: model, imageName: "Dropped image")
+        return true
+    }
 
     override var isFlipped: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -299,14 +348,25 @@ final class VoicePanelController {
         hosting.sizingOptions = []
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = .clear
-        panel.contentView = PanelContainerView(content: hosting)
+        let container = PanelContainerView(content: hosting)
+        container.dropModel = model
+        panel.contentView = container
         if let saved = UserDefaults.standard.string(forKey: Self.placementKey) {
             let p = NSPointFromString(saved)
             if p != .zero { userTopLeft = p }
         }
         panel.onMoved = { [weak self] in self?.panelDidMove() }
         panel.onArrow = { [weak model] delta in model?.stepOpenReview(by: delta) ?? false }
-        panel.wantsKeysOnClick = { [weak model] in model?.steppableReview != nil }
+        // Arrow keys for a review card's images, and ⌘V during a call that takes pictures and files.
+        panel.wantsKeysOnClick = { [weak model] in
+            guard let model else { return false }
+            return model.steppableReview != nil || PanelAttachments.accepting(model)
+        }
+        panel.onPaste = { [weak model] in
+            guard let model, PanelAttachments.accepting(model) else { return false }
+            PanelAttachments.take(from: .general, into: model, imageName: "Pasted image")
+            return true
+        }
         if let saved = UserDefaults.standard.string(forKey: Self.sizeKey) {
             let s = NSSizeFromString(saved)
             model.panelWidth = Self.clampWidth(s.width == 0 ? Tokens.width : s.width)
@@ -537,7 +597,9 @@ extension NativeVoiceClient {
             let shot = try await ScreenCapture.capture()
             return CapturedScreen(attachment: shot.attachment, appName: shot.appName)
         }
-        openScreenSettings = { ScreenCapture.openSettings() }
+        // "Set up" leads to Speakeasy's own Settings › General › Screen (Allow, System Settings,
+        // Relaunch): a grant needs a relaunch, so the panel never jumps straight to System Settings.
+        openScreenSettings = { AppModel.shared.showSettings(.general) }
     }
     // swiftlint:disable:next force_cast
     var panel: VoicePanelController { surface as! VoicePanelController }

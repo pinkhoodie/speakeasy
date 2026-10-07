@@ -30,6 +30,9 @@ public struct KeyShortcut: Equatable, Sendable {
     /// Default Pause/Resume shortcut: Control–Option–P, registered while a call
     /// is open or paused.
     public static let defaultPause = KeyShortcut(keyCode: 0x23, modifiers: control | option, keyName: "P")
+    /// Default screen-sharing on/off shortcut: Control–Option–S. Like Mute, registered only while
+    /// a call that can share its screen is open (and not paused).
+    public static let defaultScreen = KeyShortcut(keyCode: 0x01, modifiers: control | option, keyName: "S")
 
     /// ANSI virtual key codes (kVK_ANSI_*), cross-checked against Carbon in tests.
     public static let keyCodes: [String: UInt32] = [

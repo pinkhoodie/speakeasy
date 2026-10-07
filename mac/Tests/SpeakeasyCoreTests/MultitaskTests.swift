@@ -170,6 +170,13 @@ final class MultitaskTests: XCTestCase {
         XCTAssertNotEqual(KeyShortcut.defaultPause, KeyShortcut.call)
     }
 
+    func testScreenShortcutDefaultIsValidAndDistinct() {
+        XCTAssertEqual(KeyShortcut.defaultScreen.display, "⌃⌥S")
+        XCTAssertEqual(KeyShortcut.parse("ctrl+opt+s"), .success(.defaultScreen))
+        XCTAssertEqual(KeyShortcut.parse(KeyShortcut.defaultScreen.storage, reserved: nil), .success(.defaultScreen))
+        for other in [KeyShortcut.call, .defaultMute, .defaultPause] { XCTAssertNotEqual(KeyShortcut.defaultScreen, other) }
+    }
+
     // MARK: Heads-up while paused
 
     func pausedTask(_ id: String, _ status: String, request: String = "Order more snacks",

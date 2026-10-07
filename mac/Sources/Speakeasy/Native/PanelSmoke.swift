@@ -24,6 +24,7 @@ enum PanelSmoke {
             await transcriptScroll(client)
             await drag(client)
             await endedPanel(client)
+            await lookAtThis(client, dir: snapshotDir)
             if let dir = snapshotDir { await snapshots(client, dir: dir) }
             print("panel-smoke " + (ok ? "ok" : "FAILED"))
             log.forEach { print("  " + $0) }
@@ -564,6 +565,343 @@ enum PanelSmoke {
         check(!c.panelVisible, "ended: close (x) hides the panel")
         check(hotkeyAction(connection: c.model.state.connection, panelVisible: c.panelVisible) == .startCall,
               "ended: hotkey while hidden starts a call")
+    }
+
+    // MARK: Look at this: the screen button, pictures and files, the hold line
+
+    /// The screen half of the header capsule in each state, the Set up line, slim and minimum-width
+    /// layouts, the hold line, pending pictures and files (through the real paste reader and
+    /// encoder, from a private pasteboard: the user's clipboard is never touched), and what a task
+    /// carried. Preview mode: nothing is captured, uploaded, or prompted for.
+    static func lookAtThis(_ c: NativeVoiceClient, dir: String?) async {
+        guard let (base, _) = PreviewFixtures.state("tasklist") else { fail("look: no tasklist fixture"); return }
+        let m = c.model
+        let saved = (toggle: m.onToggleScreen, settings: m.onOpenScreenSettings, slim: m.slim, width: m.panelWidth,
+                     hint: m.screenShortcutHint, support: c.attachmentSupport)
+        var toggles = 0, settingsOpened = 0
+        m.onToggleScreen = { toggles += 1 }
+        m.onOpenScreenSettings = { settingsOpened += 1 }
+        m.screenShortcutHint = "⌃⌥S: share your screen or stop"
+        m.slim = false
+        c.panel.resetPlacement()
+        defer {
+            m.onToggleScreen = saved.toggle; m.onOpenScreenSettings = saved.settings; m.slim = saved.slim
+            m.panelWidth = saved.width; m.screenShortcutHint = saved.hint; c.attachmentSupport = saved.support
+            m.dropTargeted = false
+        }
+        func sharing(_ state: VoiceState, _ events: [SharingEvent]) -> VoiceState {
+            var s = state
+            for event in events { s.sharing.apply(event, now: s.now, admitted: s.interactionID, live: true) }
+            return s
+        }
+        func snap(_ name: String) {
+            guard let dir else { return }
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: "\(dir)/\(name).png")); record("snapshot \(dir)/\(name).png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
+        let window = c.panel.window
+        if let dir { try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true) }
+        // SwiftUI builds its accessibility tree only for an assistive client; this attribute is what
+        // one sets. The checks below find controls (and their real frames) through that tree.
+        setEnhancedAccessibility(true)
+        defer { setEnhancedAccessibility(false) }
+
+        // A call that can't share: the mic alone, the familiar circle.
+        c.showPreview(base, workExpanded: false)
+        await settle()
+        check(axElement(c, "Screen sharing") == nil && axElement(c, "Microphone on") != nil,
+              "look: no screen half when the call can't share")
+        let micAlone = axElement(c, "Microphone on")?.frame.width ?? 0
+
+        // Off: the eye joins the mic in one capsule.
+        let off = sharing(base, [.declared(.ready)])
+        c.showPreview(off, workExpanded: false)
+        await settle()
+        let eye = axElement(c, "Screen sharing off"), mic = axElement(c, "Microphone on")
+        check(eye != nil, "look: screen half present when the call can share")
+        if let eye, let mic {
+            record("look: screen half \(fmt(eye.frame)) mic half \(fmt(mic.frame)) (mic alone \(Int(micAlone))pt)")
+            check(abs(eye.frame.maxX - mic.frame.minX) < 1 && abs(eye.frame.midY - mic.frame.midY) < 1
+                  && abs(eye.frame.height - 30) < 1 && abs(mic.frame.width - micAlone) < 1,
+                  "look: screen and mic halves share one 30pt capsule")
+            let point = window.convertPoint(fromScreen: NSPoint(x: eye.frame.midX, y: eye.frame.midY))
+            await click(window, at: point)
+            if toggles == 0 { record("look: first synthetic click absorbed (harness limit); clicking again"); await click(window, at: point) }
+            check(toggles == 1, "look: clicking the screen half calls the toggle action")
+        }
+        snap("screen-off")
+
+        // On: eye.fill, screen-recording purple.
+        let on = sharing(base, [.declared(.ready), .state(ScreenToggle(on: true, seq: 1))])
+        c.showPreview(on, workExpanded: false)
+        await settle()
+        check(axElement(c, "Screen sharing on") != nil, "look: screen half shows sharing on")
+        snap("screen-on")
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+        await settle(0.4)
+        snap("screen-on-dark")
+        NSApp.appearance = nil
+        await settle(0.2)
+        // A request about the screen while sharing is off rings the button once (caught mid-ring).
+        c.showPreview(off, workExpanded: false)
+        await settle(0.4)
+        var hinted = off; hinted.sharing.apply(.hint("screen"), now: off.now, admitted: off.interactionID, live: true)
+        c.model.state = hinted
+        await settle(0.3)
+        check(c.model.screenHintPulse == 1, "look: a screen.hint grows the pulse count")
+        snap("screen-hint-ring")
+        await settle(1.0)
+
+        // No Screen Recording: a tiny badge; pressing shows the Set up line, which opens Settings.
+        let permission = sharing(base, [.declared(.noPermission), .toggle])
+        c.showPreview(permission, workExpanded: false)
+        await settle()
+        check(axElement(c, "Screen sharing needs Screen Recording") != nil, "look: screen half shows needs-permission")
+        check(m.shownStatus == "Screen Recording is off · Set up", "look: pressing it without permission shows the Set up line")
+        snap("screen-needs-permission")
+        if let line = axElement(c, "Screen Recording is off · Set up") {
+            let point = window.convertPoint(fromScreen: NSPoint(x: line.frame.minX + 30, y: line.frame.midY))
+            await click(window, at: point)
+            if settingsOpened == 0 { record("look: first synthetic click absorbed (harness limit); clicking again"); await click(window, at: point) }
+            check(settingsOpened == 1, "look: Set up opens Settings")
+        } else {
+            fail("look: the Set up line isn't on the status line")
+        }
+
+        // Slim with sharing on keeps the capsule.
+        m.slim = true
+        c.showPreview(on, workExpanded: false)
+        await settle()
+        check(axElement(c, "Screen sharing on") != nil && axElement(c, "Microphone on") != nil,
+              "look: slim mode keeps the capsule while sharing is on")
+        snap("screen-slim-on")
+        m.slim = false
+
+        // Minimum width, sharing on, the longest sharing line: nothing in the header clips.
+        m.panelWidth = Tokens.minWidth
+        c.showPreview(sharing(on, [.notice("permission")]), workExpanded: false)
+        await settle()
+        await headerFits(c, status: "Screen Recording is off · Set up", label: "min width, sharing on")
+        snap("screen-min-width")
+        m.panelWidth = Tokens.width
+
+        // The hold line: full panel, then slim, then how it ended.
+        var held = off
+        held.sharing.hold = ScreenHold(state: "waiting")
+        c.showPreview(held, workExpanded: false)
+        await settle()
+        check(axElement(c, "Waiting for your screen") != nil, "look: the hold line shows in the full panel")
+        snap("hold-full")
+        m.slim = true
+        c.showPreview(held, workExpanded: false)
+        await settle()
+        check(slimTaskSummary(held.tasks, approvalPending: held.approval != nil, holdActive: true) == slimHoldSummary,
+              "look: the slim summary carries the hold")
+        check(axElement(c, "Waiting for your screen. Show the full panel") != nil, "look: slim panel shows the hold")
+        snap("hold-slim")
+        m.slim = false
+        held.sharing.hold = ScreenHold(state: "expired")
+        c.showPreview(held, workExpanded: false)
+        await settle()
+        check(axElement(c, "Not sent: screen sharing was off") != nil, "look: the hold line ends as Not sent")
+        snap("hold-ended")
+
+        await pending(c, base: off, snap: snap)
+
+        // Tasks that carried the screen or a file: a glyph in the list, a strip in the detail.
+        var carried = off
+        if carried.tasks.count >= 2 {
+            carried.tasks[1].info.shared = [SharedItem(number: 1, kind: .screen, app: "Xcode")]
+            carried.tasks[0].info.shared = [SharedItem(number: 1, kind: .picture, name: "mockup.png"),
+                                            SharedItem(number: 2, kind: .file, name: "Q3 report final.pdf")]
+        }
+        let savedLoad = m.loadSharedImage
+        var loads = 0
+        m.loadSharedImage = { _, n in loads += 1; return PreviewFixtures.sampleDesign(variant: n) }
+        c.showPreview(carried, workExpanded: false)
+        await settle()
+        let rows = axElements(c).map(\.label)
+        check(rows.contains { $0.contains("Carried your screen") } && rows.contains { $0.contains("Carried an attachment") },
+              "look: tasks that carried the screen or a file show a glyph")
+        snap("shared-list")
+        c.showPreview(carried, workExpanded: true)
+        m.selectedTaskID = carried.tasks.first?.id
+        await settle(1.0)
+        check(loads >= 1 && axElement(c, "Sent Q3 report final.pdf") != nil, "look: the task detail shows what it carried")
+        snap("shared-detail")
+        m.selectedTaskID = nil
+        m.loadSharedImage = savedLoad
+
+        // Drops: the container takes them (the SwiftUI content registers no drag types), with a ring.
+        if let container = window.contentView as? PanelContainerView {
+            let hosted = container.subviews.first?.registeredDraggedTypes ?? []
+            record("look: drop types container=\(container.registeredDraggedTypes.count) hosting=\(hosted.count)")
+            check(container.registeredDraggedTypes.contains(.fileURL) && hosted.isEmpty,
+                  "look: drags reach the panel's drop destination")
+        }
+        c.attachmentSupport = AttachmentSupport(images: true, vision: "native")
+        c.showPreview(off, workExpanded: false)
+        m.dropTargeted = true
+        await settle()
+        snap("drop-target")
+        m.dropTargeted = false
+    }
+
+    /// Pictures and files through the real paste reader and encoder (a private pasteboard), the
+    /// pending row, its ✕, the 3-item limit, and ⌘V reaching the panel.
+    static func pending(_ c: NativeVoiceClient, base: VoiceState, snap: (String) -> Void) async {
+        let m = c.model, window = c.panel.window
+        c.attachmentSupport = AttachmentSupport(images: true, vision: "native")
+        c.showPreview(base, workExpanded: false)
+        await settle(0.4)
+        check((window as? VoicePanel)?.wantsKeysOnClick?() == true, "pending: a click during the call makes the panel key (for ⌘V)")
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("speakeasy-smoke-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let picture = folder.appendingPathComponent("mockup.png"), notes = folder.appendingPathComponent("Q3 report final.pdf")
+        try? PreviewFixtures.sampleDesign(variant: 2)?.write(to: picture)
+        try? Data("%PDF-1.4\n% smoke\n".utf8).write(to: notes)
+        let board = NSPasteboard(name: NSPasteboard.Name("speakeasy.panel-smoke.\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        board.writeObjects([picture as NSURL, notes as NSURL])
+        PanelAttachments.take(from: board, into: m, imageName: "Pasted image")
+        board.clearContents()
+        board.setData(PreviewFixtures.sampleImage(), forType: .png)
+        await settle(1.0)
+        PanelAttachments.take(from: board, into: m, imageName: "Pasted image")
+        await settle(1.2)
+        let items = m.pendingAttachments
+        record("pending: \(items.map { "\($0.kind.rawValue):\($0.name):\($0.thumbnail != nil ? "thumb" : "-")" }.joined(separator: ", "))")
+        check(items.count == 3 && items.filter { $0.kind == .picture }.count == 2 && items.contains { $0.name == "Q3 report final.pdf" },
+              "pending: a dropped picture, a file and a pasted image wait on the row")
+        check(items.filter { $0.kind == .picture }.allSatisfy { $0.thumbnail != nil }, "pending: pictures show thumbnails")
+        snap("pending")
+        m.slim = true
+        await settle(0.5)
+        snap("pending-slim")
+        m.slim = false
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+        await settle(0.4)
+        snap("pending-dark")
+        NSApp.appearance = nil
+        await settle(0.2)
+        // A web link isn't a file: taken, then refused with the short line (the row keeps its three).
+        board.clearContents()
+        board.writeObjects([URL(string: "https://example.com/report")! as NSURL])
+        PanelAttachments.take(from: board, into: m, imageName: "Pasted image")
+        await settle(0.3)
+        check(PanelAttachments.hasAttachable(board) && m.pendingAttachments.count == 3
+              && m.shareNotice?.text == "Only pictures and files", "pending: a link is refused (Only pictures and files)")
+        board.clearContents()
+        board.setData(PreviewFixtures.sampleImage(), forType: .png)
+        // A fourth is refused with a short line.
+        PanelAttachments.take(from: board, into: m, imageName: "Pasted image")
+        await settle(0.4)
+        check(m.pendingAttachments.count == 3 && m.shareNotice?.text == "Up to 3 at a time", "pending: a fourth is refused (Up to 3 at a time)")
+        // ✕ on the first picture: hover shows it, a click removes it, the row shrinks.
+        let tiles = { () -> [AXItem] in
+            guard let row = axElement(c, "3 attachments") ?? axElement(c, "2 attachments") else { return [] }
+            return axElements(c).filter { $0.label != row.label && row.frame.insetBy(dx: -1, dy: -1).contains($0.frame) }
+                .sorted { $0.frame.minX < $1.frame.minX }
+        }
+        let before = tiles()
+        let rightEdge = { tiles().map(\.frame.maxX).max() ?? 0 }
+        let edgeBefore = rightEdge()
+        record("pending: tiles \(before.map { "\($0.label)@\(Int($0.frame.width))pt" })")
+        if let first = before.first {
+            // The ✕ straddles the tile's top-right corner (screen coordinates: y grows upward).
+            let x = window.convertPoint(fromScreen: NSPoint(x: first.frame.maxX - 3, y: first.frame.maxY - 3))
+            let inside = window.convertPoint(fromScreen: NSPoint(x: first.frame.midX, y: first.frame.midY))
+            // Hover first, then the ✕. SwiftUI tracks hover from the real pointer, which a test can't
+            // move, so when the ✕ never appears the tile's Remove action (what VoiceOver offers, and
+            // the same closure the ✕ calls) stands in.
+            let host = (window.contentView as? PanelContainerView)?.subviews.first
+            host?.mouseMoved(with: hover(window, inside)); await settle(0.2)
+            await click(window, at: x)
+            if m.pendingAttachments.count == 3 {
+                let actions = (first.element.accessibilityCustomActions?() ?? nil) ?? []
+                record("pending: ✕ needs a real hover; pressing the tile's \(actions.map(\.name)) action")
+                if let remove = actions.first(where: { $0.name == "Remove" }) { _ = remove.handler?() }
+            } else {
+                record("pending: ✕ clicked")
+            }
+        }
+        await settle(0.6)
+        let edgeAfter = rightEdge()
+        record("pending: tiles \(before.count) -> \(tiles().count), row right edge \(Int(edgeBefore)) -> \(Int(edgeAfter))")
+        check(m.pendingAttachments.count == 2 && tiles().count == 2 && edgeAfter < edgeBefore - 20,
+              "pending: ✕ removes one and the row shrinks")
+        snap("pending-removed")
+        // ⌘V reaches the panel's paste action when it's key (the general pasteboard isn't read here).
+        if let panel = window as? VoicePanel {
+            let savedPaste = panel.onPaste
+            var pasted = 0
+            panel.onPaste = { pasted += 1; return true }
+            if let key = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                                          windowNumber: window.windowNumber, context: nil, characters: "v",
+                                          charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9) {
+                _ = panel.performKeyEquivalent(with: key)
+            }
+            panel.onPaste = savedPaste
+            check(pasted == 1, "pending: ⌘V goes to the panel's paste")
+        }
+        // Clean up: the call ends, nothing is kept.
+        for item in m.pendingAttachments { m.onRemoveAttachment(item.id) }
+        await settle(0.3)
+    }
+
+    /// Every control in the header sits inside the panel, and `status` fits its column in at most two
+    /// lines without truncation.
+    static func headerFits(_ c: NativeVoiceClient, status: String, label: String) async {
+        let window = c.panel.window
+        let frame = window.frame
+        let controls = axElements(c).filter { e in
+            ["Screen sharing", "Microphone", "Pause call", "Resume call", "End call", "Hide panel", "Full panel", "Slim"]
+                .contains { e.label.hasPrefix($0) }
+        }
+        let outside = controls.filter { !frame.insetBy(dx: 4, dy: 0).contains($0.frame) }
+        record("header(\(label)): panel \(Int(frame.width))pt, controls \(controls.map { "\($0.label.prefix(14))@\(Int($0.frame.minX - frame.minX))" })")
+        check(controls.count >= 5 && outside.isEmpty, "header(\(label)): every control is inside the panel")
+        guard let line = axElement(c, status) else { fail("header(\(label)): status line not found"); return }
+        // The status button's own width, chevron included, as the header lays it out.
+        func height(_ text: String, width: CGFloat) -> CGFloat {
+            NSHostingView(rootView: StatusText(text: text, tone: .warning, clickable: true, wraps: true)
+                .frame(width: width, alignment: .leading)).fittingSize.height
+        }
+        let whole = height(status, width: line.frame.width), one = height("Go", width: line.frame.width)
+        record("header(\(label)): status column \(Int(line.frame.width))pt needs \(Int(whole))pt (one line \(Int(one))pt)")
+        check(whole <= one * 2 + 1, "header(\(label)): status fits in two lines")
+    }
+
+    // MARK: Accessibility lookups (where SwiftUI controls actually are)
+
+    struct AXItem { let label: String; let frame: NSRect; let element: AnyObject }
+
+    /// Every labelled accessibility element in the panel, with its screen frame.
+    static func axElements(_ c: NativeVoiceClient) -> [AXItem] {
+        guard let root = c.panel.window.contentView else { return [] }
+        var found: [AXItem] = []
+        func walk(_ object: Any, depth: Int) {
+            guard depth < 60, let element = object as? NSAccessibilityElementProtocol & NSObject else { return }
+            let ax = element as AnyObject
+            if let label = ax.accessibilityLabel?() ?? nil, !label.isEmpty {
+                found.append(AXItem(label: label, frame: element.accessibilityFrame(), element: ax))
+            }
+            for child in (ax.accessibilityChildren?() ?? nil) ?? [] { walk(child, depth: depth + 1) }
+        }
+        walk(root, depth: 0)
+        return found
+    }
+
+    static func setEnhancedAccessibility(_ on: Bool) {
+        // The old attribute setter, by selector (it's deprecated as API, and still what clients send).
+        _ = NSApp.perform(NSSelectorFromString("accessibilitySetValue:forAttribute:"), with: NSNumber(value: on),
+                          with: "AXEnhancedUserInterface")
+    }
+
+    static func axElement(_ c: NativeVoiceClient, _ prefix: String) -> AXItem? {
+        axElements(c).first { $0.label.hasPrefix(prefix) }
     }
 
     // MARK: Event helpers

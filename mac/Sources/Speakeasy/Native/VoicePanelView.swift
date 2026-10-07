@@ -2,12 +2,15 @@ import AppKit
 import SwiftUI
 import SpeakeasyCore
 import SpeakeasyClient
+import UniformTypeIdentifiers
 
 // MARK: - Tokens
 
 enum Tokens {
     static let width: CGFloat = 400
-    static let minWidth: CGFloat = 340
+    /// Narrowest panel: the header's controls (with the screen half beside the mic) still leave the
+    /// status line room for "Screen Recording is off · Set up" in two lines (PanelSmoke checks it).
+    static let minWidth: CGFloat = 390
     static let maxWidth: CGFloat = 760
     static let maxExtraHeight: CGFloat = 700
     static let radius: CGFloat = 18
@@ -23,6 +26,8 @@ enum Tokens {
     static let amberInk = Color(red: 0.23, green: 0.15, blue: 0.02)
     static let red = Color(red: 0.93, green: 0.36, blue: 0.36)
     static let green = Color(red: 0.45, green: 0.82, blue: 0.56)
+    /// Screen sharing: the purple macOS uses for its screen-recording indicator.
+    static let screen = Color(nsColor: .systemPurple)
 }
 
 struct VisualEffectBackground: NSViewRepresentable {
@@ -151,10 +156,69 @@ struct StatusText: View {
 
 // MARK: - Buttons
 
+/// Which part of the header's 30 pt media capsule a control fills: all of it (a circle, when the
+/// call can't share its screen), or its leading (screen) or trailing (mic) half.
+enum CapsulePart { case whole, leading, trailing }
+
+/// A capsule control's fill and hairline, cut to its part of the capsule, so the screen and mic
+/// halves each keep their own state tint inside one shape.
+struct CapsulePartBackground: View {
+    var part: CapsulePart
+    var fill: Color
+    var stroke: Color
+
+    var body: some View {
+        switch part {
+        case .whole:
+            ZStack {
+                Capsule().fill(fill)
+                Capsule().strokeBorder(stroke, lineWidth: 0.75)
+            }
+        case .leading, .trailing:
+            ZStack {
+                CapsuleEnd(leading: part == .leading).fill(fill)
+                CapsuleEnd(leading: part == .leading, closed: false).strokeBorder(stroke, lineWidth: 0.75)
+            }
+        }
+    }
+}
+
+/// One end of a capsule as tall as its frame: a round end, with straight edges running to the
+/// capsule's middle. Unclosed, the hairline leaves that middle edge open so two halves read as one shape.
+struct CapsuleEnd: InsettableShape {
+    var leading: Bool
+    var closed = true
+    var inset: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        let top = rect.minY + inset, bottom = rect.maxY - inset
+        let radius = max(0, rect.height / 2 - inset)
+        let end = leading ? rect.minX + inset : rect.maxX - inset      // the round end's outer edge
+        let middle = leading ? rect.maxX : rect.minX                   // where the other half starts
+        let center = leading ? end + radius : end - radius
+        var path = Path()
+        path.move(to: CGPoint(x: middle, y: top))
+        path.addLine(to: CGPoint(x: center, y: top))
+        path.addArc(tangent1End: CGPoint(x: end, y: top), tangent2End: CGPoint(x: end, y: rect.midY), radius: radius)
+        path.addArc(tangent1End: CGPoint(x: end, y: bottom), tangent2End: CGPoint(x: center, y: bottom), radius: radius)
+        path.addLine(to: CGPoint(x: middle, y: bottom))
+        if closed { path.closeSubpath() }
+        return path
+    }
+
+    func inset(by amount: CGFloat) -> CapsuleEnd {
+        var shape = self
+        shape.inset += amount
+        return shape
+    }
+}
+
 struct MicButton: View {
     var muted: Bool
     var enabled: Bool
     var shortcutHint: String = ""
+    /// The mic's part of the header capsule: the right half beside the screen button, else all of it.
+    var part: CapsulePart = .whole
     var action: () -> Void
     @State private var hover = false
     var body: some View {
@@ -163,11 +227,11 @@ struct MicButton: View {
             Image(systemName: muted ? "mic.slash.fill" : "mic.fill").font(.system(size: 12.5, weight: .semibold))
                 .frame(width: 30, height: 30)
                 .foregroundStyle(muted ? Color.primary.opacity(0.45) : Tokens.green)
-                .background(Circle().fill(muted ? Color.primary.opacity(hover ? 0.1 : 0.05)
-                                                : Tokens.green.opacity(hover ? 0.2 : 0.13)))
-                .overlay(Circle().strokeBorder(muted ? Color.primary.opacity(0.08) : Tokens.green.opacity(0.45),
-                                               lineWidth: 0.75))
-                .contentShape(Circle())
+                .background(CapsulePartBackground(part: part,
+                                                  fill: muted ? Color.primary.opacity(hover ? 0.1 : 0.05)
+                                                              : Tokens.green.opacity(hover ? 0.2 : 0.13),
+                                                  stroke: muted ? Color.primary.opacity(0.08) : Tokens.green.opacity(0.45)))
+                .contentShape(part == .whole ? AnyShape(Circle()) : AnyShape(Rectangle()))
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -177,6 +241,109 @@ struct MicButton: View {
               + (shortcutHint.isEmpty ? "" : "\n" + shortcutHint))
         .accessibilityLabel(muted ? "Microphone muted" : "Microphone on")
         .accessibilityHint(muted ? "Unmute" : "Mute; the call remains open")
+    }
+}
+
+/// The screen half of the header capsule. Off: `eye`, dimmed like a muted mic. On: `eye.fill` in the
+/// screen-recording purple with the live mic's soft tint. Screen Recording missing: a tiny amber
+/// badge (pressing shows the Set up line). One gentle ring when a request needs the screen; none
+/// with Reduce Motion.
+struct ScreenShareButton: View {
+    var state: ScreenButton
+    var shortcutHint: String = ""
+    /// Grows each time the button should be noticed (`screen.hint`); each change rings once.
+    var pulse: Int = 0
+    var part: CapsulePart = .leading
+    var action: () -> Void
+    @State private var hover = false
+    /// Rings shown so far: bumped only when `pulse` grows (a new call resetting it never rings).
+    @State private var rings = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private enum Ring: CaseIterable { case rest, lit, gone }
+
+    var body: some View {
+        let on = state == .on
+        Button(action: action) {
+            Image(systemName: on ? "eye.fill" : "eye").font(.system(size: 12, weight: .semibold))
+                .frame(width: 30, height: 30)
+                .foregroundStyle(on ? Tokens.screen : Color.primary.opacity(0.45))
+                .overlay(alignment: .topTrailing) {
+                    if state == .needsPermission {
+                        Circle().fill(Tokens.amber).frame(width: 5, height: 5).offset(x: -5, y: 7)
+                    }
+                }
+                .background(CapsulePartBackground(part: part,
+                                                  fill: on ? Tokens.screen.opacity(hover ? 0.2 : 0.13)
+                                                           : Color.primary.opacity(hover ? 0.1 : 0.05),
+                                                  stroke: on ? Tokens.screen.opacity(0.45) : Color.primary.opacity(0.08)))
+                .contentShape(part == .whole ? AnyShape(Circle()) : AnyShape(Rectangle()))
+        }
+        .buttonStyle(.plain)
+        .overlay {
+            Circle().strokeBorder(Tokens.screen, lineWidth: 1.25)
+                .frame(width: 30, height: 30)
+                .phaseAnimator(Ring.allCases, trigger: rings) { ring, phase in
+                    ring.scaleEffect(phase == .gone ? 1.5 : 1).opacity(phase == .lit ? 0.6 : 0)
+                } animation: { phase in
+                    switch phase {
+                    case .rest: return nil
+                    case .lit: return .easeOut(duration: 0.12)
+                    case .gone: return .easeOut(duration: 0.9)
+                    }
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .onChange(of: pulse) { old, new in
+            if new > old && !reduceMotion { rings += 1 }
+        }
+        .onHover { hover = $0 }
+        .help(help + (shortcutHint.isEmpty ? "" : "\n" + shortcutHint))
+        .accessibilityLabel(label)
+        .accessibilityHint(hint)
+    }
+
+    private var help: String {
+        switch state {
+        case .on: return "Stop sharing your screen."
+        case .needsPermission: return "Share your screen. Screen Recording is off for Speakeasy; allow it in Settings."
+        default: return "Share your screen: new requests carry a picture of the window you're in."
+        }
+    }
+    private var label: String {
+        switch state {
+        case .on: return "Screen sharing on"
+        case .needsPermission: return "Screen sharing needs Screen Recording"
+        default: return "Screen sharing off"
+        }
+    }
+    private var hint: String {
+        switch state {
+        case .on: return "Stop sharing your screen"
+        case .needsPermission: return "Shows how to allow Screen Recording"
+        default: return "Share your screen with new requests"
+        }
+    }
+}
+
+/// Screen and mic in one 30 pt capsule, so sharing costs the header one icon width. The screen half
+/// shows only when this call can share; the mic alone is the familiar circle.
+struct MediaCapsule: View {
+    @ObservedObject var model: VoicePanelModel
+    var presentation: PillPresentation
+
+    var body: some View {
+        let screen = model.screenState
+        HStack(spacing: 0) {
+            if screen != .unavailable {
+                ScreenShareButton(state: screen, shortcutHint: model.screenShortcutHint, pulse: model.screenHintPulse,
+                                  action: model.onToggleScreen)
+            }
+            MicButton(muted: presentation.micMuted, enabled: presentation.micEnabled, shortcutHint: model.muteShortcutHint,
+                      part: screen == .unavailable ? .whole : .trailing, action: model.onToggleMic)
+        }
+        .fixedSize()
     }
 }
 
@@ -316,18 +483,28 @@ struct VoicePanelView: View {
 
     var body: some View {
         let p = model.presentation
+        let pending = model.pendingAttachments
+        let holding = model.hold?.isWaiting == true
         VStack(alignment: .leading, spacing: 0) {
             if !model.state.workOnly { header(p) }
+            // Pictures and files waiting for the next request: under the header in every layout.
+            if !model.state.workOnly && !pending.isEmpty {
+                PendingAttachmentsRow(items: pending, onRemove: model.onRemoveAttachment)
+                    .padding(.horizontal, 14).padding(.bottom, 8)
+                    .transition(.opacity)
+            }
             if model.tourActive && model.state.connection.isOpen && !model.state.workOnly {
                 TourStrip(action: model.onSkipTour)
             }
             if model.showsSlim {
                 // Slim: header only. A task summary stands in for the list; clicking it
                 // (or the status line, or the expand button) brings the full panel back.
-                if let summary = slimTaskSummary(model.state.tasks, approvalPending: model.state.approval != nil) {
+                if let summary = slimTaskSummary(model.state.tasks, approvalPending: model.state.approval != nil,
+                                                 holdActive: holding) {
                     Button { model.onToggleSlim() } label: {
                         HStack(spacing: 6) {
-                            Image(systemName: "list.bullet")
+                            Image(systemName: holding ? "eye" : "list.bullet")
+                                .foregroundStyle(holding ? AnyShapeStyle(Tokens.screen) : AnyShapeStyle(.secondary))
                             Text(summary).lineLimit(1)
                             Spacer(minLength: 0)
                             Image(systemName: "chevron.down")
@@ -355,6 +532,12 @@ struct VoicePanelView: View {
                     }
                     .padding(.horizontal, 14).padding(.bottom, 4)
                     .transition(.opacity)
+                }
+                // A request waiting for the screen, then how that ended.
+                if let line = model.holdText {
+                    HoldRow(text: line, waiting: holding, shortcutHint: model.screenShortcutHint)
+                        .padding(.horizontal, 12).padding(.bottom, model.showsTaskList ? 6 : 10)
+                        .transition(.opacity)
                 }
                 if model.showsTaskList {
                     TaskListView(model: model, compact: true)
@@ -431,6 +614,11 @@ struct VoicePanelView: View {
         .clipShape(RoundedRectangle(cornerRadius: Tokens.radius, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: Tokens.radius, style: .continuous)
             .strokeBorder(Color.primary.opacity(scheme == .dark ? 0.16 : 0.12), lineWidth: 0.5))
+        // A picture or file dragged over the panel during a call: a thin accent ring says it's taken.
+        .overlay(RoundedRectangle(cornerRadius: Tokens.radius, style: .continuous)
+            .strokeBorder(Tokens.brass, lineWidth: 1.5)
+            .opacity(model.dropTargeted ? 1 : 0)
+            .allowsHitTesting(false))
         .overlay(alignment: .bottomTrailing) { CornerGrip().padding(5).allowsHitTesting(false) }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.workExpanded)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.captionExpanded)
@@ -438,10 +626,16 @@ struct VoicePanelView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.state.tasks.count)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.pinnedReviews.map(\.id))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.slim)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: pending.map(\.id))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.holdText)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: model.dropTargeted)
     }
 
     private func header(_ p: PillPresentation) -> some View {
-        HStack(spacing: 8) {
+        // "Screen Recording is off · Set up" on the status line: tapping it opens Settings › General › Screen.
+        let setUp = model.shareNotice.map { $0.action == .openScreenSettings && $0.text == model.shownStatus } ?? false
+        let statusTaps = setUp || p.statusClickable || model.showsSlim
+        return HStack(spacing: 8) {
             AssistantMark(mark: p.mark, level: model.orbLevel)
                 .padding(.trailing, 2)
             VStack(alignment: .leading, spacing: 2) {
@@ -449,8 +643,11 @@ struct VoicePanelView: View {
                     .minimumScaleFactor(0.85)
                     .help(p.primary)
                     .contentTransition(.opacity)
-                Button(action: { if p.statusClickable || model.showsSlim { model.onToggleWork() } }) {
-                    StatusText(text: model.shownStatus, tone: model.shownTone, clickable: p.statusClickable || model.showsSlim,
+                Button(action: {
+                    if setUp { model.onOpenScreenSettings() }
+                    else if p.statusClickable || model.showsSlim { model.onToggleWork() }
+                }) {
+                    StatusText(text: model.shownStatus, tone: model.shownTone, clickable: statusTaps,
                                maxLines: 2)
                         .id(model.shownStatus)
                         .transition(.opacity)
@@ -458,10 +655,12 @@ struct VoicePanelView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(!(p.statusClickable || model.showsSlim))
-                .help(p.statusClickable || model.showsSlim ? "\(model.shownStatus)\nShow tasks" : model.shownStatus)
+                .disabled(!statusTaps)
+                .help(setUp ? "Open Settings to allow Screen Recording"
+                      : (p.statusClickable || model.showsSlim ? "\(model.shownStatus)\nShow tasks" : model.shownStatus))
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: model.shownStatus)
                 .accessibilityLabel(model.shownStatus)
+                .accessibilityHint(setUp ? "Opens Speakeasy Settings to allow Screen Recording" : "")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
@@ -471,9 +670,9 @@ struct VoicePanelView: View {
                             action: model.onTogglePause)
                     .fixedSize()
             }
+            // Screen and mic share one capsule; both hide while paused (nothing listens or looks).
             if model.state.connection != .paused {
-                MicButton(muted: p.micMuted, enabled: p.micEnabled, shortcutHint: model.muteShortcutHint, action: model.onToggleMic)
-                    .fixedSize()
+                MediaCapsule(model: model, presentation: p)
             }
             if !model.state.workOnly && model.state.connection.isOpen {
                 IconButton(symbol: model.slim ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left",
@@ -752,9 +951,16 @@ struct TaskRow: View {
         HStack(alignment: .center, spacing: 8) {
             icon
             VStack(alignment: .leading, spacing: 1) {
-                Text(task.name).font(.system(size: 11.5, weight: .medium))
-                    .lineLimit(compact ? 1 : 2).truncationMode(.tail)
-                    .foregroundStyle(.primary.opacity(0.9))
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(task.name).font(.system(size: 11.5, weight: .medium))
+                        .lineLimit(compact ? 1 : 2).truncationMode(.tail)
+                        .foregroundStyle(.primary.opacity(0.9))
+                    // It carried your screen (eye) or a picture or file (paperclip).
+                    if let glyph = sharedGlyph {
+                        Image(systemName: glyph).font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
+                            .accessibilityLabel(glyph == "eye" ? "Carried your screen" : "Carried an attachment")
+                    }
+                }
                 StatusText(text: status, tone: tone, clickable: false, maxLines: 3)
                     .help(status)
             }
@@ -812,6 +1018,208 @@ struct TaskRow: View {
         }()
         Image(systemName: symbol).font(.system(size: 13, weight: .semibold)).foregroundStyle(color)
             .frame(width: 16)
+    }
+
+    private var sharedGlyph: String? {
+        let shared = task.info.shared
+        if shared.isEmpty { return nil }
+        return shared.contains { $0.kind == .screen } ? "eye" : "paperclip"
+    }
+}
+
+// MARK: - Look at this: pending pictures and files, the hold line, what a task carried
+
+/// A 36 pt picture thumbnail or a file chip (its icon and name): the pending row under the header,
+/// and the strip of what a task carried in its detail.
+struct AttachmentTile: View {
+    enum Content {
+        case picture(CGImage?)
+        case file(String)
+    }
+    var content: Content
+    static let side: CGFloat = 36
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        switch content {
+        case .picture(let image):
+            ZStack {
+                Color.primary.opacity(0.07)
+                if let image {
+                    Image(decorative: image, scale: 1).resizable().interpolation(.high).scaledToFill()
+                } else {
+                    Image(systemName: "photo").font(.system(size: 12)).foregroundStyle(.tertiary)
+                }
+            }
+            .frame(width: Self.side, height: Self.side)
+            .clipShape(shape)
+            .overlay(shape.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5))
+        case .file(let name):
+            // Hugs its name (long ones shortened in the middle, keeping the extension); a crowded
+            // row still truncates it further.
+            HStack(spacing: 6) {
+                Image(nsImage: Self.icon(for: name)).resizable().interpolation(.high).frame(width: 18, height: 18)
+                Text(Self.shortName(name)).font(.system(size: 11, weight: .medium)).foregroundStyle(.primary.opacity(0.85))
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            .padding(.horizontal, 9)
+            .frame(height: Self.side)
+            .background(shape.fill(Color.primary.opacity(0.07)))
+            .overlay(shape.strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+        }
+    }
+
+    /// At most `limit` characters, the middle replaced with "…" and the extension kept.
+    static func shortName(_ name: String, limit: Int = 22) -> String {
+        guard name.count > limit else { return name }
+        let ext = (name as NSString).pathExtension
+        let tail = ext.isEmpty ? 6 : min(ext.count + 5, limit / 2)
+        return String(name.prefix(limit - tail - 1)) + "…" + String(name.suffix(tail))
+    }
+
+    /// The system's icon for the file's type (by its extension; never reads the file).
+    static func icon(for name: String) -> NSImage {
+        let ext = (name as NSString).pathExtension
+        return NSWorkspace.shared.icon(for: UTType(filenameExtension: ext) ?? .data)
+    }
+}
+
+/// Pictures and files waiting to go with the next request, in drop order. No caption: each tile's
+/// tooltip says where it goes, and its ✕ (on hover) takes it back.
+struct PendingAttachmentsRow: View {
+    var items: [PendingAttachmentItem]
+    var onRemove: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(items) { item in
+                PendingAttachmentTile(item: item, onRemove: { onRemove(item.id) })
+                    .transition(.opacity)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(items.count == 1 ? "1 attachment for your next request"
+                                             : "\(items.count) attachments for your next request")
+    }
+}
+
+struct PendingAttachmentTile: View {
+    var item: PendingAttachmentItem
+    var onRemove: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        // On its way to the plugin, or already claimed by a request: shown a little faded.
+        let settling = item.phase == .uploading || item.phase == .sending
+        AttachmentTile(content: item.kind == .picture ? .picture(item.thumbnail) : .file(item.name))
+            .opacity(settling ? 0.55 : 1)
+            .overlay(alignment: .topTrailing) {
+                RemoveTileButton(name: item.kind == .picture ? "picture" : item.name, action: onRemove)
+                    .offset(x: 5, y: -5)
+                    .opacity(hover ? 1 : 0)
+            }
+            .contentShape(Rectangle())
+            .onHover { hover = $0 }
+            .help(item.kind == .file ? "\(item.name)\nGoes with your next request" : "Goes with your next request")
+            // The ✕ only appears on hover, so VoiceOver gets Remove as an action on the tile itself.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(item.kind == .picture ? "Picture" : item.name)
+            .accessibilityHint("Goes with your next request")
+            .accessibilityAction(named: "Remove") { onRemove() }
+    }
+}
+
+/// The ✕ on a pending tile.
+struct RemoveTileButton: View {
+    var name: String
+    var action: () -> Void
+    @State private var hover = false
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark").font(.system(size: 7, weight: .bold))
+                .foregroundStyle(hover ? .primary : .secondary)
+                .frame(width: 16, height: 16)
+                .background(Circle().fill(scheme == .dark ? Color(white: 0.24) : Color.white))
+                .overlay(Circle().strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help("Don't send this")
+        .accessibilityLabel("Remove \(name)")
+        .accessibilityHint("It won't go with your next request")
+    }
+}
+
+/// "Waiting for your screen" while a request waits for sharing to come on, then how it ended
+/// ("Not sent: screen sharing was off"). The task-row style, one line.
+struct HoldRow: View {
+    var text: String
+    var waiting: Bool
+    var shortcutHint: String = ""
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: waiting ? "eye" : "eye.slash").font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(waiting ? AnyShapeStyle(Tokens.screen) : AnyShapeStyle(.secondary))
+                .frame(width: 16)
+            StatusText(text: text, tone: waiting ? .glimmer : .plain, clickable: false)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(0.05)))
+        .help(waiting ? "Turn on screen sharing to send it" + (shortcutHint.isEmpty ? "" : "\n" + shortcutHint) : text)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
+    }
+}
+
+/// What a task carried to Hermes, in its detail: screen captures and pictures as thumbnails (click
+/// for full size), files as chips.
+struct SharedStrip: View {
+    let runID: String
+    let items: [SharedItem]
+    var load: (String, Int) async -> Data?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(items) { item in
+                if item.isImage {
+                    SharedThumbnail(runID: runID, item: item, load: load)
+                } else {
+                    AttachmentTile(content: .file(item.label))
+                        .help(item.label)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Sent \(item.label)")
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+struct SharedThumbnail: View {
+    let runID: String
+    let item: SharedItem
+    var load: (String, Int) async -> Data?
+    @State private var image: NSImage?
+
+    var body: some View {
+        Button {
+            if let image { ImagePreviewWindow.shared.show(image, title: item.label) }
+        } label: {
+            AttachmentTile(content: .picture(image?.cgImage(forProposedRect: nil, context: nil, hints: nil)))
+        }
+        .buttonStyle(.plain)
+        .disabled(image == nil)
+        .help(image == nil ? item.label : "\(item.label). Open full size")
+        .accessibilityLabel("Sent \(item.label)")
+        .task(id: "\(runID)/\(item.number)") {
+            if let data = await load(runID, item.number), let loaded = NSImage(data: data) { image = loaded }
+        }
     }
 }
 
@@ -913,8 +1321,14 @@ struct WorkDetailView: View {
                     }
                     if let request = info?.askedFor {
                         section("Your request") {
-                            Text(request).font(.system(size: 12)).textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(request).font(.system(size: 12)).textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                // The screen, pictures and files that went with it.
+                                if let shared = info?.shared, !shared.isEmpty, let runID = info?.runID {
+                                    SharedStrip(runID: runID, items: shared, load: model.loadSharedImage)
+                                }
+                            }
                         }
                     } else if info != nil {
                         section("Your request") {
