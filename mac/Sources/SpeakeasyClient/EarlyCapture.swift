@@ -28,6 +28,11 @@ public final class EarlyCapture {
 
     /// Called on the main actor with the words so far (they grow and get corrected as you speak).
     public var onPartial: ((String) -> Void)?
+    /// Called once on the main actor when the mic delivers real sound (not digital silence). Until
+    /// then nothing is being heard, so the app must not say "Listening".
+    public var onSignal: (() -> Void)?
+    public private(set) var hasSignal = false
+    private let signalFlag = SignalFlag()
 
     public init() {}
 
@@ -155,8 +160,22 @@ public final class EarlyCapture {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { return false }
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+        let flag = signalFlag
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             request.append(buffer)
+            // A live mic always has a noise floor; an input that isn't really ours reads exact zeros.
+            if !flag.isSet, let data = buffer.floatChannelData, buffer.frameLength > 0 {
+                let samples = data[0]
+                var heard = false
+                for i in 0..<Int(buffer.frameLength) where samples[i] != 0 { heard = true; break }
+                if heard, flag.set() {
+                    Task { @MainActor [weak self] in
+                        guard let self, !self.hasSignal else { return }
+                        self.hasSignal = true
+                        self.onSignal?()
+                    }
+                }
+            }
         }
         engine.prepare()
         do {
@@ -187,4 +206,13 @@ public final class EarlyCapture {
         waiters.removeAll()
         pending.forEach { $0.resume() }
     }
+}
+
+/// Set once from the audio thread, read anywhere.
+final class SignalFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    /// True the first time only.
+    func set() -> Bool { lock.lock(); defer { lock.unlock() }; if value { return false }; value = true; return true }
 }

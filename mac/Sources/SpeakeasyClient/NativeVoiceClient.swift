@@ -101,6 +101,12 @@ public final class NativeVoiceClient: VoiceCallClient {
     private var skipEarlyCapture = false
     /// Whether this connection started with the on-device listener (for the repair report).
     private var connectionUsedEarlyCapture = false
+    /// Where the current connection attempt is (for the stall report).
+    private var connectStage = "starting"
+    private var connectWatchdog: DispatchWorkItem?
+    private var connectAttempts = 0
+    /// A call that hasn't gone live by then is stuck; retry once, then say so.
+    static let connectStallAfter: TimeInterval = 12
     /// iPhone: the call has no mic because the app isn't in front (an Action Button / Siri start
     /// that landed in the background, or iOS took the input away). Reconnecting from the
     /// background can't fix that, since iOS hands the mic only to the app in front; it's fixed
@@ -177,6 +183,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         let before = model.state
         let after = reduce(before, event, now: Date())
         model.state = after
+        if after.connection != .connecting, connectWatchdog != nil { connectWatchdog?.cancel(); connectWatchdog = nil }
         applySideEffects(from: before, to: after)
         watchMic(event, from: before, to: after)
     }
@@ -246,6 +253,35 @@ public final class NativeVoiceClient: VoiceCallClient {
         reportMic("repair \(micCheck.repairs): \(fault.rawValue) (\(detail))")
         reconnectAfterPause = true
         pause()
+    }
+
+    private func armConnectWatchdog(_ api: ServerClient) {
+        connectWatchdog?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in self?.connectStalled(api) }
+        }
+        connectWatchdog = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectStallAfter, execute: item)
+    }
+
+    /// Still "connecting" long after it should be live. Before, it sat there showing "Listening"
+    /// with nothing reaching the call. Now: retry once without the listener, then fail visibly.
+    private func connectStalled(_ api: ServerClient) {
+        guard model.state.connection == .connecting else { return }
+        let stage = connectStage
+        reportMic("connect stalled (attempt \(connectAttempts)) at: \(stage); \(micReportDetail())")
+        stopEarlyCapture()
+        startTask?.cancel(); startTask = nil
+        streamTask?.cancel(); streamTask = nil
+        engine?.close(); engine = nil
+        if connectAttempts < 2 {
+            skipEarlyCapture = true
+            onStatus?("Reconnecting…")
+            connect(api)
+        } else {
+            connectWatchdog?.cancel(); connectWatchdog = nil
+            dispatch(.failed("Couldn't connect to \(model.state.assistantName). Tap to try again."))
+        }
     }
 
     /// The app is in front again: reopen the voice connection, which now gets the mic.
@@ -392,6 +428,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         codexStopRequested = false
         appliedMic = nil; appliedRemote = nil
         micCheck = NativeVoiceClient.freshMicCheck(); micRepairPending = false; skipEarlyCapture = false
+        connectAttempts = 0
         stopWaitingForApp()
         dwell = StatusDwell(minimumDwell: 1.5)
         model.workExpanded = false
@@ -434,6 +471,9 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func connect(_ api: ServerClient) {
+        connectStage = "starting"
+        connectAttempts += 1
+        armConnectWatchdog(api)
         if skipEarlyCapture { stopEarlyCapture() } else { startEarlyCapture() }
         connectionUsedEarlyCapture = earlyCapture != nil
         let engine = NativeCallEngine()
@@ -450,6 +490,7 @@ public final class NativeVoiceClient: VoiceCallClient {
             }
         }
         engine.onChannelClosed = { [weak self] in self?.channelClosed() }
+        engine.onChannelOpen = { [weak self] in self?.connectStage = "channel open; waiting for the call to start" }
         engine.onAudioFormatChanged = { [weak self] in self?.audioDevicesChanged() }
         engine.onConnectionFailed = { [weak self] in
             guard let self, self.model.state.connection == .live || self.model.state.connection == .connecting else { return }
@@ -461,7 +502,9 @@ public final class NativeVoiceClient: VoiceCallClient {
                 try engine.prepare(captureAudio: true)
                 // Honour a mute chosen before/while connecting (start-muted or hotkey).
                 engine.setMicEnabled(self?.model.state.localAudioEnabled ?? false)
+                self?.connectStage = "creating offer"
                 let sdp = try await engine.createOffer()
+                self?.connectStage = "waiting for the server"
                 guard let self, self.engine === engine, self.model.state.connection == .connecting else { engine.close(); return }
                 let tour = self.model.state.resumeFrom == nil ? self.pendingTour : nil
                 let admission = try await api.admitSession(sdp: sdp, idempotencyKey: UUID().uuidString,
@@ -475,12 +518,14 @@ public final class NativeVoiceClient: VoiceCallClient {
                 self.voiceProvider = admission.voiceProvider
                 self.codexStopRequested = false
                 self.dispatch(.sessionAdmitted(interactionID: admission.interactionID))
+                self.connectStage = "admitted; connecting audio"
                 let early = self.earlyCapture
                 if early != nil { engine.setMicEnabled(false) }
                 try await engine.setRemoteAnswer(admission.answerSDP)
                 self.appliedMic = nil; self.appliedRemote = nil
                 self.dispatch(.tick)
                 self.startServerEvents(api, interactionID: admission.interactionID)
+                self.connectStage = "answer applied; waiting for the call to start"
                 if let early {
                     // Mid-sentence? Let the listener hear you out before the call takes the mic.
                     await early.waitForPause()
@@ -598,6 +643,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         pollTask?.cancel(); pollTask = nil
         appliedMic = nil; appliedRemote = nil
         dispatch(.resumeRequested)
+        connectAttempts = 0
         surface.show()
         startTicker()
         startLevelMeter()
@@ -697,9 +743,23 @@ public final class NativeVoiceClient: VoiceCallClient {
         guard listenWhileConnecting, model.state.localAudioEnabled, !previewMode else { return }
         let capture = EarlyCapture()
         capture.onPartial = { [weak self] text in self?.dispatch(.earlyHeard(text)) }
-        guard capture.start() else { return }
+        capture.onSignal = { [weak self, weak capture] in
+            guard let self, let capture, self.earlyCapture === capture else { return }
+            self.connectStage = "listener hearing"
+            self.dispatch(.earlyListening(true))
+        }
+        guard capture.start() else { connectStage = "listener couldn't start"; return }
         earlyCapture = capture
-        dispatch(.earlyListening(true))
+        connectStage = "listener started"
+        // No sound within 1.5 s (iOS hadn't given us the mic yet, e.g. right after an Action Button
+        // launch): drop the listener and let the call take the mic itself. Never show "Listening"
+        // for a mic that hears nothing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak capture] in
+            guard let self, let capture, self.earlyCapture === capture, !capture.hasSignal else { return }
+            self.connectStage = "listener heard no sound; call takes the mic"
+            self.stopEarlyCapture()
+            self.engine?.setMicEnabled(self.model.state.localAudioEnabled)
+        }
     }
 
     private func stopEarlyCapture() {
