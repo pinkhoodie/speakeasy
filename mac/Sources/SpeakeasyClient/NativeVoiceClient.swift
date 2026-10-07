@@ -4,6 +4,9 @@ import AppKit
 import AVFoundation
 import Foundation
 import SpeakeasyCore
+#if os(iOS)
+import UIKit
+#endif
 
 /// The call surface the app delegate drives.
 @MainActor
@@ -98,6 +101,12 @@ public final class NativeVoiceClient: VoiceCallClient {
     private var skipEarlyCapture = false
     /// Whether this connection started with the on-device listener (for the repair report).
     private var connectionUsedEarlyCapture = false
+    /// iPhone: the call has no mic because the app isn't in front (an Action Button / Siri start
+    /// that landed in the background, or iOS took the input away). Reconnecting from the
+    /// background can't fix that, since iOS hands the mic only to the app in front; it's fixed
+    /// the moment the app is opened instead.
+    private var waitingForApp = false
+    private var activeObserver: NSObjectProtocol?
 
     private static func freshMicCheck() -> MicCheck {
         #if os(iOS) || os(visionOS)
@@ -198,7 +207,7 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func checkMic() {
-        guard let engine, model.state.connection == .live else { return }
+        guard let engine, model.state.connection == .live, !waitingForApp else { return }
         let state = model.state
         var speaking = false
         if case .speaking = state.speech { speaking = true }
@@ -216,6 +225,20 @@ public final class NativeVoiceClient: VoiceCallClient {
     private func repairMic(_ fault: MicFault) {
         guard model.state.canPause, !micRepairPending, !reconnectAfterPause else { return }
         let detail = micReportDetail()
+        #if os(iOS)
+        if AVAudioSession.sharedInstance().currentRoute.inputs.isEmpty,
+           UIApplication.shared.applicationState != .active {
+            waitingForApp = true
+            dispatch(.micHealth(.broken))
+            onError?("Open Speakeasy to turn the mic on")
+            reportMic("no mic while the app is in the background (\(detail)); reopening when the app is opened")
+            activeObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.appOpenedForMic() }
+            }
+            return
+        }
+        #endif
         micCheck.repairStarted()
         micRepairPending = true
         skipEarlyCapture = true
@@ -223,6 +246,25 @@ public final class NativeVoiceClient: VoiceCallClient {
         reportMic("repair \(micCheck.repairs): \(fault.rawValue) (\(detail))")
         reconnectAfterPause = true
         pause()
+    }
+
+    /// The app is in front again: reopen the voice connection, which now gets the mic.
+    private func appOpenedForMic() {
+        guard waitingForApp else { return }
+        stopWaitingForApp()
+        guard model.state.canPause, !reconnectAfterPause else { return }
+        micRepairPending = true
+        skipEarlyCapture = true
+        dispatch(.micHealth(.repairing))
+        reportMic("app opened; reopening the voice connection for the mic")
+        reconnectAfterPause = true
+        pause()
+    }
+
+    private func stopWaitingForApp() {
+        waitingForApp = false
+        if let activeObserver { NotificationCenter.default.removeObserver(activeObserver) }
+        activeObserver = nil
     }
 
     /// What the check saw, so a repair in the log says why (no audio content, just numbers).
@@ -350,6 +392,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         codexStopRequested = false
         appliedMic = nil; appliedRemote = nil
         micCheck = NativeVoiceClient.freshMicCheck(); micRepairPending = false; skipEarlyCapture = false
+        stopWaitingForApp()
         dwell = StatusDwell(minimumDwell: 1.5)
         model.workExpanded = false
         model.captionExpanded = false
