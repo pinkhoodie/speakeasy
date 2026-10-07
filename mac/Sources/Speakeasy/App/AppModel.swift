@@ -88,6 +88,12 @@ final class AppModel: ObservableObject {
     @Published var callShortcut: KeyShortcut = Prefs.callShortcut
     @Published var callShortcutProblem: String?
     @Published var micAuthorization: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    /// Screen Recording is allowed for Speakeasy (checked without prompting; refreshed with the status).
+    /// A grant only takes effect after a relaunch.
+    @Published var screenRecordingAllowed = false
+    /// Whether the paired Hermes takes screens, pictures and files; nil from plugins before 0.2.48.
+    /// The app delegate hands it to the call client whenever the status refreshes.
+    var attachmentSupport: AttachmentSupport? { status?.attachments }
 
     /// The delegate re-wires the call client and hotkeys when these change.
     let configChanged = PassthroughSubject<AppConfig, Never>()
@@ -105,6 +111,7 @@ final class AppModel: ObservableObject {
         Prefs.register()
         config = AppConfig.resolve(savedServer: UserDefaults.standard.string(forKey: Prefs.serverURL),
                                    savedToken: Self.readSavedToken())
+        screenRecordingAllowed = ScreenCapture.permitted
     }
 
     /// Automated runs (smoke tests, snapshots, previews) never touch the Keychain. Dev builds are
@@ -266,6 +273,7 @@ final class AppModel: ObservableObject {
         }
         onboarding = try? await api.onboarding()
         micAuthorization = AVCaptureDevice.authorizationStatus(for: .audio)
+        screenRecordingAllowed = ScreenCapture.permitted
     }
 
     /// Loads home control: whether Home Assistant is found, on/off, every device it could use.

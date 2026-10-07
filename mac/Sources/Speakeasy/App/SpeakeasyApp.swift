@@ -135,8 +135,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func observeModel() {
         app.$status.combineLatest(app.$latestPluginVersion)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _, _ in
+            .sink { [weak self] status, _ in
                 guard let self else { return }
+                // Whether this Hermes takes screens, pictures and files (the next call declares it).
+                self.native.attachmentSupport = status?.attachments
                 self.updateMenu()
                 if let version = self.app.pluginUpdateAvailable {
                     self.idle?.notifyPluginUpdate(version: version)

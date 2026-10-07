@@ -1,0 +1,5 @@
+{
+  "body" : null,
+  "method" : "DELETE",
+  "path" : "\/voice\/interactions\/{interaction_id}\/attachments\/{attachment_id}"
+}

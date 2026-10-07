@@ -1,0 +1,8 @@
+{
+  "body" : {
+    "screen" : "ready",
+    "sdp" : "{sdp}"
+  },
+  "method" : "POST",
+  "path" : "\/voice\/sessions"
+}

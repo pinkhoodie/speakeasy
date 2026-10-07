@@ -1,0 +1,12 @@
+{
+  "body" : null,
+  "headers" : {
+    "Content-Type" : "image\/jpeg",
+    "X-Speakeasy-App" : "Xcode",
+    "X-Speakeasy-Capture-Id" : "{capture_id}",
+    "X-Speakeasy-Kind" : "screen"
+  },
+  "method" : "POST",
+  "path" : "\/voice\/interactions\/{interaction_id}\/attachments",
+  "raw_body" : "jpeg"
+}

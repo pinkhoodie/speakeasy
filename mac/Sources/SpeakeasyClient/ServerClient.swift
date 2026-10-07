@@ -7,8 +7,18 @@ public final class ServerClient: @unchecked Sendable {
     public struct HTTPError: LocalizedError {
         public let status: Int
         public let message: String
-        public init(status: Int, message: String) { self.status = status; self.message = message }
+        /// The api's short reason code when it gives one (`too_many`, `ended`, `closed`, …).
+        public let reason: String?
+        public init(status: Int, message: String, reason: String? = nil) {
+            self.status = status; self.message = message; self.reason = reason
+        }
         public var errorDescription: String? { message }
+
+        /// Builds the error from an api error body `{error, reason?}`.
+        init(status: Int, body: Data, fallback: String) {
+            let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            self.init(status: status, message: object?["error"] as? String ?? fallback, reason: object?["reason"] as? String)
+        }
     }
 
     public let base: URL
@@ -62,8 +72,7 @@ public final class ServerClient: @unchecked Sendable {
         let (data, response) = try await sessionFor(timeout).data(for: request(path, method: method, body: body, timeout: timeout))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
-            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            throw HTTPError(status: status, message: object?["error"] as? String ?? "Server HTTP \(status)")
+            throw HTTPError(status: status, body: data, fallback: "Server HTTP \(status)")
         }
         return data
     }
@@ -166,7 +175,8 @@ public final class ServerClient: @unchecked Sendable {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         guard (200..<300).contains(status) else {
-            throw HTTPError(status: status, message: object["error"] as? String ?? "Server HTTP \(status)")
+            throw HTTPError(status: status, message: object["error"] as? String ?? "Server HTTP \(status)",
+                            reason: object["reason"] as? String)
         }
         return object
     }
@@ -175,10 +185,11 @@ public final class ServerClient: @unchecked Sendable {
         try await json(path, method: "POST", body: try JSONSerialization.data(withJSONObject: object), headers: headers)
     }
 
-    /// POST the SDP offer byte-for-byte (the body encoder never trims it).
+    /// POST the SDP offer byte-for-byte (the body encoder never trims it). `screen` is this client's
+    /// sharing declaration, sent only to plugins that advertise attachments.
     public func admitSession(sdp: String, idempotencyKey: String, resumeFrom: String? = nil,
-                      tour: [String: String]? = nil) async throws -> SessionAdmission {
-        let body = try sessionRequestBody(sdp: sdp, resumeFrom: resumeFrom, tour: tour)
+                      tour: [String: String]? = nil, screen: ScreenDeclaration? = nil) async throws -> SessionAdmission {
+        let body = try sessionRequestBody(sdp: sdp, resumeFrom: resumeFrom, tour: tour, screen: screen)
         let object = try await json("/voice/sessions", method: "POST", body: body,
                                     headers: ["Idempotency-Key": idempotencyKey])
         guard let admission = SessionAdmission(json: object) else {
@@ -255,6 +266,59 @@ public final class ServerClient: @unchecked Sendable {
         precondition(choice == "once" || choice == "deny")
         _ = try await post("/voice/interactions/\(escape(interactionID))/approval",
                            ["run_id": approval.runID, "request_id": approval.requestID, "choice": choice])
+    }
+
+    // MARK: Look at this: screen sharing, pictures and files
+
+    /// The screen button: `{on, seq}` to the call. Returns the plugin's state in force (its seq can be
+    /// newer than the one sent; an older one changes nothing). 409 reasons: ended, permission, not_declared.
+    public func setScreen(interactionID: String, _ toggle: ScreenToggle) async throws -> ScreenToggle {
+        let object = try await json(SharingRoute.screen(interactionID), method: "POST", body: try toggle.body())
+        guard let state = ScreenToggle(json: object) else { throw HTTPError(status: 502, message: "Server returned an invalid screen state") }
+        return state
+    }
+
+    /// Answers a capture request: `capturing` first (410 = closed: don't capture), `uploading` while a
+    /// capture is on its way, or `failed` with the reason. Throws `HTTPError` 410 once it has closed.
+    public func reportCapture(interactionID: String, captureID: String, _ report: CaptureReport) async throws {
+        _ = try await json(SharingRoute.capture(interactionID, captureID), method: "POST", body: try report.body())
+    }
+
+    /// Uploads a screen capture (`captureID` and `app`), a picture or a file as the raw body; returns
+    /// the plugin's attachment id (the same one again for a repeated capture upload). Refusals are
+    /// `HTTPError`s with the plugin's reason: 409 too_many / too_large / ended, 410 closed,
+    /// 413 too_large, 415 unsupported.
+    public func uploadAttachment(interactionID: String, _ attachment: EncodedAttachment, as kind: AttachmentUploadKind,
+                                 captureID: String? = nil, app: String? = nil) async throws -> String {
+        let headers = attachmentUploadHeaders(kind: kind, mimeType: attachment.mimeType, filename: attachment.filename,
+                                              captureID: captureID, app: app)
+        // Up to 10 MB over Tailscale: give a file longer than the usual 30 s.
+        let timeout: TimeInterval = attachment.data.count > 1_000_000 ? 120 : 30
+        let req = request(SharingRoute.attachments(interactionID), method: "POST", headers: headers, timeout: timeout)
+        let (data, response) = try await sessionFor(timeout).upload(for: req, from: attachment.data)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else { throw HTTPError(status: status, body: data, fallback: "Upload HTTP \(status)") }
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let id = object["id"] as? String, !id.isEmpty else {
+            throw HTTPError(status: 502, message: "Server returned an invalid attachment")
+        }
+        return id
+    }
+
+    /// The ✕ on a pending picture or file. 404 = already gone; 409 reason `sent` = it went with a request.
+    public func removeAttachment(interactionID: String, attachmentID: String) async throws {
+        _ = try await json(SharingRoute.attachment(interactionID, attachmentID), method: "DELETE")
+    }
+
+    /// A screen capture or picture a task carried (`number` from `SharedItem`), through the authenticated api.
+    public func sharedImage(runID: String, number: Int) async throws -> Data {
+        guard (1...8).contains(number) else { throw HTTPError(status: 400, message: "Invalid picture") }
+        let (data, response) = try await session.data(for: request(SharingRoute.sharedImage(runID, number)))
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              http.mimeType?.hasPrefix("image/") == true, !data.isEmpty, data.count <= 8_000_000 else {
+            throw HTTPError(status: (response as? HTTPURLResponse)?.statusCode ?? 502, message: "Image unavailable")
+        }
+        return data
     }
 
     private func escape(_ id: String) -> String {

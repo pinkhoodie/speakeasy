@@ -143,6 +143,49 @@ public final class VoicePanelModel: ObservableObject {
         return true
     }
 
+    // MARK: Look at this (screen, pictures and files)
+    /// The screen button: unavailable (this call can't share), off, on, or needs Screen Recording.
+    public var screenState: ScreenButton { state.sharing.button }
+    /// Grows each time the plugin asks for the button to be noticed (`screen.hint`): pulse once per increase.
+    public var screenHintPulse: Int { state.sharing.hintPulse }
+    /// Why it last asked (`screen.hint` reason, e.g. "permission"); nil after a resume.
+    public var screenHintReason: String? { state.sharing.hint }
+    /// The screen button or shortcut.
+    public var onToggleScreen: () -> Void = {}
+    /// System Settings › Screen Recording (the "Set up" on the needs-permission line).
+    public var onOpenScreenSettings: () -> Void = {}
+
+    /// This Hermes takes pictures and files (drops and pastes are offered).
+    @Published public var attachmentsSupported = false
+    /// Pictures and files waiting to go with the next request, in drop order.
+    public var pendingAttachments: [PendingAttachmentItem] {
+        state.sharing.visibleAttachments.map { item in
+            PendingAttachmentItem(id: item.id, kind: item.kind, name: item.name, phase: item.phase,
+                                  thumbnail: attachmentThumbnails[item.id])
+        }
+    }
+    /// Previews of pending pictures, by attachment id (files have none).
+    @Published public var attachmentThumbnails: [String: CGImage] = [:]
+    /// Dropped or pasted items, already encoded with `AttachmentEncoder`.
+    public var onAttach: ([EncodedAttachment]) -> Void = { _ in }
+    /// An item that couldn't be encoded: its `AttachmentFailure` raw value, shown as a short line.
+    public var onAttachRefused: (String) -> Void = { _ in }
+    /// The ✕ on a pending picture or file (its id).
+    public var onRemoveAttachment: (String) -> Void = { _ in }
+
+    /// A request waiting for the screen, or how that ended (nil: none).
+    public var hold: ScreenHold? { state.sharing.hold }
+    /// "Waiting for your screen", "Not sent: screen sharing was off", or nil.
+    public var holdText: String? { state.sharing.hold?.line }
+    /// A short line about sharing ("Up to 3 at a time", "Screen Recording is off · Set up"); also
+    /// on the status line while fresh. `action` says what tapping it does.
+    public var shareNotice: ShareNotice? {
+        guard let notice = state.sharing.notice, notice.isFresh(at: state.now) else { return nil }
+        return notice
+    }
+    /// A screen capture or picture a task carried (run id, `SharedItem.number`), through the authenticated api.
+    public var loadSharedImage: (String, Int) async -> Data? = { _, _ in nil }
+
     // MARK: Panel visibility
     /// The close (x) button: hide the panel (ends nothing).
     public var onClosePanel: () -> Void = {}
@@ -154,4 +197,18 @@ public final class VoicePanelModel: ObservableObject {
     /// Two or more tasks in this call: show the list.
     public var showsTaskList: Bool { state.tasks.count >= 2 }
     public var selectedTask: TaskItem? { selectedTaskID.flatMap { id in state.tasks.first { $0.id == id } } }
+}
+
+/// A picture or file on the panel's pending row.
+public struct PendingAttachmentItem: Identifiable {
+    public let id: String
+    public let kind: PendingAttachment.Kind
+    public let name: String
+    public let phase: PendingAttachment.Phase
+    /// Pictures only, once made.
+    public let thumbnail: CGImage?
+
+    public init(id: String, kind: PendingAttachment.Kind, name: String, phase: PendingAttachment.Phase, thumbnail: CGImage?) {
+        self.id = id; self.kind = kind; self.name = name; self.phase = phase; self.thumbnail = thumbnail
+    }
 }

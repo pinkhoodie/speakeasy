@@ -1,0 +1,8 @@
+{
+  "body" : {
+    "reason" : "secure_input",
+    "status" : "failed"
+  },
+  "method" : "POST",
+  "path" : "\/voice\/interactions\/{interaction_id}\/captures\/{capture_id}"
+}

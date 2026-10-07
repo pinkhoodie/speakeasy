@@ -528,9 +528,16 @@ private extension NSRect {
 extension VoicePanelController: VoiceSurface {}
 
 extension NativeVoiceClient {
-    /// The Mac client: drives the floating panel.
+    /// The Mac client: drives the floating panel, and can share the screen (ScreenCaptureKit stays
+    /// in the app; the shared client only gets these closures).
     convenience init(config: AppConfig) {
         self.init(config: config, makeSurface: { VoicePanelController(model: $0) })
+        screenPermitted = { ScreenCapture.permitted }
+        captureScreen = {
+            let shot = try await ScreenCapture.capture()
+            return CapturedScreen(attachment: shot.attachment, appName: shot.appName)
+        }
+        openScreenSettings = { ScreenCapture.openSettings() }
     }
     // swiftlint:disable:next force_cast
     var panel: VoicePanelController { surface as! VoicePanelController }

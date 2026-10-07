@@ -2,6 +2,7 @@
 import AppKit
 #endif
 import AVFoundation
+import CoreGraphics
 import Foundation
 import SpeakeasyCore
 
@@ -40,6 +41,14 @@ public protocol VoiceSurface: AnyObject {
     func hide()
     func focus()
     func setNeedsResize()
+}
+
+/// One capture of the user's window for a capture request, encoded for upload (the Mac app makes it).
+public struct CapturedScreen: Sendable {
+    public let attachment: EncodedAttachment
+    /// The captured app's name ("Xcode"), for the task's thumbnail and the one-time spoken notice.
+    public let appName: String
+    public init(attachment: EncodedAttachment, appName: String) { self.attachment = attachment; self.appName = appName }
 }
 
 /// Native call client: WebRTC transport + server SSE + pure reducer + SwiftUI panel.
@@ -110,6 +119,26 @@ public final class NativeVoiceClient: VoiceCallClient {
     /// Preview mode: canned state, no network, no audio.
     public private(set) var previewMode = false
 
+    // MARK: Look at this (screen, pictures and files)
+
+    /// What the paired plugin says about attachments (`/voice/status`). The app sets it whenever its
+    /// status refreshes, and every call start refreshes it too. Nil (a plugin from before attachments)
+    /// or unsupported: no screen button, drops refused, nothing declared.
+    public var attachmentSupport: AttachmentSupport? {
+        didSet { model.attachmentsSupported = attachmentSupport?.supported == true }
+    }
+    /// Screen Recording is allowed (never prompts). Set by the Mac app; nil where the screen can't be shared.
+    public var screenPermitted: (@MainActor () -> Bool)?
+    /// Captures the frontmost window for one capture request; throws an `AttachmentFailure`. Mac app only.
+    public var captureScreen: (@MainActor () async throws -> CapturedScreen)?
+    /// Opens System Settings › Screen Recording (Mac app).
+    public var openScreenSettings: (@MainActor () -> Void)?
+    /// The bytes of each pending picture and file (by local id), kept to re-send them after a resume.
+    private var attachmentBytes: [String: EncodedAttachment] = [:]
+    /// The latest `/screen` request: words said while connecting go after it.
+    private var screenSend: Task<Void, Never>?
+    private var uploadsScheduled = false
+
     public init(config: AppConfig, makeSurface: @escaping @MainActor (VoicePanelModel) -> any VoiceSurface) {
         self.config = config
         self.makeSurface = makeSurface
@@ -147,6 +176,15 @@ public final class NativeVoiceClient: VoiceCallClient {
             guard let self, let api = self.api else { return nil }
             return try? await api.liveImage(runID: runID)
         }
+        model.onToggleScreen = { [weak self] in self?.toggleScreen() }
+        model.onAttach = { [weak self] items in self?.attach(items) }
+        model.onAttachRefused = { [weak self] reason in self?.dispatch(.sharing(.notice(reason))) }
+        model.onRemoveAttachment = { [weak self] id in self?.removeAttachment(id) }
+        model.onOpenScreenSettings = { [weak self] in self?.openScreenSettings?() }
+        model.loadSharedImage = { [weak self] runID, number in
+            guard let self, let api = self.api else { return nil }
+            return try? await api.sharedImage(runID: runID, number: number)
+        }
     }
 
     // MARK: Reducer plumbing
@@ -157,6 +195,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         model.state = after
         applySideEffects(from: before, to: after)
         watchMic(event, from: before, to: after)
+        scheduleUploadsIfNeeded()
     }
 
     // MARK: Mic check
@@ -228,6 +267,12 @@ public final class NativeVoiceClient: VoiceCallClient {
         }
         refreshStatusLine()
         if let show = new.showRequest, show != old.showRequest { act(on: show) }
+        if let toggle = new.sharing.outgoing, toggle != old.sharing.outgoing { sendScreen(toggle) }
+        for captureID in new.sharing.captures where !old.sharing.captures.contains(captureID) { serveCapture(captureID) }
+        if old.sharing.attachments != new.sharing.attachments { forgetAttachments(notIn: new.sharing.attachments) }
+        if old.sharing.visibleAttachments.count != new.sharing.visibleAttachments.count || old.sharing.hold != new.sharing.hold {
+            surface.setNeedsResize()
+        }
         if old.exchange.isEmpty != new.exchange.isEmpty || old.approval != new.approval ||
             old.connection != new.connection || old.workInfo != new.workInfo || old.tasks != new.tasks {
             surface.setNeedsResize()
@@ -360,6 +405,9 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func connect(_ api: ServerClient) {
+        // What this call can share: re-checked against the plugin while the call connects.
+        dispatch(.sharing(.declared(screenDeclaration())))
+        refreshAttachmentSupport(api)
         startEarlyCapture()
         let engine = NativeCallEngine()
         self.engine = engine
@@ -389,9 +437,13 @@ public final class NativeVoiceClient: VoiceCallClient {
                 let sdp = try await engine.createOffer()
                 guard let self, self.engine === engine, self.model.state.connection == .connecting else { engine.close(); return }
                 let tour = self.model.state.resumeFrom == nil ? self.pendingTour : nil
+                // Resumes declare again: the resumed call starts with sharing off.
+                let screen = self.model.state.sharing.declared
                 let admission = try await api.admitSession(sdp: sdp, idempotencyKey: UUID().uuidString,
-                                                              resumeFrom: self.model.state.resumeFrom, tour: tour)
+                                                              resumeFrom: self.model.state.resumeFrom, tour: tour,
+                                                              screen: screen)
                 guard self.engine === engine else { engine.close(); return }
+                self.dispatch(.sharing(.declared(screen)))   // exactly what the plugin was told
                 if tour != nil {
                     self.pendingTour = nil
                     self.model.tourActive = true
@@ -647,6 +699,8 @@ public final class NativeVoiceClient: VoiceCallClient {
             self.dispatch(.earlyListening(false))
             guard keep, !cleanTranscript(text).isEmpty else { return }
             self.dispatch(.inputDelta(text))
+            // Sharing turned on while connecting reaches the plugin before these words do.
+            await self.screenSend?.value
             do {
                 _ = try await api.post("/voice/interactions/\(interactionID)/early-request", ["text": String(text.prefix(1000))])
             } catch {
@@ -828,14 +882,16 @@ public final class NativeVoiceClient: VoiceCallClient {
         }
     }
 
-    /// Server without `/events`: poll instead.
+    /// Server without `/events`: poll instead. Capture requests come from the snapshot here.
     private func startPollingFallback(_ api: ServerClient, interactionID: String) {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             var lastWork = Date.distantPast
             while !Task.isCancelled {
                 guard let self, self.model.state.connection.isInCall else { return }
-                if let snapshot = try? await api.interaction(interactionID) { self.dispatch(.interaction(snapshot)) }
+                if let snapshot = try? await api.interaction(interactionID) {
+                    for event in interactionEvents(snapshot) { self.dispatch(event) }
+                }
                 if let run = self.model.state.runID, Date().timeIntervalSince(lastWork) > 2 {
                     lastWork = Date()
                     if let work = try? await api.work(runID: run) { self.dispatch(.work(work)) }
@@ -992,6 +1048,205 @@ public final class NativeVoiceClient: VoiceCallClient {
             do { try await api.cancelBackend(interactionID: id, runID: run) }
             catch { self?.dispatch(.error(error.localizedDescription)) }
         }
+    }
+
+    // MARK: Look at this: screen sharing
+
+    /// What this call tells the plugin: nothing unless the plugin takes attachments, Hermes can read
+    /// images and this app can capture; then `ready`, or `no_permission` while Screen Recording is off.
+    private func screenDeclaration() -> ScreenDeclaration? {
+        guard attachmentSupport?.supported == true, let permitted = screenPermitted, captureScreen != nil else { return nil }
+        return permitted() ? .ready : .noPermission
+    }
+
+    /// Re-reads `/voice/status` while the call connects (the plugin may have been updated, or was
+    /// unreachable when the app last asked). Never delays the call: it applies only if it answers
+    /// before the session is admitted; later answers count from the next call or resume.
+    private func refreshAttachmentSupport(_ api: ServerClient) {
+        guard screenPermitted != nil, !previewMode else { return }
+        Task { [weak self] in
+            guard let status = try? await api.status() else { return }
+            guard let self else { return }
+            self.attachmentSupport = status.attachments
+            if self.model.state.connection == .connecting, self.model.state.interactionID == nil {
+                self.dispatch(.sharing(.declared(self.screenDeclaration())))
+            }
+        }
+    }
+
+    /// The screen button and shortcut. Pressed while connecting, it's sent once the call is admitted;
+    /// without Screen Recording it shows the Set up line instead.
+    public func toggleScreen() {
+        guard model.state.connection.isInCall else { return }
+        dispatch(.sharing(.toggle))
+    }
+
+    /// Sends one toggle; the reply is the plugin's state in force. A failure rolls the button back.
+    private func sendScreen(_ toggle: ScreenToggle) {
+        guard let api, let id = model.state.interactionID, !previewMode else { return }
+        let previous = screenSend
+        screenSend = Task { [weak self] in
+            await previous?.value   // in order: the plugin ignores an older seq anyway, but keep the wire tidy
+            do {
+                let state = try await api.setScreen(interactionID: id, toggle)
+                guard let self, self.model.state.interactionID == id else { return }
+                self.dispatch(.sharing(.state(state)))
+            } catch {
+                guard let self, self.model.state.interactionID == id else { return }
+                self.dispatch(.sharing(.toggleFailed(seq: toggle.seq, reason: (error as? ServerClient.HTTPError)?.reason)))
+            }
+        }
+    }
+
+    /// One capture request, while sharing is on: ask the plugin first (410 = it no longer wants one,
+    /// so nothing is captured), capture, upload by capture id; or report why there's no capture.
+    private func serveCapture(_ captureID: String) {
+        guard let api, let id = model.state.interactionID, let capture = captureScreen, !previewMode else { return }
+        Task { [weak self] in
+            do { try await api.reportCapture(interactionID: id, captureID: captureID, .capturing) }
+            catch { return }   // closed (410), or no answer: never capture without the plugin's go-ahead
+            guard let self, self.model.state.interactionID == id, self.model.state.sharing.isOn else { return }
+            let shot: CapturedScreen
+            do {
+                shot = try await capture()
+            } catch {
+                let failure = error as? AttachmentFailure ?? .noWindow
+                try? await api.reportCapture(interactionID: id, captureID: captureID, .failed(failure))
+                return
+            }
+            // Sharing turned off while capturing: the capture is dropped (the plugin closed the request).
+            guard self.model.state.interactionID == id, self.model.state.sharing.isOn else { return }
+            // Extends the plugin's wait while the bytes travel; a 410 here only means it already has them.
+            Task { try? await api.reportCapture(interactionID: id, captureID: captureID, .uploading) }
+            do {
+                _ = try await api.uploadAttachment(interactionID: id, shot.attachment, as: .screen,
+                                                   captureID: captureID, app: shot.appName)
+            } catch let error as ServerClient.HTTPError where error.status == 410 {
+                return   // the request closed meanwhile (timed out, sharing off): nothing kept
+            } catch let error as ServerClient.HTTPError {
+                let failure: AttachmentFailure = error.status == 413 || error.reason == "too_large" ? .tooLarge
+                    : error.status == 415 ? .unsupported : .timeout
+                try? await api.reportCapture(interactionID: id, captureID: captureID, .failed(failure))
+            } catch {
+                try? await api.reportCapture(interactionID: id, captureID: captureID, .failed(.timeout))
+            }
+        }
+    }
+
+    // MARK: Look at this: pictures and files
+
+    /// Dropped or pasted pictures and files (already encoded, see `AttachmentEncoder`). They wait on
+    /// the panel and go with the next request; up to three at a time. Only during a call (paused
+    /// included: they're sent after Resume); refused when this Hermes can't take them.
+    public func attach(_ items: [EncodedAttachment]) {
+        guard model.state.connection.isOpen, !model.state.workOnly, !items.isEmpty else { return }
+        guard attachmentSupport?.supported == true else {
+            dispatch(.sharing(.notice(AttachmentSupport.refusalReason(attachmentSupport))))
+            return
+        }
+        for item in items {
+            let id = UUID().uuidString
+            dispatch(.sharing(.added(PendingAttachment(id: id, kind: item.kind == .image ? .picture : .file,
+                                                       name: item.filename, byteCount: item.data.count))))
+            guard model.state.sharing.attachments.contains(where: { $0.id == id }) else { break }   // over the limit
+            attachmentBytes[id] = item
+            if item.kind == .image { makeThumbnail(id, item) }
+        }
+    }
+
+    /// The ✕ on a pending picture or file: hidden at once, then taken back off the plugin.
+    public func removeAttachment(_ id: String) {
+        guard let item = model.state.sharing.attachments.first(where: { $0.id == id }), !item.removing else { return }
+        dispatch(.sharing(.removing(id)))
+        switch item.phase {
+        case .local: dispatch(.sharing(.removed(id)))
+        case .uploading: break   // its upload's answer takes it back off
+        case .pending, .sending: deleteAttachment(item)
+        }
+    }
+
+    private func deleteAttachment(_ item: PendingAttachment) {
+        guard let api, let serverID = item.serverID, let interactionID = item.interactionID, !previewMode else {
+            dispatch(.sharing(.removed(item.id)))
+            return
+        }
+        Task { [weak self] in
+            do {
+                try await api.removeAttachment(interactionID: interactionID, attachmentID: serverID)
+                self?.dispatch(.sharing(.removed(item.id)))
+            } catch let error as ServerClient.HTTPError where error.reason == "sent" {
+                self?.dispatch(.sharing(.removed(item.id)))
+                self?.dispatch(.sharing(.notice("sent")))
+            } catch let error as ServerClient.HTTPError where error.status == 404 || error.reason == "ended" {
+                self?.dispatch(.sharing(.removed(item.id)))   // the plugin no longer holds it
+            } catch {
+                self?.dispatch(.sharing(.removeFailed(item.id)))
+            }
+        }
+    }
+
+    /// Uploads what's waiting on this device once the call takes uploads (after a drop, at admission,
+    /// after a resume). Runs after the dispatch that made it necessary, never inside it.
+    private func scheduleUploadsIfNeeded() {
+        let s = model.state
+        guard !uploadsScheduled, !previewMode, s.sharing.hasLocalAttachments, s.interactionID != nil,
+              s.connection == .live || s.connection == .connecting, !s.pausing else { return }
+        uploadsScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.uploadsScheduled = false
+            self?.uploadWaitingAttachments()
+        }
+    }
+
+    private func uploadWaitingAttachments() {
+        let s = model.state
+        guard let api, let interactionID = s.interactionID, s.connection == .live || s.connection == .connecting,
+              !s.pausing else { return }
+        for item in s.sharing.attachments where item.phase == .local && !item.removing {
+            guard let bytes = attachmentBytes[item.id] else { dispatch(.sharing(.removed(item.id))); continue }
+            dispatch(.sharing(.uploading(item.id, interactionID: interactionID)))
+            Task { [weak self] in
+                do {
+                    let serverID = try await api.uploadAttachment(interactionID: interactionID, bytes,
+                                                                  as: item.kind == .picture ? .picture : .file)
+                    guard let self else { return }
+                    self.dispatch(.sharing(.uploaded(item.id, serverID: serverID, interactionID: interactionID)))
+                    // ✕ pressed while it was uploading: take it back off now.
+                    if let current = self.model.state.sharing.attachments.first(where: { $0.id == item.id }),
+                       current.removing, current.serverID == serverID {
+                        self.deleteAttachment(current)
+                    }
+                } catch let error as ServerClient.HTTPError where error.reason == "ended" || error.status == 404 {
+                    // The call paused (or the plugin lost it): kept here and sent to the next session.
+                    self?.dispatch(.sharing(.uploadDeferred(item.id, interactionID: interactionID)))
+                } catch let error as ServerClient.HTTPError {
+                    let reason = error.reason ?? (error.status == 413 ? "too_large" : error.status == 415 ? "unsupported" : nil)
+                    self?.dispatch(.sharing(.refused(item.id, reason: reason)))
+                } catch {
+                    self?.dispatch(.sharing(.refused(item.id, reason: nil)))
+                }
+            }
+        }
+    }
+
+    /// A small preview for the pending row, made off the main thread.
+    private func makeThumbnail(_ id: String, _ item: EncodedAttachment) {
+        Task.detached(priority: .utility) { [weak self] in
+            guard let image = AttachmentEncoder.thumbnail(of: item) else { return }
+            await self?.showThumbnail(image, for: id)
+        }
+    }
+
+    private func showThumbnail(_ image: CGImage, for id: String) {
+        guard attachmentBytes[id] != nil else { return }   // already sent or removed
+        model.attachmentThumbnails[id] = image
+    }
+
+    /// Sent, removed, refused or the call ended: let go of their bytes and previews.
+    private func forgetAttachments(notIn kept: [PendingAttachment]) {
+        let ids = Set(kept.map(\.id))
+        for id in attachmentBytes.keys where !ids.contains(id) { attachmentBytes[id] = nil }
+        for id in model.attachmentThumbnails.keys where !ids.contains(id) { model.attachmentThumbnails[id] = nil }
     }
 
     // MARK: Preview

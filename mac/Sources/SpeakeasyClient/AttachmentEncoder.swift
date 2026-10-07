@@ -79,6 +79,20 @@ public enum AttachmentEncoder {
         }
     }
 
+    /// A small preview of an encoded picture for the panel's pending row (`maxPixelSize` on the long
+    /// edge; 144 covers a 36 pt thumbnail at 2× twice over). Nil for files or unreadable bytes.
+    public static func thumbnail(of attachment: EncodedAttachment, maxPixelSize: Int = 144) -> CGImage? {
+        guard attachment.kind == .image,
+              let source = CGImageSourceCreateWithData(attachment.data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetCount(source) > 0 else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, CGImageSourceGetPrimaryImageIndex(source), options as CFDictionary)
+    }
+
     /// The primary image (the first frame of a GIF), oriented upright and no larger than the cap.
     private static func decode(_ source: CGImageSource) throws -> CGImage {
         guard CGImageSourceGetCount(source) > 0 else { throw AttachmentFailure.unsupported }

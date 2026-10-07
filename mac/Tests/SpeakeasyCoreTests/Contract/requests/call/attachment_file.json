@@ -1,0 +1,11 @@
+{
+  "body" : null,
+  "headers" : {
+    "Content-Type" : "application\/pdf",
+    "X-Speakeasy-Filename" : "Q3%20report.pdf",
+    "X-Speakeasy-Kind" : "file"
+  },
+  "method" : "POST",
+  "path" : "\/voice\/interactions\/{interaction_id}\/attachments",
+  "raw_body" : "text"
+}
