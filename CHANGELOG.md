@@ -2,6 +2,11 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Mac 0.2.17 — Questions you answer in one tap
+
+- **Question cards.** When a task needs a decision, it shows the question with numbered answers and marks the one it would pick. Tap one, press 1–4, or just say it, and the same task carries on. When the choice is something to look at (layouts, places, products), each answer shows a picture. A question stays on screen until you answer it.
+- **Choose where voice work goes** (Settings › Where work goes): everything in one place, your default chat plus threads in channels you approve, or sorted into channels by topic.
+
 ## Plugin 0.2.47 — See the options
 
 - **Questions about something visual come with pictures.** When the choice is between layouts, designs, photos, places or products, Hermes attaches a screenshot of each option. The card shows them side by side, numbered, and the voice says "they're on screen". Pictures go through the same safety checks as any other task image.
@@ -46,11 +51,6 @@ Speakeasy has two parts that update separately: the **Mac app** (updates through
 ## Plugin 0.2.40
 
 - **Finished quick answers clear properly.** Weather lookups, light switches and other instant answers used to linger in the list after you cleared finished work. Now they go away with everything else, including old ones that were stuck.
-
-## Mac (next)
-
-- Settings › Where work goes: pick one place, default plus approved threads, or sorted by topic.
-- Question cards: a task's question shows with numbered answers and a Recommended pick; tap one or press 1–4. Unanswered questions stay on screen until you answer. Options with pictures show as numbered thumbnails.
 
 ## Mac 0.2.16 + Plugin 0.2.39 — Says why a task failed
 
