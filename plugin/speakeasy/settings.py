@@ -52,6 +52,12 @@ DEFAULTS: dict[str, Any] = {
     "server": {"advertised_url": "", "tailscale_name": ""},
     # Set by POST /voice/onboarding (or `hermes voice config set`) when the user confirmed them.
     "onboarding": {"names_set": False, "delivery_set": False, "home_offered": False},
+    # Ambient listening (docs/ambient-listening-plan.md): listen always, speak only when spoken to.
+    # Default OFF; the Mac owns wake/VAD, the server keeps the transcript and memory.
+    "listening": {"enabled": False, "wake_phrases": ["hey speakeasy"], "wake_variants": [],
+                  "debounce_seconds": 5.0, "end_of_utterance_silence": 1.0, "max_question_seconds": 15.0,
+                  "hot_context_words": 2000, "compress_interval_seconds": 60.0, "compress_target_words": 600,
+                  "summary_every": 3, "mode_b_max_tokens": 120},
 }
 DEFAULT_VOICES = {"codex": "cove", "openai": "marin"}
 # Voices each provider accepts; they do not overlap (the ChatGPT-sign-in voice model rejects API
@@ -120,6 +126,7 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
     s["delivery"] = validate_delivery(s["delivery"])
     s["home_control"] = validate_home_control(s["home_control"])
     s["server"] = validate_server(s["server"])
+    s["listening"] = validate_listening(s["listening"])
     fast = s["fast_routing"]
     if not isinstance(fast.get("quick_answers"), bool):
         raise SettingsError("fast_routing.quick_answers must be true or false")
@@ -140,6 +147,54 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
 
 
 ENTITY_ID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
+
+LISTENING_KEYS = ("enabled", "wake_phrases", "wake_variants", "debounce_seconds", "end_of_utterance_silence",
+                  "max_question_seconds", "hot_context_words", "compress_interval_seconds",
+                  "compress_target_words", "summary_every", "mode_b_max_tokens")
+
+
+def validate_listening(raw: Any) -> dict[str, Any]:
+    """The ambient-listening block (docs/ambient-listening-plan.md). Unknown listening.* keys are
+    rejected like every other section; phrases are short free text the Mac substring-matches."""
+    if not isinstance(raw, dict):
+        raise SettingsError("listening must be an object")
+    unknown = set(raw) - set(LISTENING_KEYS)
+    if unknown:
+        raise SettingsError(f"unknown setting: listening.{sorted(unknown)[0]}")
+    if not isinstance(raw.get("enabled", False), bool):
+        raise SettingsError("listening.enabled must be true or false")
+    phrases = DEFAULTS["listening"]["wake_phrases"] if raw.get("wake_phrases") is None else raw["wake_phrases"]
+    if (not isinstance(phrases, list) or not phrases or len(phrases) > 8
+            or not all(isinstance(p, str) and 0 < len(p.strip()) <= 60 for p in phrases)):
+        raise SettingsError("listening.wake_phrases must be a list of 1-8 short phrases")
+    variants = [] if raw.get("wake_variants") is None else raw["wake_variants"]
+    if (not isinstance(variants, list) or len(variants) > 32
+            or not all(isinstance(v, str) and 0 < len(v.strip()) <= 60 for v in variants)):
+        raise SettingsError("listening.wake_variants must be a list of up to 32 short phrases")
+
+    def number(key: str, low: float, high: float) -> float:
+        value = raw[key] if key in raw else DEFAULTS["listening"][key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+            raise SettingsError(f"listening.{key} must be a number from {low} to {high}")
+        return value
+
+    def whole(key: str, low: int, high: int) -> int:
+        value = raw[key] if key in raw else DEFAULTS["listening"][key]
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise SettingsError(f"listening.{key} must be a whole number from {low} to {high}")
+        return value
+
+    return {"enabled": raw.get("enabled", False),
+            "wake_phrases": [p.strip() for p in phrases],
+            "wake_variants": [v.strip() for v in variants],
+            "debounce_seconds": number("debounce_seconds", 0, 60),
+            "end_of_utterance_silence": number("end_of_utterance_silence", 0.2, 30),
+            "max_question_seconds": number("max_question_seconds", 1, 120),
+            "hot_context_words": whole("hot_context_words", 100, 20000),
+            "compress_interval_seconds": number("compress_interval_seconds", 10, 3600),
+            "compress_target_words": whole("compress_target_words", 50, 4000),
+            "summary_every": whole("summary_every", 1, 20),
+            "mode_b_max_tokens": whole("mode_b_max_tokens", 20, 1000)}
 
 
 def validate_home_control(raw: Any) -> dict[str, Any]:

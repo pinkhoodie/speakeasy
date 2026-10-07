@@ -166,6 +166,8 @@ class Handler(BaseHTTPRequestHandler):
                 "/voice/routing": self.service.routing_choices,
                 "/voice/home": self.service.get_home,
                 "/voice/brief/tune": self.service.get_tune,
+                "/voice/listening/state": self.service.listening_state,
+                "/voice/listening/memory": self.service.listening_memory,
             }
             if path in routes:
                 self._reply(200, routes[path]())
@@ -219,6 +221,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/voice/routing":
                 self._reply(200, self.service.choose_routing(self._body()))
+                return
+            if path == "/voice/listening/transcript":
+                self._reply(200, self.service.listening_transcript(self._body()))
+                return
+            if path == "/voice/listening/compress":
+                self._reply(200, self.service.listening_compress())
+                return
+            if path == "/voice/listening/wake":
+                self._reply(200, self.service.listening_wake(self._body()))
                 return
             review = re.fullmatch(rf"/voice/reviews/{_ID}/dismiss", path)
             if review:

@@ -43,7 +43,10 @@ def test_pairing_is_single_use_and_tokens_are_hashed(server, service, home):
 
 def test_routes_require_device_token(server, service):
     for method, path in (("GET", "/voice/status"), ("GET", "/voice/work/latest"), ("GET", "/voice/settings"),
-                         ("POST", "/voice/sessions"), ("GET", "/voice/brief"), ("GET", "/voice/destinations")):
+                         ("POST", "/voice/sessions"), ("GET", "/voice/brief"), ("GET", "/voice/destinations"),
+                         ("GET", "/voice/listening/state"), ("GET", "/voice/listening/memory"),
+                         ("POST", "/voice/listening/transcript"), ("POST", "/voice/listening/compress"),
+                         ("POST", "/voice/listening/wake")):
         assert http(server.base_url, method, path, {} if method == "POST" else None)[0] == 401
         assert http(server.base_url, method, path, {} if method == "POST" else None, "wrong-token")[0] == 401
     device_id = service.devices.devices()[0].id

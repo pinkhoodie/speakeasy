@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
+from . import ambient
 from . import delivery as D
 from .brief import BriefInvalid, BriefManager
 from .calls import (ACTIVE_RUN_STATES, MAX_TASKS, ServiceError, Interaction, Notices, Runtime, SidebandWorker,
@@ -77,6 +78,33 @@ def _tour(value: Any) -> dict[str, str]:
         out[key] = label
     return out
 
+_AMBIENT_KEYS = {"mode", "question", "hot_context", "compressed", "summary"}
+_AMBIENT_LIMITS = (("question", 1000), ("hot_context", 8000), ("compressed", 6000), ("summary", 4000))
+_AMBIENT_TS_RE = re.compile(  # an ISO-8601 timestamp, seconds optional ("...T14:05:07.2+02:00", "...Z")
+    r"^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[Zz]|[+-]\d{2}:?\d{2})?$")
+
+
+def _ambient_seed(value: Any) -> dict[str, Any]:
+    """The optional ``ambient`` key on a session request (a Mode A wake): what this call already
+    knows because the Mac was listening before it opened. Bounded, unknown keys rejected."""
+    if not isinstance(value, dict):
+        raise ServiceError(400, "ambient must be an object")
+    unknown = set(value) - _AMBIENT_KEYS
+    if unknown:
+        raise ServiceError(400, f"unknown ambient key: {sorted(unknown)[0]}")
+    mode = value.get("mode", "question")
+    if mode not in {"question", "insight"}:
+        raise ServiceError(400, "ambient.mode must be question or insight")
+    out: dict[str, Any] = {"mode": mode}
+    for key, limit in _AMBIENT_LIMITS:
+        if value.get(key) is None:
+            continue
+        if not isinstance(value[key], str):
+            raise ServiceError(400, f"ambient.{key} must be a string")
+        out[key] = value[key][:limit]
+    return out
+
+
 class VoiceService:
     def __init__(self, hermes_home: Path, *, hermes: Any = None, notifier: Any = None,
                  codex_factory: Callable[..., Any] | None = None, openai_negotiate: Callable[..., Any] | None = None,
@@ -88,7 +116,8 @@ class VoiceService:
                  polish_call: Callable[[str], str | None] | None = None,
                  status_call: Callable[[str], str | None] | None = None,
                  home_plan_call: Callable[..., Any] | None = None, home_client: Callable[..., Any] | None = None,
-                 tune_run: Callable[[str, str], tuple[str, str]] | None = None):
+                 tune_run: Callable[[str, str], tuple[str, str]] | None = None,
+                 listening_call: Callable[[str, int], str | None] | None = None):
         self.home = Path(hermes_home)
         self.dir = self.home / "speakeasy"
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -125,6 +154,7 @@ class VoiceService:
         self._openai_negotiate = openai_negotiate
         self._openai_worker = openai_worker
         self._codex_login = codex_login
+        self._listening_call = listening_call
         self._stop = threading.Event()
         if start_threads:
             threading.Thread(target=self._idle_loop, daemon=True, name="speakeasy-idle").start()
@@ -197,7 +227,7 @@ class VoiceService:
 
     # -- voice sessions -------------------------------------------------------------------------
     def instructions(self, *, away: list[dict[str, Any]], resume: str,
-                     tour: dict[str, str] | None = None) -> str:
+                     tour: dict[str, str] | None = None, ambient: dict[str, Any] | None = None) -> str:
         s = self.settings.get()
         names = P.Names.from_settings(s)
         recent = ""
@@ -214,15 +244,17 @@ class VoiceService:
                                          resume=resume, extra=s["instructions_extra"], now=now,
                                          delivery_label=label, channels=s["delivery"]["channels"],
                                          tour=P.tour_block(names, tour, label, s["delivery"]["channels"])
-                                         if tour is not None else "")
+                                         if tour is not None else "",
+                                         ambient=ambient)
 
     def create_session(self, body: dict[str, Any], request_id: str, device_id: str = "") -> dict[str, Any]:
         if self.updated_underneath():
             raise ServiceError(503, RESTART_NEEDED)
         resume_from = body.get("resume_from")
-        if (not set(body) <= {"sdp", "resume_from", "tour"} or not isinstance(body.get("sdp"), str)
+        ambient = _ambient_seed(body.get("ambient")) if "ambient" in body else None
+        if (not set(body) <= {"sdp", "resume_from", "tour", "ambient"} or not isinstance(body.get("sdp"), str)
                 or resume_from is not None and not (isinstance(resume_from, str) and ID_RE.fullmatch(resume_from))):
-            raise ServiceError(400, "body must contain only an SDP offer, an optional resume_from and tour")
+            raise ServiceError(400, "body must contain only an SDP offer, an optional resume_from, tour and ambient")
         tour = _tour(body.get("tour")) if "tour" in body and not resume_from else None
         if tour is not None and self.store.get_meta("last_call_end") is not None:
             # The app asks per Mac (a new Mac, a reinstall or an update all look like a first call
@@ -235,8 +267,8 @@ class VoiceService:
             raise ServiceError(400, "invalid SDP offer")
         if not ID_RE.fullmatch(request_id):
             raise ServiceError(400, "invalid Idempotency-Key")
-        fingerprint = hashlib.sha256((sdp + "\0" + (resume_from or "") + ("\0tour" if tour is not None else ""))
-                                     .encode()).hexdigest()
+        fingerprint = hashlib.sha256((sdp + "\0" + (resume_from or "") + ("\0tour" if tour is not None else "")
+                                      + ("\0ambient\0" + canonical_json(ambient) if ambient else "")).encode()).hexdigest()
         interaction_id = "vi_" + secrets.token_hex(16)
         outcome, replay = self.store.reserve_session(request_id, fingerprint, interaction_id)
         if outcome == "conflict":
@@ -258,7 +290,7 @@ class VoiceService:
             resume = P.resume_block(interaction_tasks(self.store, source, names.assistant_name), names)
         else:
             away, resume = self.store.away(), ""
-        instructions = self.instructions(away=away, resume=resume, tour=tour)
+        instructions = self.instructions(away=away, resume=resume, tour=tour, ambient=ambient)
         seed = P.resume_input(history)
         provider = s["voice"]["provider"]
         voice = default_voice(s)
@@ -936,6 +968,62 @@ class VoiceService:
             "advertised_url": s["server"]["advertised_url"], "tailscale_name": s["server"]["tailscale_name"],
             "version": __version__,
         }
+
+    # -- ambient listening ---------------------------------------------------------------------
+    def _ambient_llm(self, prompt: str, max_tokens: int) -> str | None:
+        """One cheap completion through Hermes' auxiliary (processing) model for the ambient
+        listening cycle; tests and alternate setups inject ``listening_call`` instead."""
+        call = self._listening_call
+        if call is not None:
+            return call(prompt, max_tokens)
+        from .router import aux_call
+        return aux_call([{"role": "user", "content": prompt}], timeout=90, max_tokens=max_tokens)
+
+    def listening_state(self) -> dict[str, Any]:
+        s = self.settings.get()["listening"]
+        return {"enabled": s["enabled"],
+                "memory_chars": len(self.store.ambient_memory_all().get("compressed") or ""),
+                "last_activity_at": self.store.ambient_last_activity()}
+
+    def listening_transcript(self, body: dict[str, Any]) -> dict[str, Any]:
+        """One ambient transcript segment from the Mac; dedup-vs-tail decides whether it sticks."""
+        text, ts = (body or {}).get("text"), (body or {}).get("ts")
+        if set(body or {}) != {"text", "ts"} or not isinstance(text, str) or not isinstance(ts, str) \
+                or not text.strip() or len(text) > 2000 or not _AMBIENT_TS_RE.fullmatch(ts.strip()):
+            raise ServiceError(400, "body must be {\"text\": short string, \"ts\": iso timestamp}")
+        stored = self.store.ambient_append(ts.strip(), text)
+        self.store.mark_ambient_activity()
+        return {"stored": stored}
+
+    def listening_memory(self) -> dict[str, Any]:
+        mem = self.store.ambient_memory_all()
+        try:
+            count = int(mem.get("compression_count") or 0)
+        except ValueError:
+            count = 0
+        return {"hot": self.store.ambient_tail(40), "compressed": mem.get("compressed") or "",
+                "summary": mem.get("summary"), "title": mem.get("title"), "subtitle": mem.get("subtitle"),
+                "compression_count": count}
+
+    def listening_compress(self) -> dict[str, Any]:
+        try:
+            return ambient.compress(self.store, self.settings.get(), self._ambient_llm)
+        except ambient.AmbientError as exc:
+            raise ServiceError(502, str(exc)) from None
+
+    def listening_wake(self, body: dict[str, Any]) -> dict[str, Any]:
+        mode = (body or {}).get("mode")
+        if not isinstance(body, dict) or set(body) - {"mode", "question", "context_tail"} \
+                or mode not in {"question", "insight"}:
+            raise ServiceError(400, "mode must be question or insight")
+        question, tail = body.get("question"), body.get("context_tail")
+        for name, value, limit in (("question", question, 1000), ("context_tail", tail, 4000)):
+            if value is not None and (not isinstance(value, str) or len(value) > limit):
+                raise ServiceError(400, f"{name} must be a string of up to {limit} characters")
+        if mode == "question" and not (question or "").strip():
+            raise ServiceError(400, "question is required for a question wake")
+        return ambient.wake(self.store, self.settings.get(), mode, (question or "").strip(),
+                            tail or "", self._ambient_llm)
 
     # -- home control ---------------------------------------------------------------------------------
     def get_home(self) -> dict[str, Any]:

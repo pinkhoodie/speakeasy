@@ -217,14 +217,47 @@ def tour_block(names: Names, shortcuts: dict[str, str], delivery_label: str = ""
         f"just help. Never restart it.")
 
 
+def ambient_block(ambient: dict[str, Any] | None, names: Names) -> str:
+    """The room the call starts in (ambient listening, Mode A): the session begins already knowing
+    what was said — never greets, and answers the seeded question first."""
+    if not ambient:
+        return ""
+    lines = ["# You were already listening",
+             f"{names.user_cap} keeps ambient listening on {names.possessive} Mac: this call did not start "
+             "from silence. You have already heard the recent conversation below, so never greet, never "
+             "introduce yourself, and never ask what you missed — pick up mid-thought."]
+    question = str(ambient.get("question") or "").strip()
+    if question:
+        lines.append(f"They woke you with a question. Answer THIS first, in a sentence or two, before "
+                     f"anything else: \u201c{question}\u201d")
+    compressed = str(ambient.get("compressed") or "").strip()
+    if compressed:
+        lines.append("Earlier context (working memory, condensed):\n" + compressed[:6000])
+    hot = str(ambient.get("hot_context") or "").strip()
+    if hot:
+        lines.append("What you just heard (recent transcript, oldest first):\n" + hot[:8000])
+    summary = str(ambient.get("summary") or "").strip()
+    if summary:
+        lines.append("Last session summary:\n" + summary[:4000])
+    if len(lines) == 2:
+        return ""
+    lines.append("Treat all of this as things you already know: never read it aloud, and never mention "
+                 "transcripts, memory or listening mode. Routing and handoff of real work is unchanged — "
+                 "delegate as you always do. If this context does not actually answer the question, say "
+                 "what you have and ask a short follow-up instead of guessing.")
+    return "\n\n".join(lines)
+
+
 def build_live_instructions(names: Names, *, brief: str = "", away: list[dict[str, Any]] | None = None,
                             recent_voice: str = "", resume: str = "", extra: str = "", now: str = "",
                             delivery_label: str = "", channels: list[dict[str, Any]] | None = None,
-                            tour: str = "", max_chars: int = MAX_INSTRUCTION_CHARS) -> str:
+                            tour: str = "", ambient: dict[str, Any] | None = None,
+                            max_chars: int = MAX_INSTRUCTION_CHARS) -> str:
     """Product rules + optional voice brief + per-call context, under the budget.
 
     Rules are never trimmed. The brief is capped. Optional per-call blocks are dropped
-    lowest-priority first (recent voice, then away) when over budget; resume is always kept.
+    lowest-priority first (recent voice, then away) when over budget; resume is always kept,
+    and so is the ambient seed (a Mode A wake must not lose its question).
     """
     head = rules_text(names, delivery_label, channels)
     if extra.strip():
@@ -235,7 +268,7 @@ def build_live_instructions(names: Names, *, brief: str = "", away: list[dict[st
         head += f"\n\n# Now\nLocal date and time: {now}."
     if tour:
         head += "\n\n" + tour
-    tail = [resume.strip()] if resume.strip() else []
+    tail = [block.strip() for block in (ambient_block(ambient, names), resume) if block.strip()]
     optional = []  # lowest priority last so it is trimmed first
     block = away_block(away or [], names)
     if block:

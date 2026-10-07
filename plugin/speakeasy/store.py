@@ -23,6 +23,26 @@ from .text import (MAX_CARDS, AUTHORED_PRECEDENCE_S, SETTLED, TERMINAL, notice_t
 
 STALE_AFTER_S = 90
 MAX_REVIEWS = 3  # finished-image review cards carried onto the call panel
+AMBIENT_MAX_ROWS = 2000  # the ambient transcript stays bounded (~a day of background speech)
+
+
+def _norm_words(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9']+", (text or "").lower()))
+
+
+def _tail_duplicate(tail: str, segment: str) -> bool:
+    """True when ``segment`` is already the end of ``tail`` — the Mac's deduper re-sends the last
+    words with every 1.5 s cadence and STT re-emits overlapping windows. Mirrors Buddy's
+    tailContainsSegment: an exact suffix match, or the tail ends with a ≥70% progressive prefix
+    of the segment (the same text transcribed again with more appended)."""
+    seg = _norm_words(segment)
+    if not seg:
+        return True
+    tail_norm = _norm_words(tail)
+    if tail_norm.endswith(seg):
+        return True
+    min_overlap = max(int(len(seg) * 0.7), 10)
+    return len(seg) >= min_overlap and tail_norm.endswith(seg[:min_overlap])
 
 
 def local_run_id(idem_key: str) -> str:
@@ -55,6 +75,12 @@ class StateStore:
             self._db.execute("""CREATE TABLE IF NOT EXISTS notices (
                 dedupe_key TEXT PRIMARY KEY, created REAL NOT NULL, outcome TEXT)""")
             self._db.execute("""CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)""")
+            # Ambient listening (docs/ambient-listening-plan.md): the bounded background transcript
+            # and the compressed working memory distilled from it.
+            self._db.execute("""CREATE TABLE IF NOT EXISTS ambient_transcript (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, text TEXT NOT NULL)""")
+            self._db.execute("""CREATE TABLE IF NOT EXISTS ambient_memory (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL)""")
             self._db.execute("""CREATE TABLE IF NOT EXISTS email_drafts (
                 draft_id TEXT PRIMARY KEY, idem_key TEXT NOT NULL, session_id TEXT,
                 draft_json TEXT NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL,
@@ -278,6 +304,56 @@ class StateStore:
 
     def mark_call_ended(self, at: float | None = None) -> None:
         self.set_meta("last_call_end", repr(at if at is not None else time.time()))
+
+    # -- ambient listening ---------------------------------------------------------------
+    def ambient_append(self, ts: str, text: str) -> bool:
+        """One transcript segment. False when it duplicates the rolling tail (the Mac retries its
+        cadence and STT re-emits overlaps); the store keeps only the last AMBIENT_MAX_ROWS rows."""
+        text = (text or "").strip()
+        if not text:
+            return False
+        with self._lock, self._db:
+            rows = self._db.execute(
+                "SELECT text FROM ambient_transcript ORDER BY id DESC LIMIT 8").fetchall()
+            tail = " ".join(r[0] for r in reversed(rows))
+            if _tail_duplicate(tail, text):
+                return False
+            self._db.execute("INSERT INTO ambient_transcript (ts,text) VALUES (?,?)", (ts, text.strip()))
+            self._db.execute("""DELETE FROM ambient_transcript WHERE id NOT IN
+                (SELECT id FROM ambient_transcript ORDER BY id DESC LIMIT ?)""", (AMBIENT_MAX_ROWS,))
+        return True
+
+    def ambient_tail(self, limit: int = 40) -> list[dict[str, Any]]:
+        """Recent segments, oldest first (newest-last), for the Mac's own deduper and wake views."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT ts,text FROM ambient_transcript ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [{"ts": r[0], "text": r[1]} for r in reversed(rows)]
+
+    def ambient_hot(self, max_words: int = 2000) -> str:
+        """The hot context: the newest ~max_words words of transcript, oldest first."""
+        with self._lock:
+            rows = self._db.execute("SELECT text FROM ambient_transcript ORDER BY id").fetchall()
+        words = " ".join(r[0] for r in rows).split()
+        return " ".join(words[-max_words:]) if len(words) > max_words else " ".join(words)
+
+    def ambient_memory_set(self, key: str, value: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("INSERT OR REPLACE INTO ambient_memory (key,value) VALUES (?,?)", (key, value))
+
+    def ambient_memory_all(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._db.execute("SELECT key,value FROM ambient_memory").fetchall())
+
+    def mark_ambient_activity(self, at: float | None = None) -> None:
+        self.set_meta("ambient_last_activity", repr(at if at is not None else time.time()))
+
+    def ambient_last_activity(self) -> float | None:
+        raw = self.get_meta("ambient_last_activity")
+        try:
+            return float(raw) if raw is not None else None
+        except ValueError:
+            return None
 
     # -- work events -------------------------------------------------------------------
     def request_text(self, key: str) -> str | None:
