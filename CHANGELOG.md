@@ -4,6 +4,7 @@ Speakeasy has two parts that update separately: the **Mac app** (updates through
 
 ## Mac (next)
 
+- **Old questions stop greeting you.** An unanswered question stays pinned for 20 minutes, then lives only in its task. Closing a card or answering one is remembered across launches. On iPhone, a question's answers can now be tapped.
 - **iPhone: an Action Button call never ends up behind the app with no mic.** The call starts only once the app is fully in front (iOS gives the mic only to the app in front). If the mic is lost while the app is in the background, it says so and fixes itself the moment you open the app, instead of reconnecting in a loop.
 - **iPhone: no more "Fixing the mic…" loop at the start of a call.** The mic check judged the mic dead 2.5 seconds after the call took it over from the talk-while-connecting listener, before the phone's call audio (and AirPods' call mode) had started, then reconnected twice. A phone now gets 7 seconds for the first sound, the listener fully lets go of the mic, and a repair reconnects without the listener. Repairs log what the check saw.
 - No more "didn't get that" while a task is clearly still working. It showed 45 seconds after any follow-up or status question that didn't start a new task.

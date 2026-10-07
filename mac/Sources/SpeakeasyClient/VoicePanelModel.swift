@@ -52,8 +52,10 @@ public final class VoicePanelModel: ObservableObject {
     public var onStopTask: (String) -> Void = { _ in }
     /// Answer a task's question card (task id, picked option).
     public var onAnswer: (String, String) -> Void = { _, _ in }
-    /// Answers already given, by task id, so a card stays settled after the tap.
-    @Published public var answers: [String: String] = [:]
+    /// Answers already given, by task id, so a card stays settled after the tap (kept across launches).
+    @Published public var answers: [String: String] = VoicePanelModel.loadAnswers() {
+        didSet { VoicePanelModel.save(answers.suffix(200), key: VoicePanelModel.answersKey) }
+    }
     /// Fetches a task picture (run id, card number) through the authenticated api.
     public var loadCardImage: (String, Int) async -> Data? = { _, _ in nil }
     public func questionActions(for taskID: String) -> QuestionActions {
@@ -98,15 +100,31 @@ public final class VoicePanelModel: ObservableObject {
     }
 
     // MARK: Answer cards (price, weather, game…)
-    /// Tasks whose cards the user closed in the call panel (they stay in the task itself).
-    @Published public var dismissedViewTasks: Set<String> = []
+    /// Tasks whose cards the user closed in the call panel (they stay in the task itself). Kept
+    /// across launches: finished tasks come back with every call, and a closed card must stay closed.
+    @Published public var dismissedViewTasks: Set<String> = Set(VoicePanelModel.loadList(VoicePanelModel.dismissedKey)) {
+        didSet { UserDefaults.standard.set(Array(dismissedViewTasks.suffix(300)), forKey: VoicePanelModel.dismissedKey) }
+    }
     public func dismissPinnedViews(_ taskID: String) { dismissedViewTasks.insert(taskID) }
+    /// How long an unanswered question stays pinned. Past that it lives only in its task: a
+    /// question from an old task must not greet you on every call.
+    public static let questionPinnedFor: TimeInterval = 20 * 60
+    static let dismissedKey = "speakeasy.dismissedCardTasks"
+    static let answersKey = "speakeasy.questionAnswers"
+    static func loadList(_ key: String) -> [String] { UserDefaults.standard.stringArray(forKey: key) ?? [] }
+    static func loadAnswers() -> [String: String] {
+        (UserDefaults.standard.dictionary(forKey: answersKey) as? [String: String]) ?? [:]
+    }
+    static func save(_ pairs: some Sequence<(key: String, value: String)>, key: String) {
+        UserDefaults.standard.set(Dictionary(pairs.map { ($0.key, $0.value) }, uniquingKeysWith: { a, _ in a }), forKey: key)
+    }
     /// The newest task with cards, shown in the call panel while it's fresh: a quick answer's card
     /// appears as it is spoken and stays until closed or until it's three minutes old.
     public var pinnedViews: (taskID: String, views: [ViewCard])? {
         // An unanswered question stays up (it's waiting on you); other cards fade after three minutes.
         if let asking = state.tasks.last(where: { t in t.info.views.contains { $0.kind == "question" }
-                && answers[t.id] == nil && !dismissedViewTasks.contains(t.id) && t.info.isTerminal }) {
+                && answers[t.id] == nil && !dismissedViewTasks.contains(t.id) && t.info.isTerminal
+                && t.info.updatedAt.map { Date().timeIntervalSince($0) < Self.questionPinnedFor } ?? false }) {
             return (asking.id, asking.info.views)
         }
         guard let task = state.tasks.last(where: { !$0.info.views.isEmpty && !dismissedViewTasks.contains($0.id) }) else { return nil }
