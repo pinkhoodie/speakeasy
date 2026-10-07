@@ -753,3 +753,48 @@ def is_status_question(request: str) -> bool:
     never handed to the task itself (that queued it behind the very work it asks about)."""
     text = " ".join((request or "").split())
     return 0 < len(text.split()) <= 12 and bool(_STATUS_Q.search(text))
+
+
+# Talking an idea through: answered by the voice itself, never a task.
+_TALK = re.compile(
+    r"(?i)\b(?:what\s+do\s+you\s+think|what\s+are\s+your\s+thoughts|(?:any\s+)?thoughts\s+on|your\s+take"
+    r"|talk\s+(?:me|it|this|that)\s+through|think\s+(?:it|this|that)\s+through\s+with\s+me|let'?s\s+(?:just\s+)?(?:talk|think|brainstorm|ideate|riff|jam|kick\s+(?:it|this|the\s+ball))"
+    r"|brainstorm|ideat(?:e|ing)|bounce\s+(?:an?\s+|some\s+)?ideas?|what\s+(?:about|if)\s+(?:the\s+idea|we|i|people|it)|how\s+about\s+(?:the\s+idea|we|i)"
+    r"|(?:(?:could|should|can)\s+(?:i|we)|(?:i|we)\s+(?:could|should|might))\s+(?:make|build|do|call|start|try|charge|go|sell|launch)|would\s+(?:it|that)\s+(?:be|make|work)"
+    r"|is\s+(?:it|that|this)\s+(?:a\s+)?(?:good|bad|dumb|smart|stupid)\s+idea|i'?m\s+(?:thinking|wondering)|i\s+was\s+thinking|i\s+feel\s+like)\b")
+# Asking for the work itself: go ahead and hand it off.
+_WORK = re.compile(
+    r"(?i)\b(?:look\s+(?:it\s+|that\s+|this\s+)?(?:up|into)|research|search|google|find\s+(?:me|out|some|a|the)|check|dig\s+into|pull\s+up|show\s+me"
+    r"|book|send|draft|email|text|message|schedule|remind|order|buy|play|turn\s+(?:on|off)|set\s+(?:up|a)|build|write|create|make\s+(?:me|a|the)|fix|deploy|ship"
+    r"|go\s+ahead|kick\s+(?:it|that|this)\s+off|get\s+(?:started|going|on\s+it)|go\s+(?:do|start|work)|start\s+(?:on|working)|map\s+(?:out\s+)?(?:the\s+)?competitors"
+    r"|what'?s\s+the\s+(?:latest|price|weather|score)|how\s+much\s+(?:is|does|are)|who\s+(?:owns|won|is\s+playing))\b")
+# Saying you're just talking: hold work until asked.
+_TALK_MODE_ON = re.compile(
+    r"(?i)\b(?:don'?t\s+(?:build|start|do|make|research|look\s+up)\s+anything|just\s+(?:talk|chat|think\s+out\s+loud)(?:\s+(?:to|with)\s+me)?"
+    r"|(?:we'?re|i'?m)\s+(?:still\s+|just\s+)?(?:in\s+the\s+)?(?:ideat|brainstorm|thinking|talking|exploring)|keep\s+(?:ideating|brainstorming|talking)"
+    r"|no\s+(?:tasks?|work)\s+(?:yet|for\s+now)|stop\s+(?:sending|starting|delegating))")
+# A reaction, not a request: "what, bro", "wait", "yeah okay", "hang on".
+_REACTION = re.compile(
+    r"(?i)^\W*(?:(?:what|huh|wait|hang\s+on|hold\s+on|yeah|yes|yep|no|nope|nah|okay|ok|right|sure|cool|nice|wow|damn|bro|dude|man|lol|haha|the\s+fuck|what\s+the\s+fuck|todd|hermes|really|seriously|for\s+real|got\s+it|i\s+see|interesting)\W*){1,4}$")
+
+
+# "could I make…", "if you were to build…", "should we send…": a verb inside a what-if isn't an ask.
+_HYPOTHETICAL = re.compile(r"(?i)\b(?:(?:could|should|would|might|if|what\s+if|can)\s+(?:i|we|they|people|someone|it)|if\s+you|(?:i|we|they)\s+(?:could|should|would|might))\s+(?:were\s+to\s+|ever\s+|just\s+)?\w+(?:\s+(?:a|an|the|it|this|that|me))?")
+
+
+def is_conversation(request: str) -> bool:
+    """Thinking out loud or asking for a take, with no ask to go do anything."""
+    text = " ".join((request or "").split())
+    return bool(text) and bool(_TALK.search(text)) and not _WORK.search(_HYPOTHETICAL.sub(" ", text))
+
+
+def asks_for_work(request: str) -> bool:
+    return bool(_WORK.search(" ".join((request or "").split())))
+
+
+def starts_talk_mode(request: str) -> bool:
+    return bool(_TALK_MODE_ON.search(" ".join((request or "").split())))
+
+
+def is_reaction(request: str) -> bool:
+    return bool(_REACTION.match(" ".join((request or "").split())))

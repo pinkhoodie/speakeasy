@@ -661,6 +661,22 @@ def pictures_note(count: int) -> str:
 STOPPED_SPOKEN = "I stopped that task. I'm still here."
 FAILED_SPOKEN = "I couldn't finish that one; the app shows what went wrong."
 NO_TRANSCRIPT_SPOKEN = "I did not receive enough transcript to act. Please repeat the request."
+def talk_note(names: "Names") -> str:
+    return (f"Nothing was started: {names.user} is thinking out loud or asking for your take. Answer it yourself now, "
+            "in conversation: a real opinion in a few natural sentences, building on what they said. Don't say you're "
+            "checking, looking into or adding anything.")
+
+
+def talk_mode_note(names: "Names") -> str:
+    return (f"{names.user} wants to just talk this through for now: nothing was started, and nothing will be until they "
+            "ask you to go do something. Reply in conversation, briefly, and keep the thread going.")
+
+
+def reaction_note(names: "Names") -> str:
+    return (f"That was a reaction, not a request, so nothing was started. Reply naturally in a few words; if {names.user} "
+            "seems confused, say plainly what you last did.")
+
+
 GREETING_SPOKEN = "That was just a hello, so nothing's started. Go ahead, I'm listening."
 
 

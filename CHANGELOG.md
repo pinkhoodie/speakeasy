@@ -9,6 +9,13 @@ Speakeasy has two parts that update separately: the **Mac app** (updates through
 - **iPhone: no more "Fixing the mic…" loop at the start of a call.** The mic check judged the mic dead 2.5 seconds after the call took it over from the talk-while-connecting listener, before the phone's call audio (and AirPods' call mode) had started, then reconnected twice. A phone now gets 7 seconds for the first sound, the listener fully lets go of the mic, and a repair reconnects without the listener. Repairs log what the check saw.
 - No more "didn't get that" while a task is clearly still working. It showed 45 seconds after any follow-up or status question that didn't start a new task.
 
+## Plugin 0.2.49 — Talk it through first
+
+- **Ideas get a real reply, not a task.** "What do you think about…", "what about the idea of…", "I could make…", "I was thinking…": the voice answers with its own take. Work starts when you ask it to go do something (look it up, research, build, send, book) or say go ahead.
+- **"Just talk to me" mode.** Say you're just ideating, or "don't build anything", and nothing goes off to your agent until you ask for something.
+- **Reactions aren't requests.** "What, bro", "hang on", "yeah" no longer start a lookup. A "yeah" to something the voice just offered is a go-ahead, and the offer goes along with it.
+- **No more humming into silence.** The voice is told to leave pauses empty: no "hmm", "mm" or "mm-hm".
+
 ## Plugin 0.2.48 — Talks like a person, and tells you where things are
 
 - **Less "On it", "Checking", "One sec".** Quick questions get the answer, nothing before it. Bigger asks get a short, natural reaction, or none.

@@ -256,6 +256,7 @@ class BackendRun:
 class Interaction:
     interaction_id: str
     live_session_id: str
+    talking_only: bool = False  # "just talk to me": hold work until they ask for some
     status: str = "connecting"
     revision: int = 0
     finalization: str = "open"
@@ -888,6 +889,37 @@ class SidebandWorker:
         return bool(want) and any(now - at < ABSORB_WINDOW_S and (want in norm(t) or norm(t) in want)
                                   for t, at in self.absorbed)
 
+    async def _talk_not_work(self, delegation_id: str, revision: int, request: str, context: str) -> bool:
+        """Ideas, opinions and reactions are conversation: the voice answers them, no task starts.
+        "Just talk to me" holds all work until the user asks for something."""
+        last_said = next((l for l in reversed(context.splitlines()) if l.startswith("Assistant: ")), "")
+        offered = last_said.rstrip().endswith("?")  # "Want me to dig into that?" "Yeah" is a go-ahead
+        if router.starts_talk_mode(request):
+            with self.interaction.lock:
+                self.interaction.talking_only = True
+            logger.info("speakeasy: talk-only mode on; holding work until asked")
+            await self._drop(delegation_id, revision, "Just talking", None)
+            await self.append("session.thinking.append", delegation_id, P.talk_mode_note(self.names))
+            return True
+        with self.interaction.lock:
+            talking_only = self.interaction.talking_only
+        if talking_only and (router.asks_for_work(request) or offered):
+            with self.interaction.lock:
+                self.interaction.talking_only = False
+            logger.info("speakeasy: talk-only mode off; asked for work")
+            return False
+        if router.is_reaction(request) and not offered:
+            logger.info("speakeasy: reaction, no task started")
+            await self._drop(delegation_id, revision, "Just a reaction", None)
+            await self.append("session.thinking.append", delegation_id, P.reaction_note(self.names))
+            return True
+        if talking_only or (router.is_conversation(request) and not offered):
+            logger.info("speakeasy: conversation, answered by the voice (no task)")
+            await self._drop(delegation_id, revision, "Talked it through", None)
+            await self.append("session.thinking.append", delegation_id, P.talk_note(self.names))
+            return True
+        return False
+
     async def _drop(self, delegation_id: str, revision: int, reason: str, spoken: str | None) -> None:
         """A handoff that should never become a task. It ends visibly (no lingering "Waiting for")."""
         backend = BackendRun(delegation_id, revision, self._idem(delegation_id, revision))
@@ -939,6 +971,12 @@ class SidebandWorker:
             logger.info("speakeasy: greeting, no task started")
             await self._drop(delegation_id, revision, "Just a greeting", P.GREETING_SPOKEN)
             return
+        if not marked and await self._talk_not_work(delegation_id, revision, last_request, context):
+            return
+        offer = next((l[len("Assistant: "):] for l in reversed(context.splitlines()) if l.startswith("Assistant: ")), "")
+        if not marked and router.is_reaction(last_request) and offer.rstrip().endswith("?"):
+            # "Yeah" to "Want me to look up what they charge?": the yes carries the offer with it.
+            last_request = f"{last_request.rstrip('.!')}: {offer.strip()}"
         if self._already_absorbed(last_request):
             logger.info("speakeasy: handoff already folded into the task before it; not started twice")
             await self._drop(delegation_id, revision, "Added to the previous request", None)
