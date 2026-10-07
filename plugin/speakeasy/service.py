@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
+from . import attachments as A
 from . import delivery as D
 from .brief import BriefInvalid, BriefManager
 from .calls import (ACTIVE_RUN_STATES, MAX_TASKS, ServiceError, Interaction, Notices, Runtime, SidebandWorker,
@@ -55,6 +56,7 @@ ROUTING_HINT = ("Also: `hermes voice routing` on the machine that runs Hermes. "
 MAX_SDP = 96 * 1024
 PAUSE_NOTICE_AFTER_S = 15 * 60
 IDLE_CHECK_S = 15
+IMAGE_SUPPORT_EVERY_S = 3600  # re-check whether Hermes reads images (its model setup rarely changes)
 EARLY_CONNECT_WAIT_S = 8  # words heard while connecting wait this long for the call's event channel
 
 
@@ -451,6 +453,8 @@ class VoiceService:
     def _idle_loop(self) -> None:
         ticks = 0
         self.settle_stuck_tasks()
+        self._check_image_support_soon()
+        next_image_check = time.monotonic() + IMAGE_SUPPORT_EVERY_S
         while not self._stop.wait(IDLE_CHECK_S):
             try:
                 self.idle_check()
@@ -459,6 +463,34 @@ class VoiceService:
             ticks += 1
             if ticks % 4 == 0:  # about once a minute
                 self.settle_stuck_tasks()
+            if time.monotonic() >= next_image_check:  # about once an hour
+                self._check_image_support_soon()
+                next_image_check = time.monotonic() + IMAGE_SUPPORT_EVERY_S
+
+    def _check_image_support_soon(self) -> None:
+        """Run the image support check on its own thread: it can wait tens of seconds on the network
+        (offline models.dev lookups), which must not hold up auto-pause. One check at a time."""
+        running = getattr(self, "_image_check", None)
+        if running is not None and running.is_alive():
+            return
+        self._image_check = threading.Thread(target=self.refresh_image_support, name="speakeasy-image-check",
+                                             daemon=True)
+        self._image_check.start()
+
+    def refresh_image_support(self) -> None:
+        """Check again whether Hermes reads images; status reports the cached answer. Runs on the
+        idle loop (at startup, then hourly), never on a request: the check can wait on the network."""
+        refresh = getattr(self.hermes, "refresh_image_support", None)
+        if refresh is None:
+            return
+        before = dict(getattr(self.hermes, "image_support", None) or {})
+        try:
+            support = refresh()
+        except Exception as exc:
+            logger.warning("speakeasy: image support check failed: %s", type(exc).__name__)
+            return
+        if support != before:
+            logger.info("speakeasy: Hermes images: %s, vision: %s", support.get("images"), support.get("vision"))
 
     def settle_stuck_tasks(self) -> list[tuple[str, str]]:
         from .calls import LIVE_THREAD_WAITS
@@ -934,8 +966,16 @@ class VoiceService:
             "routing_model": routing_model(), "routing_hint": ROUTING_HINT, "routing_explainer": ROUTING_EXPLAINER,
             "routing_choice": self.routing_choices(),
             "advertised_url": s["server"]["advertised_url"], "tailscale_name": s["server"]["tailscale_name"],
-            "version": __version__,
+            "attachments": self.attachment_status(), "version": __version__,
         }
+
+    def attachment_status(self) -> dict[str, Any]:
+        """Whether Hermes reads images (``images``: the input path exists; ``vision``: native,
+        described, none or unknown) and the attachment limits. Reads the cached check only."""
+        support = getattr(self.hermes, "image_support", None) or {}
+        return {"images": bool(support.get("images")), "vision": support.get("vision") or "unknown",
+                "max_attachments": A.MAX_ATTACHMENTS, "max_image_bytes": A.MAX_IMAGE_BYTES,
+                "max_request_image_bytes": A.MAX_REQUEST_IMAGE_BYTES, "max_file_bytes": A.MAX_FILE_BYTES}
 
     # -- home control ---------------------------------------------------------------------------------
     def get_home(self) -> dict[str, Any]:

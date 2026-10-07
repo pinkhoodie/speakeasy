@@ -346,12 +346,38 @@ def conversations_with_context(state_db: Path, request: str, *, days: int = RECE
         db.close()
 
 
+# Hermes stores a message with parts (text plus images) as this prefix and the parts' JSON.
+_CONTENT_JSON_PREFIX = "\x00json:"
+
+
+def message_text(content: Any) -> str:
+    """The words of a stored message. A message with parts keeps only its text parts: image data
+    never reaches a snippet (snippets go to the routing model). Unreadable parts count as no text."""
+    if not isinstance(content, str):
+        return ""
+    if not content.startswith(_CONTENT_JSON_PREFIX):
+        return content
+    try:
+        parts = json.loads(content[len(_CONTENT_JSON_PREFIX):])
+    except ValueError:
+        return ""
+    if isinstance(parts, str):  # a literal text that happened to start with the prefix
+        return parts
+    if isinstance(parts, dict):
+        parts = [parts]
+    if not isinstance(parts, list):
+        return ""
+    texts = [p if isinstance(p, str) else p.get("text") for p in parts
+             if isinstance(p, str) or (isinstance(p, dict) and p.get("type") in {"text", "input_text"})]
+    return "\n".join(t for t in texts if isinstance(t, str) and t.strip())
+
+
 def _snippets(db: sqlite3.Connection, session_id: str) -> tuple[str, ...]:
     rows = db.execute("SELECT content FROM messages WHERE session_id=? AND role='user' AND content IS NOT NULL "
                       "ORDER BY id DESC LIMIT 15", (session_id,)).fetchall()
     out: list[str] = []
     for (text,) in rows:
-        line = _clean_line(text)
+        line = _clean_line(message_text(text))
         if len(line) > 8 and not _MACHINE_LINE.match(line) and line not in out:
             out.append(line)
         if len(out) >= MAX_SNIPPETS:
@@ -395,22 +421,31 @@ def match(request: str, conversations: list[Conversation]) -> Conversation | Non
     return scored[0][2]
 
 
-def stream_session_chat(base: str, key: str, conv: Conversation, message: str,
+STREAM_BUDGET = 4 * 1024 * 1024  # what one turn may stream back, not counting the echo of what was sent
+
+
+def stream_session_chat(base: str, key: str, conv: Conversation, message: str | list[dict[str, Any]],
                         callback: Callable[[str, dict[str, Any]], None], timeout: float = 1800,
                         opener: Callable[..., Any] = urllib.request.urlopen) -> bool:
     """Run one turn in the conversation's own session; call back with (event, payload). True when a
-    terminal run event arrived. Closing the stream interrupts the turn (Hermes' contract)."""
+    terminal run event arrived. Closing the stream interrupts the turn (Hermes' contract).
+
+    ``message`` is plain text, or text and image parts (``hermes_api.user_content``); this route
+    normalizes either. Hermes repeats the whole message, images included, in ``run.started``, so
+    the stream budget starts after that event and the echo itself never reaches ``callback``."""
+    data = json.dumps({"message": message}).encode()
     req = urllib.request.Request(f"{base.rstrip('/')}/api/sessions/{conv.session_id}/chat/stream",
-                                 data=json.dumps({"message": message}).encode(), method="POST")
+                                 data=data, method="POST")
     if key:
         req.add_header("Authorization", f"Bearer {key}")
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "text/event-stream")
-    name, terminal, total = None, False, 0
+    name, terminal, total, started = None, False, 0, False
     with opener(req, timeout=timeout) as response:
         for raw in response:
             total += len(raw)
-            if total > 4 * 1024 * 1024:
+            # Until run.started the echo of the sent message is allowed on top of the budget.
+            if total > STREAM_BUDGET + (0 if started else len(data)):
                 raise ValueError("conversation stream too large")
             line = raw.decode("utf-8", "replace").rstrip("\r\n")
             if line.startswith("event: "):
@@ -421,6 +456,10 @@ def stream_session_chat(base: str, key: str, conv: Conversation, message: str,
                 except ValueError:
                     payload = {}
                 event = name or (payload.get("event") if isinstance(payload, dict) else None) or ""
+                if event == "run.started" and not started:
+                    started, total = True, 0
+                    if isinstance(payload, dict):
+                        payload.pop("user_message", None)  # the echo: nobody needs it, and it can hold images
                 if isinstance(payload, dict):
                     callback(event, payload)
                 terminal = terminal or (event.startswith("run.") and event != "run.started")

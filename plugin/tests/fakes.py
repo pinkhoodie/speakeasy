@@ -96,13 +96,20 @@ class FakeHermes(BaseHTTPRequestHandler):
         parts = self.path.strip("/").split("/")
         if parts == ["v1", "runs"]:
             idem = self.headers.get("Idempotency-Key", "")
+            # Hermes replays a run only for the same key AND the same body; a changed body is a 409.
+            fingerprint = json.dumps([body, self.headers.get("X-Hermes-Session-Key", "")], sort_keys=True)
             with self.state.lock:
                 if idem and idem in self.state.by_idem:
+                    if self.state.idem_bodies.get(idem) != fingerprint:
+                        self._json(409, {"error": {"code": "idempotency_key_conflict"}})
+                        return
                     self._json(202, {"run_id": self.state.by_idem[idem], "status": "started"})
                     return
                 self.state.counter += 1
                 run_id = f"run_{self.state.counter:04d}"
                 self.state.by_idem[idem] = run_id
+                self.state.idem_bodies[idem] = fingerprint
+            # ``input`` is recorded as sent: a string, or a list of messages with text and image parts.
             prompt, session_id = body.get("input", ""), body.get("session_id")
             self.state.calls.append({"run_id": run_id, "input": prompt, "session_id": session_id, "idem": idem})
             output = self.state.responder(prompt, session_id)
@@ -162,6 +169,7 @@ class FakeHermesServer:
         self.lock = threading.Lock()
         self.runs: dict[str, dict[str, Any]] = {}
         self.by_idem: dict[str, str] = {}
+        self.idem_bodies: dict[str, str] = {}  # what each idempotency key was first sent with
         self.calls: list[dict[str, Any]] = []
         self.approvals: list[dict[str, Any]] = []
         self.counter = 0
