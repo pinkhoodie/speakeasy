@@ -37,8 +37,11 @@ SYSTEM = ("Answer a spoken question in one or two short plain sentences, using o
 
 
 def eligible(request: str) -> bool:
+    """A short public question. Never one about the user's screen ("what's this error?"): a web
+    search can't see it, and Hermes gets it with the capture instead."""
+    from .router import refers_to_screen
     text = (request or "").strip()
-    return 2 <= len(text.split()) <= 25 and not PERSONAL.search(text)
+    return 2 <= len(text.split()) <= 25 and not PERSONAL.search(text) and not refers_to_screen(text)
 
 
 def search(query: str, limit: int = SEARCH_RESULTS) -> list[dict[str, str]]:

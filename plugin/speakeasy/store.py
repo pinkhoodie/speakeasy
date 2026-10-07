@@ -23,6 +23,8 @@ from .text import (MAX_CARDS, AUTHORED_PRECEDENCE_S, SETTLED, TERMINAL, notice_t
 
 STALE_AFTER_S = 90
 MAX_REVIEWS = 3  # finished-image review cards carried onto the call panel
+SHARED_KINDS = frozenset({"screen", "picture", "file"})
+MAX_SHARED = 12  # things shared with one task kept on its card (a running task can be shown more)
 
 
 def local_run_id(idem_key: str) -> str:
@@ -79,6 +81,8 @@ class StateStore:
                 self._db.execute("ALTER TABLE runs ADD COLUMN timings TEXT")
             if "failure" not in columns:  # why a run failed: a failures.py kind, never provider text
                 self._db.execute("ALTER TABLE runs ADD COLUMN failure TEXT")
+            if "shared" not in columns:  # what the user shared with the task (its card), see add_shared
+                self._db.execute("ALTER TABLE runs ADD COLUMN shared TEXT")
             # Finished tasks that never had a Hermes run id (quick answers, home control) could not be
             # cleared: "Clear done" and the x address tasks by run id. Give them their local id.
             settled = sorted(TERMINAL | {"rejected"})
@@ -245,6 +249,59 @@ class StateStore:
         """Forget records older than ``before`` (their copies are pruned on the same schedule)."""
         with self._lock, self._db:
             return self._db.execute("DELETE FROM shared_files WHERE created < ?", (before,)).rowcount
+
+    def add_shared(self, key: str, items: list[dict[str, Any]]) -> None:
+        """What the user shared with this task, for its card: ``{kind, app, name, path, at}`` per
+        screen, picture or file. Paths stay on the server (``shared_items``); the app gets
+        ``work()["shared"]`` and fetches images by position (``shared_image``)."""
+        clean = [{k: item.get(k) for k in ("kind", "app", "name", "path", "at")} for item in items
+                 if item.get("kind") in SHARED_KINDS]
+        if not clean:
+            return
+        with self._lock, self._db:
+            row = self._db.execute("SELECT shared FROM runs WHERE idem_key=?", (key,)).fetchone()
+            if row is None:
+                return
+            known = self._shared_list(row[0])
+            self._db.execute("UPDATE runs SET shared=? WHERE idem_key=?",
+                             (json.dumps((known + clean)[-MAX_SHARED:]), key))
+
+    @staticmethod
+    def _shared_list(raw: str | None) -> list[dict[str, Any]]:
+        try:
+            items = json.loads(raw) if raw else []
+        except ValueError:
+            return []
+        return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+
+    def shared_items(self, key: str) -> list[dict[str, Any]]:
+        """Server-side view of what was shared with a task, paths included."""
+        with self._lock:
+            row = self._db.execute("SELECT shared FROM runs WHERE idem_key=?", (key,)).fetchone()
+        return self._shared_list(row[0] if row else None)
+
+    def shared_image(self, run_id: str, number: int) -> str | None:
+        """The saved copy of the ``number``-th thing (1-based) shared with this run, when it is an image."""
+        with self._lock:
+            row = self._db.execute("SELECT shared FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        items = self._shared_list(row[0] if row else None)
+        if not 1 <= number <= len(items):
+            return None
+        item = items[number - 1]
+        path = item.get("path")
+        return path if item.get("kind") in {"screen", "picture"} and isinstance(path, str) else None
+
+    def last_screen_at(self, session_id: str | None) -> float | None:
+        """When a screenshot last went into this Hermes session (it stays in the session's history and
+        is sent again with every later run there), or None."""
+        if not session_id:
+            return None
+        with self._lock:
+            rows = self._db.execute("SELECT shared FROM runs WHERE session_id=? AND shared LIKE '%\"screen\"%'",
+                                    (session_id,)).fetchall()
+        times = [float(i.get("at") or 0) for (raw,) in rows for i in self._shared_list(raw)
+                 if i.get("kind") == "screen" and i.get("at")]
+        return max(times) if times else None
 
     def hide_key(self, key: str) -> None:
         """Keep a row out of the task list regardless of status (a tail waiting to join its task)."""
@@ -646,7 +703,7 @@ class StateStore:
              assistant_name: str = "Hermes") -> dict[str, Any] | None:
         """The latest admitted job or one exact server-owned run, including past calls."""
         cols = """idem_key,run_id,status,updated,short_status,detail,progress_updated,
-                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure"""
+                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,shared"""
         with self._lock:
             if idem_key:
                 row = self._db.execute(f"SELECT {cols} FROM runs WHERE idem_key=?", (idem_key,)).fetchone()
@@ -657,7 +714,7 @@ class StateStore:
             if row is None:
                 return None
             (key, actual_run_id, status, updated, short_status, detail, progress_updated,
-             status_source, result_json, title, dismissed, summary, continued, settled_at, failure) = row
+             status_source, result_json, title, dismissed, summary, continued, settled_at, failure, shared) = row
             events = self._db.execute(
                 "SELECT kind,text,created FROM work_events WHERE idem_key=? ORDER BY seq DESC LIMIT 30", (key,)).fetchall()
         stale = status not in TERMINAL | {"waiting_for_approval"} and time.time() - updated > STALE_AFTER_S
@@ -699,6 +756,11 @@ class StateStore:
         if review:
             # Image cards still waiting on the call panel's review card (numbers address /voice/card-image).
             work["review"] = {"images": review, "settled_at": settled_at}
+        items = self._shared_list(shared)
+        if items:
+            # What the user shared with it (a thumbnail or file chip each); images are fetched by
+            # position from /voice/shared-image/<run_id>/<n>. Paths never leave the server.
+            work["shared"] = [{k: i[k] for k in ("kind", "app", "name") if i.get(k)} for i in items]
         if continued:
             try:
                 work["continued_in"] = json.loads(continued).get("label")

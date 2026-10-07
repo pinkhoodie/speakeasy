@@ -943,6 +943,17 @@ class VoiceService:
         except (ImageRejected, OSError, TimeoutError):
             raise ServiceError(404, "image unavailable") from None
 
+    def shared_image(self, run_id: str, number: int) -> tuple[bytes, str]:
+        """An image the user shared with a task (its card's ``shared[number - 1]``): only Speakeasy's
+        own copy in the shared folder, re-vetted on every read like any local image."""
+        path = self.store.shared_image(run_id, number) if ID_RE.fullmatch(run_id) else None
+        if path is None or not self.shared.owns(path):
+            raise ServiceError(404, "image not found")
+        try:
+            return read_local_image(path, self.image_roots())
+        except (ImageRejected, OSError):
+            raise ServiceError(404, "image unavailable") from None
+
     def live_image(self, run_id: str) -> tuple[bytes, str]:
         """The latest image a task produced or is looking at, re-vetted on every read."""
         key = self.store.key_for_run(run_id) if ID_RE.fullmatch(run_id) else None

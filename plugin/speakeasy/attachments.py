@@ -390,6 +390,17 @@ class CallAttachments:
             self._cond.notify_all()
             return capture.attachment
 
+    def move_capture(self, capture_id: str, delegation_id: str) -> bool:
+        """Hand a capture request that is still open (or its capture, not taken yet) to another
+        handoff: the request asked a question first, and the answer carries what was on screen when
+        it was asked. False when it has closed meanwhile."""
+        with self._cond:
+            capture = self._captures.get(capture_id)
+            if capture is None or capture.state not in _HELD:
+                return False
+            capture.delegation_id = delegation_id
+            return True
+
     def close_capture(self, capture_id: str, reason: str = "cancelled") -> bool:
         """Close a request (and drop its capture if not taken yet); False when it was already closed."""
         with self._cond:

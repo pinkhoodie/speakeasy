@@ -48,6 +48,15 @@ class Conversation:
     name: str            # platform chat name, e.g. "My Server / #research / Topic"
     title: str           # Hermes session title
     last_active: float
+    # False when Hermes recorded no chat type: ``chat_type`` then reads "dm" for ordinary text work,
+    # but such a chat is never trusted with shared screens, pictures or files (see ``private``).
+    chat_type_known: bool = True
+
+    @property
+    def private(self) -> bool:
+        """A one-to-one chat with the user, as Hermes recorded it: the only kind of chat whose session
+        a shared screen, picture or file may enter. Groups, channels, threads and unknowns never."""
+        return self.chat_type_known and self.chat_type in {"dm", "private"}
 
     @property
     def label(self) -> str:
@@ -91,9 +100,10 @@ def _from_row(session_id: str, source: str, chat_type: str | None, thread_id: st
     thread = str(thread_id or origin.get("thread_id") or "")
     if any(v and not SAFE_ID_RE.fullmatch(v) for v in (*fields.values(), thread)):
         return None
-    return Conversation(session_id, source, chat_id, str(chat_type or origin.get("chat_type") or "dm"), thread,
+    stated = chat_type or origin.get("chat_type")
+    return Conversation(session_id, source, chat_id, str(stated or "dm"), thread,
                         fields["user_id"], fields["parent_chat_id"], str(origin.get("chat_name") or "")[:200],
-                        (title or "")[:200], float(last or 0))
+                        (title or "")[:200], float(last or 0), chat_type_known=bool(stated))
 
 
 def recent_conversations(state_db: Path, *, days: int = RECENT_DAYS, limit: int = MAX_CANDIDATES,

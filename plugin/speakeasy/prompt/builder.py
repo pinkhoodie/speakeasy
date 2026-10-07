@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -363,11 +364,12 @@ def status_rule(names: Names) -> str:
 
 
 def build_task_prompt(names: Names, revision: int, context: str, focus: str | None = None,
-                      delivery_label: str = "") -> str:
+                      delivery_label: str = "", shared: str = "") -> str:
     """Prompt for a voice task running in its own Hermes session, beside other tasks.
 
     The session is private to this task (and its follow-ups), so it names the job and carries the
-    call transcript for context."""
+    call transcript for context. ``shared`` is the block naming what the user shared with this
+    request (``shared_block``), never the bytes."""
     where = (f"your final answer is still shown in the Speakeasy app and posted to {delivery_label}"
              if delivery_label else "your final answer is still shown in the Speakeasy app")
     return (
@@ -388,6 +390,7 @@ def build_task_prompt(names: Names, revision: int, context: str, focus: str | No
             "redo or cancel another task's work. ", names) if focus else
            "Your task is the most recent user request in the transcript below; earlier requests are context and "
            "have their own tasks, so do not redo or cancel their work. ")
+        + (shared + " " if shared else "")
         + status_rule(names) + "\n\n"
         f"Recent timestamped voice transcript (revision {revision}):\n{context}"
     )
@@ -395,6 +398,63 @@ def build_task_prompt(names: Names, revision: int, context: str, focus: str | No
 
 def steer_text(names: Names, request: str) -> str:
     return f"{names.user_cap} just added to this task by voice: {request} Fold it into the work you are doing; do not start over."
+
+
+# -- look at this: what the user shared with a request ------------------------------------
+
+def _listed(parts: list[str]) -> str:
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def _shared_thing(item: dict[str, Any]) -> str:
+    kind, app, name = item.get("kind"), item.get("app"), item.get("name")
+    if kind == "screen":
+        return f"a screenshot of their {app} window" if app else "a screenshot of their screen"
+    if kind == "picture":
+        return f"the picture {name}" if name else "a picture"
+    return f"the file {name}" if name else "a file"
+
+
+def shared_block(names: Names, items: list[dict[str, Any]], attached: bool) -> str:
+    """One block naming what the user shared with this request and where Speakeasy saved each copy
+    on this machine. Only names and paths: image bytes travel as image parts of the message itself
+    (``attached``), and a file is opened with Hermes' own tools."""
+    if not items:
+        return ""
+    things = [_shared_thing(i) + (f" (saved at {i['path']})" if i.get("path") else "") for i in items]
+    images = any(i.get("kind") in {"screen", "picture"} for i in items)
+    files = any(i.get("kind") == "file" for i in items)
+    how = []
+    if images:
+        how.append("the images are attached to this message" if attached else "open the images with vision_analyze")
+    if files:
+        how.append("open the files with your file tools")
+    text = render("{user_name_cap} shared ", names) + _listed(things) + ". "
+    if how:
+        sentence = "; ".join(how)
+        text += sentence[0].upper() + sentence[1:] + ". "
+    return text + "Use them to understand what they mean."
+
+
+def stale_screen_line(at: float) -> str:
+    """For a run in a session that had a screenshot before but has none of its own: the old one
+    (still in the session's history) is not what the screen shows now."""
+    return f"No new screenshot with this message; the last one is from {time.strftime('%H:%M', time.localtime(at))}."
+
+
+def shared_steer_text(names: Names, request: str, block: str) -> str:
+    """Guidance into a running task that brings what the user shared: the saved copies are named,
+    so the task opens them itself (a running task can't take new image parts)."""
+    return (f"{names.user_cap} just added to this task by voice: {request} {block} "
+            "Fold it into the work you are doing; do not start over.")
+
+
+def group_chat_focus(request: str, where: str) -> str:
+    """A request that would continue a group chat but carries what the user shared: it runs as its
+    own task instead, so nothing shared enters that chat's session."""
+    return (f"{request} (This is about the conversation in {where}. It's a shared chat, so this request, with "
+            "what the user shared, runs here instead; look that conversation up with your session-history tools "
+            "if you need its context.)")
 
 
 def follow_up_focus(request: str, earlier: str, result: str | None, status: str | None) -> str:
@@ -676,6 +736,46 @@ def attachment_note(pictures: int, files: int) -> str:
     return (f"Fact, not to read aloud: waiting on the panel to go with the user's next request: {' and '.join(parts)} "
             "they added. It goes along with whatever they ask next. You can't see it: never describe it or guess "
             "what it shows.")
+
+
+def shared_note(app: str | None, screen: bool, pictures: int, files: int) -> str:
+    """Silent, once things went with a request: what the work has (counts and the app's name only;
+    file names and contents never reach the voice)."""
+    parts = []
+    if screen:
+        parts.append(f"a screenshot of their {app} window" if app else "a screenshot of their screen")
+    parts += [f"{n} {word}{'s' if n != 1 else ''}" for n, word in ((pictures, "picture"), (files, "file")) if n]
+    return (f"Fact, not to read aloud: your work on this request has {_listed(parts)}. You haven't seen any of "
+            "it yourself: never describe it or guess what it shows before a result arrives.")
+
+
+def screen_sent_line(app: str | None) -> str:
+    """Spoken once per call, for the first capture that goes with a request that wasn't about the
+    screen: the user hears that sharing is on and how to stop it."""
+    return f"I'm taking your {app + ' window' if app else 'screen'} along with that. The eye button turns sharing off."
+
+
+# Why the screen didn't go with a request, in the user's terms (attachments.FAILURE_REASONS, plus the
+# plugin's own). Other reasons (the call ended, the request was cancelled) are never spoken.
+CAPTURE_MISSING = {
+    "permission": "Screen Recording is off for Speakeasy",
+    "no_window": "there was no window to take",
+    "speakeasy_window": "a Speakeasy window was in front",
+    "password_manager": "a password manager was in front",
+    "secure_input": "a password field was active",
+    "blank": "the capture came out blank",
+    "too_large": "the capture was too big",
+    "timeout": "it didn't come through in time",
+    "unsupported": "this Mac couldn't take it",
+    "budget": "there wasn't room for it next to your pictures",
+    "sharing_off": "you turned sharing off",
+}
+
+
+def capture_missing_line(reason: str | None) -> str | None:
+    """Spoken when a capture was due but didn't go: the reason, and that the work went ahead."""
+    why = CAPTURE_MISSING.get(reason or "")
+    return f"I couldn't get your screen — {why} — so I sent your request without it." if why else None
 
 
 STOPPED_SPOKEN = "I stopped that task. I'm still here."

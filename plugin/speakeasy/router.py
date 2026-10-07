@@ -272,6 +272,63 @@ def is_show_me(request: str) -> bool:
     return bool(text) and len(text) <= 80 and bool(_SHOW_ME.match(text))
 
 
+# -- "look at this": the user's own screen ------------------------------------------------------
+
+# Things on a screen that "this ..." points at ("what's this error", "is this layout right?").
+# Conservative: words that often mean something else ("this email" while dictating one, "this
+# week", "this table" at a restaurant) are left out.
+_SCREEN_THINGS = (r"(?:screen|window|tab|page|site|website|web ?page|app|dialog|pop-?up|error|warning|alert|"
+                  r"notification|code|line|function|file|document|doc|pdf|spreadsheet|chart|graph|diagram|layout|"
+                  r"design|mock-?up|photo|picture|image|screenshot|video|form|button|menu|setting|field|link|map|"
+                  r"article|slide|invoice|receipt|log|stack ?trace|terminal|crash)(?:e?s)?")
+_SCREEN_REF = re.compile(
+    r"(?i)(?:"
+    r"\b(?:my|this) (?:screen|display)\b(?!\s*(?:time|door|saver|protector|name)\b)"
+    rf"|\b(?:this|these) {_SCREEN_THINGS}\b"
+    r"|\b(?:look|looking|glance) at (?:this|these)\b(?!\s*(?:weekend|week|morning|afternoon|evening|night|month|"
+    r"year|time|season|quarter|one)\b|'s)"
+    r"|\bcheck (?:this|these) out\b|\b(?:you|u) see (?:this|these)\b|\b(?:reply|respond) to this\b"
+    r"|\bwhat (?:i'?m|i am) (?:looking at|seeing|reading|watching)\b|\bwhat i (?:have|got) open\b"
+    r"|\bin front of me\b"
+    r")")
+# "What's this?" on its own, said while looking at something.
+_WHAT_IS_THIS = re.compile(
+    r"(?i)^\W*(?:(?:hey|so|ok|okay|um|uh|and|but|wait|hmm|oh)[,\s]+)*(?:what(?:'s| is) this|what are these|"
+    r"what does this (?:say|mean|do)|what am i looking at)\W*$")
+# The user looking ("let me look at this"): they want to see the task's work, not show theirs.
+_VIEWER = re.compile(r"(?i)\b(?:let me|lemme|let's|can i|could i|may i|i want to|i'd like to|i wanna)\s+"
+                     r"(?:(?:take|have) a\s+)?(?:look|see|glance)\b")
+# "Show me what you're looking at": the task's own view, even while the user is sharing theirs.
+_TASK_VIEW = re.compile(
+    r"(?i)\b(?:what (?:are|r) you (?:looking at|seeing|working on)|what you(?:'re| are)? (?:looking at|seeing|doing|"
+    r"working on|made|have|got|found)|(?:on )?your screen)\b")
+
+
+def refers_to_screen(request: str) -> bool:
+    """The request points at what the user is looking at: "what's this error?", "look at this",
+    "is this layout right?", "what's on my screen". Conservative on purpose: "look at this weekend's
+    forecast", "show me what you're looking at" (the task's own view) and "let me look at this" never
+    match. Dispatch skips the quick lanes for these and steers a running task with the screen; holds
+    and spoken screen intents (U4) build on the same matcher."""
+    text = " ".join((request or "").split())
+    if not text:
+        return False
+    if _WHAT_IS_THIS.match(text):
+        return True
+    for match in _SCREEN_REF.finditer(text):
+        if match.group(0).lower().startswith(("look", "glance")) and _VIEWER.search(
+                text[max(0, match.start() - 24):match.end()]):
+            continue  # "let me look at this": they want to see, not show
+        return True
+    return False
+
+
+def about_task_view(request: str) -> bool:
+    """A "show me" about what the task itself is looking at ("show me what you're looking at",
+    "what's on your screen"): still the task's own view while the user shares theirs."""
+    return bool(_TASK_VIEW.search(request or ""))
+
+
 def show_me_target(request: str, tasks: list[OpenTask], has_image: set[str]) -> OpenTask | None:
     """Which task 'show me' is about: one the words name, else the newest task with something to
     show, else the newest running task (it will be asked for a screenshot)."""
