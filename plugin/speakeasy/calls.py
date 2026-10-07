@@ -27,6 +27,7 @@ from . import instant as instant_mod
 from . import jev as jev_mod
 from . import quick as quick_mod
 from . import views as views_mod
+from .attachments import Attachment, CallAttachments
 from .settings import valid_delivery_target
 from .prompt import builder as P
 from . import text as text_mod
@@ -104,10 +105,11 @@ STATUS_NOTE_EVERY_S = 60.0
 
 
 class ServiceError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, reason: str | None = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.reason = reason  # a short code the app maps to its own line (attachment refusals)
 
 
 @dataclasses.dataclass
@@ -136,6 +138,10 @@ class Runtime:
     quick_call: Callable[[str, str], str | None] | None = None
     # The local log of ended calls that "Tune from my calls" learns from (tune.CallLog); None = not kept.
     call_log: Any = None
+    # Speakeasy's copies of shared files (attachments.SharedFolder), and the call that deletes copies
+    # nothing uses any more (no task records them, no live call holds them). None = not kept.
+    shared: Any = None
+    discard_files: Callable[[list[str]], int] | None = None
 
     @property
     def names(self) -> P.Names:
@@ -275,6 +281,10 @@ class Interaction:
     worker: Any = dataclasses.field(default=None, repr=False)
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock, repr=False)
     feed: EventFeed = dataclasses.field(default_factory=EventFeed, repr=False)
+    # What the client can share, the screen toggle, pending pictures and files, capture requests.
+    # A resumed call starts with a fresh one (sharing off, nothing pending); the app re-sends.
+    attachments: CallAttachments = dataclasses.field(default_factory=CallAttachments, repr=False)
+    hold: dict[str, Any] | None = None  # a request waiting for screen sharing to come on (one at a time)
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -298,6 +308,8 @@ class Interaction:
                 "error": (latest.error if latest else None) or self.error,
                 "paused": self.paused,
                 "resumed_from": self.resumed_from,
+                **self.attachments.snapshot(),  # screen, captures, attachments
+                "hold": self.hold,
             }
 
     def head(self) -> "Interaction":
@@ -362,6 +374,19 @@ def publish_state(store: Any, interaction: Interaction, assistant_name: str = "H
                 "finalization": "complete" if snap["finalization"] == "confirmed" else "incomplete",
                 "error": snap.get("error"),
             })
+
+
+def end_shared(rt: Runtime, interaction: Interaction, reason: str) -> None:
+    """The call ended or paused: no more capture requests or uploads. Pictures and files that were
+    only waiting on the panel are dropped (the app re-sends them to a resumed call), and so are
+    Speakeasy's copies of those files unless a task or another call still uses them."""
+    dropped = interaction.attachments.end(reason)
+    paths = [a.path for a in dropped if a.path]
+    if paths and rt.discard_files is not None:
+        try:
+            rt.discard_files(paths)
+        except Exception as exc:
+            logger.warning("speakeasy: could not delete unsent shared files: %s", type(exc).__name__)
 
 
 # -- chat notices (delivery target) ---------------------------------------------------------------
@@ -576,6 +601,7 @@ class SidebandWorker:
                 self.still_working_notices()
         except Exception as exc:
             logger.warning("speakeasy: call-close bookkeeping failed: %s", type(exc).__name__)
+        end_shared(self.rt, self.interaction, "paused" if paused else "ended")
 
     def call_tasks(self) -> list[dict[str, Any]]:
         """This call's tasks for the call log: what was asked, how it ended, the spoken answer."""
@@ -1235,6 +1261,33 @@ class SidebandWorker:
         self.publish()  # the task list first, so the app already has the task it is told to open
         self.interaction.feed.publish("show", {"task_id": task_id, "run_id": run_id, "image": kind,
                                                "seq": self.show_seq})
+
+    def request_capture(self, delegation_id: str) -> str | None:
+        """Ask the app for a capture of the frontmost window for this handoff: only in a call that
+        declared ``screen: ready``, with sharing on. Listed in the snapshot (polling clients) and
+        published once as a ``capture`` event; asking again while it is open returns the same id.
+        The app confirms with ``capturing`` before capturing and gets 410 once the request has
+        closed, so a stale or replayed event never captures anything. None when it can't capture."""
+        shared = self.interaction.attachments
+        before = shared.capture_for(delegation_id)
+        capture_id = shared.open_capture(delegation_id)
+        if capture_id is None or capture_id == before:
+            return capture_id
+        self.publish()  # the snapshot first, so a polling app sees it too
+        self.interaction.feed.publish("capture", {"capture_id": capture_id})
+        return capture_id
+
+    def take_attachments(self, delegation_id: str, idem: str) -> list[Attachment]:
+        """Hand over the pictures and files bound to this handoff (bytes included) and mark them
+        sent. Saved files are recorded on the task first, so clearing the task deletes Speakeasy's
+        copies. Call once, when the task's run starts."""
+        shared = self.interaction.attachments
+        paths = [a.path for a in shared.bound(delegation_id) if a.path]
+        if paths:
+            self.store.add_shared_files(idem, paths)
+        taken = shared.take_bound(delegation_id)
+        self.publish()
+        return taken
 
     async def start_parts(self, delegation_id: str, revision: int, context: str, parts: list[str],
                           choice: channels.Choice) -> None:

@@ -69,6 +69,11 @@ class StateStore:
             self._db.execute("""CREATE TABLE IF NOT EXISTS live_images (
                 idem_key TEXT PRIMARY KEY, kind TEXT NOT NULL, ref TEXT NOT NULL, name TEXT NOT NULL,
                 source TEXT NOT NULL, seq INTEGER NOT NULL, updated REAL NOT NULL)""")
+            # Speakeasy's copies of files a task carried (attachments.SharedFolder paths): deleted when
+            # the task is cleared and no other task still records the same copy.
+            self._db.execute("""CREATE TABLE IF NOT EXISTS shared_files (
+                idem_key TEXT NOT NULL, path TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY (idem_key, path))""")
+            self._db.execute("CREATE INDEX IF NOT EXISTS shared_files_path ON shared_files(path)")
             columns = {row[1] for row in self._db.execute("PRAGMA table_info(runs)")}
             if "timings" not in columns:  # added after the first release
                 self._db.execute("ALTER TABLE runs ADD COLUMN timings TEXT")
@@ -199,6 +204,47 @@ class StateStore:
                 if cursor.rowcount:
                     done.append(run_id)
         return done
+
+    # -- shared files ------------------------------------------------------------------
+    def add_shared_files(self, key: str, paths: list[str]) -> None:
+        """Record the saved copies a task carried (screens, pictures and files shared with it)."""
+        now = time.time()
+        with self._lock, self._db:
+            self._db.executemany("INSERT OR IGNORE INTO shared_files VALUES (?,?,?)",
+                                 [(key, str(p), now) for p in paths if p])
+
+    def shared_files(self, key: str) -> list[str]:
+        with self._lock:
+            rows = self._db.execute("SELECT path FROM shared_files WHERE idem_key=? ORDER BY created", (key,)).fetchall()
+        return [r[0] for r in rows]
+
+    def forget_shared_files(self, keys: list[str]) -> list[str]:
+        """These tasks were cleared: drop their records and return the copies they named (the
+        caller deletes the ones nothing else still uses)."""
+        if not keys:
+            return []
+        marks = ",".join("?" * len(keys))
+        with self._lock, self._db:
+            rows = self._db.execute(f"SELECT DISTINCT path FROM shared_files WHERE idem_key IN ({marks})",
+                                    keys).fetchall()
+            self._db.execute(f"DELETE FROM shared_files WHERE idem_key IN ({marks})", keys)
+        return [r[0] for r in rows]
+
+    def shared_paths_in_use(self, paths: set[str]) -> set[str]:
+        """Which of these copies a task still records."""
+        if not paths:
+            return set()
+        wanted = sorted(paths)
+        marks = ",".join("?" * len(wanted))
+        with self._lock:
+            rows = self._db.execute(f"SELECT DISTINCT path FROM shared_files WHERE path IN ({marks})",
+                                    wanted).fetchall()
+        return {r[0] for r in rows}
+
+    def prune_shared_files(self, before: float) -> int:
+        """Forget records older than ``before`` (their copies are pruned on the same schedule)."""
+        with self._lock, self._db:
+            return self._db.execute("DELETE FROM shared_files WHERE created < ?", (before,)).rowcount
 
     def hide_key(self, key: str) -> None:
         """Keep a row out of the task list regardless of status (a tail waiting to join its task)."""

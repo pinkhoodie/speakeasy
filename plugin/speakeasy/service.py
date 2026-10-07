@@ -23,8 +23,8 @@ from . import attachments as A
 from . import delivery as D
 from .brief import BriefInvalid, BriefManager
 from .calls import (ACTIVE_RUN_STATES, MAX_TASKS, ServiceError, Interaction, Notices, Runtime, SidebandWorker,
-                    interaction_tasks, publish_state)
-from .cards import ImageRejected, default_image_roots, fetch_image, read_local_image
+                    end_shared, interaction_tasks, publish_state)
+from .cards import ImageRejected, _sniff, default_image_roots, fetch_image, read_local_image
 from .devices import DeviceStore
 from .emails import canonical_json, extract_email_drafts
 from .hermes_api import HermesAPI, HermesError
@@ -112,6 +112,9 @@ class VoiceService:
                                         plan_call=home_plan_call or router_home_plan_call,
                                         client_factory=home_client or HomeAssistantClient)
         self.rt.home = self.home_control
+        self.shared = A.SharedFolder(self.home)
+        self.rt.shared = self.shared
+        self.rt.discard_files = self.discard_shared_files
         self._suggest_run = suggest_run or self._brief_run
         self.brief = BriefManager(self.home, brief_run or self._brief_run, self.settings.get,
                                   error_fn=lambda: getattr(self.hermes, "last_error", "") or "")
@@ -222,9 +225,14 @@ class VoiceService:
         if self.updated_underneath():
             raise ServiceError(503, RESTART_NEEDED)
         resume_from = body.get("resume_from")
-        if (not set(body) <= {"sdp", "resume_from", "tour"} or not isinstance(body.get("sdp"), str)
+        if (not set(body) <= {"sdp", "resume_from", "tour", "screen"} or not isinstance(body.get("sdp"), str)
                 or resume_from is not None and not (isinstance(resume_from, str) and ID_RE.fullmatch(resume_from))):
-            raise ServiceError(400, "body must contain only an SDP offer, an optional resume_from and tour")
+            raise ServiceError(400, "body must contain only an SDP offer, an optional resume_from, tour and screen")
+        # What the app can share this call: ready (it can capture the screen) or no_permission. Apps
+        # that predate screen sharing never send it, and their calls behave as before.
+        screen = body.get("screen")
+        if screen is not None and screen not in A.DECLARATIONS:
+            raise ServiceError(400, "screen must be ready or no_permission")
         tour = _tour(body.get("tour")) if "tour" in body and not resume_from else None
         if tour is not None and self.store.get_meta("last_call_end") is not None:
             # The app asks per Mac (a new Mac, a reinstall or an update all look like a first call
@@ -299,8 +307,10 @@ class VoiceService:
             "interaction_id": interaction_id, "session": {"id": live_id},
             "transport": {"type": "webrtc", "sdp": answer}, "voice_provider": provider,
         }
+        if screen is None and source is not None:
+            screen = source.attachments.declared  # a resume that doesn't say keeps the call's declaration
         interaction = Interaction(interaction_id=interaction_id, live_session_id=live_id, away=away,
-                                  device_id=device_id)
+                                  device_id=device_id, attachments=A.CallAttachments(screen))
         if source is not None:
             self.adopt(source, interaction, history)
             client_result["resumed_from"] = source.interaction_id
@@ -378,6 +388,8 @@ class VoiceService:
                 worker.stop_transport()
             except Exception:
                 pass
+        # Captures and uploads stop with the pause; the app re-sends its pending things on resume.
+        end_shared(self.rt, interaction, "paused")
         timer = threading.Timer(PAUSE_NOTICE_AFTER_S, self.pause_expired, args=(interaction,))
         timer.daemon = True
         timer.start()
@@ -454,6 +466,7 @@ class VoiceService:
         ticks = 0
         self.settle_stuck_tasks()
         self._check_image_support_soon()
+        self.prune_shared()
         next_image_check = time.monotonic() + IMAGE_SUPPORT_EVERY_S
         while not self._stop.wait(IDLE_CHECK_S):
             try:
@@ -465,6 +478,7 @@ class VoiceService:
                 self.settle_stuck_tasks()
             if time.monotonic() >= next_image_check:  # about once an hour
                 self._check_image_support_soon()
+                self.prune_shared()
                 next_image_check = time.monotonic() + IMAGE_SUPPORT_EVERY_S
 
     def _check_image_support_soon(self) -> None:
@@ -656,6 +670,8 @@ class VoiceService:
                 or not all(isinstance(r, str) and ID_RE.fullmatch(r) for r in run_ids):
             raise ServiceError(400, "run_ids must be a list of run ids")
         dismissed = self.store.dismiss(run_ids)
+        # Clearing a task deletes Speakeasy's copies of what was shared with it.
+        self.forget_task_files([k for k in (self.store.key_for_run(r) for r in dismissed) if k])
         with self.lock:
             live = list(self.interactions.values())
         name = self.settings.get()["assistant_name"]
@@ -696,6 +712,214 @@ class VoiceService:
         if not ID_RE.fullmatch(run_id):
             raise ServiceError(404, "not found")
         return {"work": self.store.work(run_id, assistant_name=self.settings.get()["assistant_name"])}
+
+    # -- look at this: screen sharing, pictures and files ------------------------------------------
+    @staticmethod
+    def _refused(exc: A.Refused) -> ServiceError:
+        return ServiceError(exc.status, exc.message, reason=exc.reason)
+
+    def _call_open(self, interaction: Interaction) -> None:
+        """409 once the call has ended or paused: things go to the call that resumes it."""
+        with interaction.lock:
+            over = interaction.call_closed or interaction.paused or interaction.successor is not None
+        if over or interaction.attachments.ended:
+            raise ServiceError(409, "the call has ended", reason="ended")
+
+    def check_upload(self, interaction_id: str, headers: Any, length: int) -> dict[str, Any]:
+        """``POST /voice/interactions/{id}/attachments``, before its body is read: headers, size cap,
+        the call, and whether it still takes this upload. The upload itself is ``accept_upload``."""
+        kind = (headers.get("X-Speakeasy-Kind") or "").strip().lower()
+        if kind not in A.KINDS:
+            raise ServiceError(400, "X-Speakeasy-Kind must be screen, picture or file")
+        mime = A.media_type(headers.get("Content-Type"))
+        if kind in A.IMAGE_KINDS and mime not in A.IMAGE_TYPES:
+            raise ServiceError(415, "images must be image/jpeg or image/png", reason="unsupported")
+        capture_id = (headers.get("X-Speakeasy-Capture-Id") or "").strip() or None
+        if (kind == "screen") != (capture_id is not None) or capture_id and not ID_RE.fullmatch(capture_id):
+            raise ServiceError(400, "a screen capture needs its X-Speakeasy-Capture-Id; pictures and files take none")
+        raw_name = headers.get("X-Speakeasy-Filename")
+        if kind == "file" and not (raw_name or "").strip():
+            raise ServiceError(400, "files need X-Speakeasy-Filename")
+        if length <= 0:
+            raise ServiceError(400, "empty upload")
+        if length > (A.MAX_FILE_BYTES if kind == "file" else A.MAX_IMAGE_BYTES):
+            raise ServiceError(413, "too large to share", reason="too_large")
+        interaction = self.interaction(interaction_id)
+        try:
+            if kind == "screen":
+                interaction.attachments.check_capture(capture_id or "")  # 410 when closed, the call's end included
+            else:
+                self._call_open(interaction)
+                interaction.attachments.check_room(kind, length)
+        except A.Refused as exc:
+            raise self._refused(exc) from None
+        return {"interaction": interaction, "kind": kind, "mime": mime, "size": length, "capture_id": capture_id,
+                "name": A.safe_filename(raw_name) if (raw_name or "").strip() else None,
+                "app": A.safe_app(headers.get("X-Speakeasy-App"))}
+
+    def accept_upload(self, upload: dict[str, Any], data: bytes) -> dict[str, Any]:
+        """Keep a checked upload: images must be what they say (415); a picture waits in memory, a
+        file is saved under the shared folder now, a screen capture goes to its open request (410
+        once closed; the same request again returns the same attachment). Never logs bytes or names."""
+        interaction, kind, mime = upload["interaction"], upload["kind"], upload["mime"]
+        if len(data) != upload["size"]:
+            raise ServiceError(400, "upload ended early")
+        if kind in A.IMAGE_KINDS and _sniff(data[:16]) != mime:
+            raise ServiceError(415, f"the bytes aren't {mime}", reason="unsupported")
+        shared = interaction.attachments
+        try:
+            if kind == "screen":
+                attachment = shared.deliver_capture(upload["capture_id"], data=data, mime=mime, app=upload["app"])
+            elif kind == "picture":
+                self._call_open(interaction)
+                attachment = shared.add("picture", mime=mime, size=len(data), data=data, name=upload["name"],
+                                        app=upload["app"])
+            else:
+                self._call_open(interaction)
+                with self.shared.lock:  # saved and held in one step: never deleted in between
+                    path = self.shared.save(data, upload["name"] or "file")
+                    try:
+                        attachment = shared.add("file", mime=mime, size=len(data), path=str(path), name=path.name)
+                    except A.Refused:
+                        self.discard_shared_files([str(path)])
+                        raise
+        except A.Refused as exc:
+            raise self._refused(exc) from None
+        except OSError as exc:
+            logger.warning("speakeasy: could not save a shared file (%s)", type(exc).__name__)
+            raise ServiceError(500, "could not save the file") from None
+        logger.info("speakeasy: %s shared on %s (%d KB)", kind, interaction.interaction_id[:10],
+                    max(1, len(data) // 1024))
+        publish_state(self.store, interaction, self.settings.get()["assistant_name"])
+        if kind != "screen":
+            self._sync_notes(interaction)
+        return {"id": attachment.id, "kind": attachment.kind}
+
+    def remove_attachment(self, interaction_id: str, attachment_id: str) -> dict[str, Any]:
+        """The ✕ on a pending thumbnail or file chip. 409 once it went with a request."""
+        interaction = self.interaction(interaction_id)
+        try:
+            removed = interaction.attachments.remove(attachment_id)
+        except A.Refused as exc:
+            raise self._refused(exc) from None
+        if removed.path:
+            self.discard_shared_files([removed.path])
+        publish_state(self.store, interaction, self.settings.get()["assistant_name"])
+        self._sync_notes(interaction)
+        return {"id": attachment_id, "removed": True}
+
+    def set_screen(self, interaction_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """The panel's screen button: exactly ``{on, seq}``. An older seq than the last one applied is
+        ignored (the reply carries the state in force). Turning it off closes capture requests."""
+        on, seq = (body.get("on"), body.get("seq")) if isinstance(body, dict) else (None, None)
+        if (set(body or {}) != {"on", "seq"} or not isinstance(on, bool) or not isinstance(seq, int)
+                or isinstance(seq, bool) or not 0 <= seq < 2 ** 53):
+            raise ServiceError(400, "body must be exactly {\"on\": true|false, \"seq\": <count>}")
+        interaction = self.interaction(interaction_id)
+        self._call_open(interaction)
+        try:
+            changed = interaction.attachments.set_screen(on, seq)
+        except A.Refused as exc:
+            raise self._refused(exc) from None
+        if changed:
+            logger.info("speakeasy: screen sharing %s on %s", "on" if on else "off", interaction_id[:10])
+            publish_state(self.store, interaction, self.settings.get()["assistant_name"])
+            self._sync_notes(interaction)
+        return interaction.attachments.screen_state()
+
+    def capture_status(self, interaction_id: str, capture_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """The app on one capture request: ``capturing`` (200 only while it is open, else 410: don't
+        capture), ``uploading`` (the wait is extended) or ``failed`` with its reason (closes it)."""
+        status, reason = (body.get("status"), body.get("reason")) if isinstance(body, dict) else (None, None)
+        if (not isinstance(body, dict) or not set(body) <= {"status", "reason"}
+                or status not in {"capturing", "uploading", "failed"}):
+            raise ServiceError(400, "body must be {\"status\": \"capturing\"|\"uploading\"|\"failed\", \"reason\"?}")
+        if status == "failed" and reason not in A.FAILURE_REASONS:
+            raise ServiceError(400, "failed needs a reason: " + ", ".join(sorted(A.FAILURE_REASONS)))
+        if status != "failed" and "reason" in body:
+            raise ServiceError(400, "reason is only for failed")
+        interaction = self.interaction(interaction_id)
+        if not interaction.attachments.capture_status(capture_id, status, reason):
+            raise ServiceError(410, "that capture request is closed", reason="closed")
+        if status == "failed":
+            logger.info("speakeasy: screen capture failed on %s (%s)", interaction_id[:10], reason)
+            publish_state(self.store, interaction, self.settings.get()["assistant_name"])
+        return {"capture_id": capture_id, "status": status}
+
+    def _sync_notes(self, interaction: Interaction) -> None:
+        """Tell the voice, silently, when sharing or what's waiting on the panel changed. A call still
+        connecting gets the notes once it connects (one waiting thread per call, bounded)."""
+        worker = interaction.worker
+        if worker is not None and worker.loop is not None and worker.call_connected():
+            self._speak_notes(interaction, worker)
+        elif interaction.attachments.claim_note_waiter():
+            threading.Thread(target=self._notes_when_connected, args=(interaction,), daemon=True,
+                             name="speakeasy-share-notes").start()
+
+    def _notes_when_connected(self, interaction: Interaction) -> None:
+        deadline = time.monotonic() + EARLY_CONNECT_WAIT_S
+        try:
+            while time.monotonic() < deadline and not interaction.attachments.ended:
+                worker = interaction.worker
+                if worker is not None and worker.loop is not None and worker.call_connected():
+                    break
+                time.sleep(0.1)
+        finally:
+            interaction.attachments.release_note_waiter()
+        worker = interaction.worker
+        if worker is not None and worker.loop is not None and worker.call_connected():
+            self._speak_notes(interaction, worker)
+
+    @staticmethod
+    def _speak_notes(interaction: Interaction, worker: Any) -> None:
+        for kind, value in interaction.attachments.take_notes():
+            if kind == "screen":
+                note = P.SCREEN_ON_NOTE if value else P.SCREEN_OFF_NOTE
+            else:
+                note = P.attachment_note(*value)  # type: ignore[misc]
+            worker.speak_from_thread("session.thinking.append", note)
+
+    def _live_shared_paths(self) -> set[str]:
+        with self.lock:
+            live = list(self.interactions.values())
+        paths: set[str] = set()
+        for interaction in live:
+            paths |= interaction.attachments.file_paths()
+        return paths
+
+    def discard_shared_files(self, paths: list[str]) -> int:
+        """Delete Speakeasy's copies nothing uses any more: no task records them and no call holds them."""
+        wanted = {str(p) for p in paths if p}
+        if not wanted:
+            return 0
+        with self.shared.lock:
+            busy = self.store.shared_paths_in_use(wanted) | self._live_shared_paths()
+            return self.shared.delete(sorted(wanted - busy))
+
+    def forget_task_files(self, keys: list[str]) -> int:
+        """Cleared tasks: delete the copies of what was shared with them (unless still used elsewhere)."""
+        try:
+            removed = self.discard_shared_files(self.store.forget_shared_files(keys))
+        except Exception as exc:
+            logger.warning("speakeasy: could not delete a cleared task's shared files: %s", type(exc).__name__)
+            return 0
+        if removed:
+            logger.info("speakeasy: deleted %d shared file(s) of cleared tasks", removed)
+        return removed
+
+    def prune_shared(self, now: float | None = None) -> int:
+        """Speakeasy's copies of shared files last saved over a week ago go (idle loop: at startup,
+        then hourly), with their task records."""
+        before = (time.time() if now is None else now) - A.SHARED_KEEP_S
+        try:
+            removed = self.shared.prune(before)
+            self.store.prune_shared_files(before)
+        except Exception as exc:
+            logger.warning("speakeasy: shared folder prune failed: %s", type(exc).__name__)
+            return 0
+        if removed:
+            logger.info("speakeasy: pruned %d shared file(s) older than a week", removed)
+        return removed
 
     # -- card images ---------------------------------------------------------------------------
     def _card(self, run_id: str, index: int) -> dict[str, Any]:

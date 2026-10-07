@@ -658,6 +658,26 @@ def pictures_note(count: int) -> str:
             "screen or showing; if they wanted to see it, say the picture didn't come through.")
 
 
+SCREEN_ON_NOTE = ("Fact, not to read aloud: the user turned screen sharing on with the panel's button. From now "
+                  "on, each new request you hand off carries a picture of their frontmost window, taken for that "
+                  "request. You can't see it yourself: never describe the screen, say you see it or guess what's "
+                  "on it before a result arrives. Keep handing requests off as usual; if it fits, say in first "
+                  "person that you'll take their screen along.")
+SCREEN_OFF_NOTE = ("Fact, not to read aloud: screen sharing is off now. New requests go without the screen; "
+                   "don't say you'll take it along or that you can see it.")
+
+
+def attachment_note(pictures: int, files: int) -> str:
+    """What waits on the panel to go with the next request (silent). Counts only: names and
+    contents never reach the voice."""
+    if not pictures and not files:
+        return "Fact, not to read aloud: nothing is waiting on the panel to go with the user's next request any more."
+    parts = [f"{n} {word}{'s' if n != 1 else ''}" for n, word in ((pictures, "picture"), (files, "file")) if n]
+    return (f"Fact, not to read aloud: waiting on the panel to go with the user's next request: {' and '.join(parts)} "
+            "they added. It goes along with whatever they ask next. You can't see it: never describe it or guess "
+            "what it shows.")
+
+
 STOPPED_SPOKEN = "I stopped that task. I'm still here."
 FAILED_SPOKEN = "I couldn't finish that one; the app shows what went wrong."
 NO_TRANSCRIPT_SPOKEN = "I did not receive enough transcript to act. Please repeat the request."
