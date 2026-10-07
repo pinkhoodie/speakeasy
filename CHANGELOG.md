@@ -2,6 +2,16 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Mac (next)
+
+- No more "didn't get that" while a task is clearly still working. It showed 45 seconds after any follow-up or status question that didn't start a new task.
+
+## Plugin 0.2.48 — Talks like a person, and tells you where things are
+
+- **Less "On it", "Checking", "One sec".** Quick questions get the answer, nothing before it. Bigger asks get a short, natural reaction, or none.
+- **"You working on that?" gets a real answer.** Status questions are answered right away from what the task has done so far. Before, they were sometimes sent into the task itself, queued behind the work they asked about, and treated as a new request once it finished.
+- **Tasks that continue an earlier chat now report progress.** Their updates ("ratings are in, checking fares next") reach the app and the voice. Before, only a narrow format got through, so a long task in an earlier conversation stayed silent until it finished.
+
 ## Mac 0.2.17 — Questions you answer in one tap
 
 - **Question cards.** When a task needs a decision, it shows the question with numbered answers and marks the one it would pick. Tap one, press 1–4, or just say it, and the same task carries on. When the choice is something to look at (layouts, places, products), each answer shows a picture. A question stays on screen until you answer it.

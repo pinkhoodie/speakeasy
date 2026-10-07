@@ -730,3 +730,26 @@ def routing_model(config: dict[str, Any] | None = None) -> str:
     from .routing_choice import thinking_on
     text = f"{provider} · {model}" if model else provider
     return text if thinking_on(block) else f"{text} (thinking off)"
+
+
+# "You working on that?", "where are you at", "how's it going", "any update", "is it done yet".
+_STATUS_Q = re.compile(
+    r"(?i)^\W*(?:(?:hey|yo|so|okay|ok|and|um+|uh+|hmm+|yeah|bro|dude|todd|hermes)\W+)*(?:"
+    r"(?:are\s+)?you\s+(?:still\s+)?(?:working\s+on|on)\s+(?:that|it|this)"
+    r"|(?:where|how\s+far)\s+(?:are\s+)?(?:you|we)\s+at"
+    r"|where\s+(?:are\s+)?(?:you|we)\s+(?:with|on)\s+(?:that|it|this)"
+    r"|how(?:'s|\s+is|\s+are)\s+(?:it|that|things|we|you)\s+(?:going|coming(?:\s+along)?|doing)"
+    r"|(?:any|what's\s+the|whats\s+the)\s+(?:update|status|progress|news)"
+    r"|(?:is\s+)?(?:it|that)\s+(?:done|ready|finished)(?:\s+yet)?"
+    r"|(?:still|you)\s+(?:there|working|checking)"
+    r"|what(?:'s|\s+is)\s+taking\s+so\s+long"
+    r"|how\s+much\s+longer"
+    r")\b(?:\W+(?:on|with|of)\s+(?:that|it|this|the\s+task))?"
+    r"(?:\W+(?:yet|now|then|still|bro|man|dude|todd|hermes|buddy|there))*\W*$")
+
+
+def is_status_question(request: str) -> bool:
+    """A short "how's it going?" about running work. Answered from what the task has reported,
+    never handed to the task itself (that queued it behind the very work it asks about)."""
+    text = " ".join((request or "").split())
+    return 0 < len(text.split()) <= 12 and bool(_STATUS_Q.search(text))

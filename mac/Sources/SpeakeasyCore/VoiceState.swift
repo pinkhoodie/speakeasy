@@ -437,8 +437,11 @@ public func deriveWork(_ s: VoiceState, now: Date) -> WorkPhase {
     if let approval = s.approval { return .approval(approval) }
     guard let info = s.workInfo else {
         if let since = s.delegationAt {
-            return now.timeIntervalSince(since) > VoiceState.notReceivedAfter ? .notReceived(since: since)
-                                                                               : .waiting(since: since)
+            // A follow-up or a status question joins work that's already running instead of making a
+            // new row: while anything is running, the request reached Hermes; never say it didn't.
+            let busy = s.tasks.contains { !$0.info.isTerminal }
+            return now.timeIntervalSince(since) > VoiceState.notReceivedAfter && !busy ? .notReceived(since: since)
+                                                                                       : .waiting(since: since)
         }
         return .none
     }

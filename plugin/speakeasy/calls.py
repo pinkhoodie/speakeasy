@@ -945,6 +945,12 @@ class SidebandWorker:
             return
         if router.is_show_me(last_request) and await self.show_me(delegation_id, last_request):
             return
+        if router.is_status_question(last_request):
+            running = [t for t in self.open_tasks() if t.status not in TERMINAL]
+            if running:
+                target = next((t for t in running if marked and t.task_id == marked), running[-1])
+                await self.answer_status(delegation_id, target.task_id)
+                return
         with self.interaction.lock:
             device = self.interaction.device_id
         logger.info("speakeasy: request on device %s (%d words)", (device or "unknown")[:8], len(last_request.split()))
@@ -1558,10 +1564,15 @@ class SidebandWorker:
                     with self.interaction.lock:
                         backend.run_id, backend.status = run_id, "running"
                     asyncio.run_coroutine_threadsafe(self._publish_async(), loop)
-                elif name in {"tool.started", "assistant.commentary"}:
-                    event = {"event": "tool.started" if name == "tool.started" else "message.interim",
-                             "tool": payload.get("tool_name"), "preview": payload.get("preview"),
-                             "text": payload.get("text")}
+                elif name == "assistant.commentary" and isinstance(payload.get("text"), str):
+                    # What Hermes writes while it works ("Ratings are in, now checking fares") is the
+                    # task's live status, read the same way as a thread task's. Only accepting strict
+                    # STATUS: lines here left a continued task silent for its whole run.
+                    text = payload["text"]
+                    asyncio.run_coroutine_threadsafe(self.thread_activity(
+                        backend, "commentary", text, {"event": "message.interim", "text": text}), loop).result()
+                elif name == "tool.started":
+                    event = {"event": "tool.started", "tool": payload.get("tool_name"), "preview": payload.get("preview")}
                     asyncio.run_coroutine_threadsafe(self.handle_hermes_event(backend, event), loop).result()
                 elif name == "assistant.completed":
                     final["text"] = payload.get("content") or ""
