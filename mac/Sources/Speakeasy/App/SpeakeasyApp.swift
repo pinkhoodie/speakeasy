@@ -67,6 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let dir = args.firstIndex(of: "--snapshot-dir").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
             PanelSmoke.run(config: app.config, snapshotDir: dir); return
         }
+        if let i = args.firstIndex(of: "--film-frames"), i + 1 < args.count {
+            FilmFrames.run(config: AppConfig(serverURL: nil, deviceToken: nil), dir: args[i + 1]); return
+        }
         if let i = args.firstIndex(of: "--cards-smoke"), i + 2 < args.count {
             CardsSmoke.run(json: args[i + 1], dir: args[i + 2]); return
         }
