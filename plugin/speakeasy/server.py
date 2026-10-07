@@ -16,17 +16,32 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from . import __version__
+from . import attachments as A
 from .service import VoiceService
 from .calls import ServiceError, Interaction, publish_state
 
 logger = logging.getLogger(__name__)
 
 MAX_BODY = 128 * 1024  # JSON routes; attachment uploads have their own caps (attachments.py)
-UPLOAD_READ_S = 60     # a whole upload body must arrive within this
-UPLOAD_RECV_S = 15     # ... and never stall longer than this between chunks
-DRAIN_MAX = 1024 * 1024  # after refusing an upload, read at most this much of it (so the app sees the reply)
+# How long a whole upload body may take (``upload_read_s``): never less than the Mac gives it (30 s up to
+# 1 MB, 120 s above: ServerClient.uploadAttachment), plus time for its size on a slow link, capped.
+UPLOAD_READ_S = 60          # up to 1 MB
+UPLOAD_READ_LARGE_S = 120   # over 1 MB
+UPLOAD_READ_PER_MB_S = 15   # ... or this per MB declared, if longer
+UPLOAD_READ_MAX_S = 180     # ... and never more than this
+UPLOAD_RECV_S = 15     # an upload never stalls longer than this between chunks
+# After refusing an upload, read what's still coming (up to the largest upload taken) while it keeps
+# arriving, so the app gets the reply instead of a reset connection; for at most DRAIN_MAX_S.
+DRAIN_RECV_S = 1.0     # a drain stops once nothing arrives for this long
+DRAIN_MAX_S = 10.0
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 _ID = r"([A-Za-z0-9_-]+)"
+
+
+def upload_read_s(length: int) -> float:
+    """Seconds a whole upload body of ``length`` bytes may take to arrive."""
+    floor = UPLOAD_READ_S if length <= 1_000_000 else UPLOAD_READ_LARGE_S
+    return min(UPLOAD_READ_MAX_S, max(floor, UPLOAD_READ_PER_MB_S * length / 1_000_000))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -98,34 +113,36 @@ class Handler(BaseHTTPRequestHandler):
                 self._drain(length)
 
     def _raw_body(self, length: int) -> bytes:
-        """Exactly ``length`` bytes, within UPLOAD_READ_S: a stalled upload can't hold a thread."""
-        deadline = time.monotonic() + UPLOAD_READ_S
+        """Exactly ``length`` bytes, within ``upload_read_s(length)`` and never stalling longer than
+        UPLOAD_RECV_S: a stalled or crawling upload can't hold a thread. A 408 says ``timeout``."""
+        deadline = time.monotonic() + upload_read_s(length)
         chunks: list[bytes] = []
         got = 0
         try:
             self.connection.settimeout(UPLOAD_RECV_S)
             while got < length:
                 if time.monotonic() > deadline:
-                    raise ServiceError(408, "upload took too long")
+                    raise ServiceError(408, "upload took too long", reason="timeout")
                 chunk = self.rfile.read1(min(256 * 1024, length - got))
                 if not chunk:
                     raise ServiceError(400, "upload ended early")
                 chunks.append(chunk)
                 got += len(chunk)
         except (socket.timeout, OSError):
-            raise ServiceError(408, "upload took too long") from None
+            raise ServiceError(408, "upload took too long", reason="timeout") from None
         return b"".join(chunks)
 
     def _drain(self, length: int) -> None:
-        """After refusing an upload, read a little of what's still coming (at most DRAIN_MAX, about a
-        second) so the app gets the reply instead of a reset connection."""
+        """After refusing an upload, read what's still coming (up to the declared length, at most the
+        largest upload taken) while it keeps arriving, for at most DRAIN_MAX_S, so the app gets the
+        reply instead of a reset connection. Never kept: the bytes are read and dropped."""
         if length <= 0:
             return
-        left, deadline = min(length, DRAIN_MAX), time.monotonic() + 1.0
+        left, deadline = min(length, A.MAX_FILE_BYTES), time.monotonic() + DRAIN_MAX_S
         try:
-            self.connection.settimeout(0.5)
+            self.connection.settimeout(DRAIN_RECV_S)
             while left > 0 and time.monotonic() < deadline:
-                chunk = self.rfile.read1(min(65536, left))
+                chunk = self.rfile.read1(min(256 * 1024, left))
                 if not chunk:
                     return
                 left -= len(chunk)

@@ -251,6 +251,9 @@ public struct PendingAttachment: Equatable, Sendable, Identifiable {
     public var serverID: String?
     /// The call it was (or is being) uploaded to.
     public var interactionID: String?
+    /// The call that wouldn't take it (404, or 409 `ended`: it paused, or the plugin lost it). Never
+    /// offered to that call again, which would only refuse it again; the next session (Resume) takes it.
+    public var deferredFor: String?
     public var uploadedAt: Date?
     /// A snapshot has listed it: its absence later means it was sent.
     public var seen = false
@@ -281,7 +284,8 @@ public enum SharingEvent: Equatable, Sendable {
     /// Its upload to this call started.
     case uploading(String, interactionID: String)
     case uploaded(String, serverID: String, interactionID: String)
-    /// The call wasn't taking uploads (it paused): kept for the next session.
+    /// The call wasn't taking uploads (it paused, or the plugin lost it): kept for the next session,
+    /// never retried on this one.
     case uploadDeferred(String, interactionID: String)
     /// Refused or gone; the notice says why (`shareRefusalLine`).
     case refused(String, reason: String?)
@@ -344,6 +348,13 @@ public struct CallSharing: Equatable, Sendable {
 
     /// Waiting on this device for the call to take them.
     public var hasLocalAttachments: Bool { attachments.contains { $0.phase == .local && !$0.removing } }
+
+    /// What the client uploads to `interactionID` now: waiting on this device, not being removed, and
+    /// not already turned away by that same call (it would only refuse again, in a loop while the call
+    /// still looks live). A new session's id takes them all.
+    public func uploadable(to interactionID: String) -> [PendingAttachment] {
+        attachments.filter { $0.phase == .local && !$0.removing && $0.deferredFor != interactionID }
+    }
 
     // MARK: Events
 
@@ -409,6 +420,7 @@ public struct CallSharing: Equatable, Sendable {
             item.phase = .local
             item.serverID = nil
             item.interactionID = nil
+            item.deferredFor = nil
             attachments.append(item)
 
         case .uploading(let id, let interactionID):
@@ -438,7 +450,11 @@ public struct CallSharing: Equatable, Sendable {
         case .uploadDeferred(let id, let interactionID):
             guard let item = attachments.first(where: { $0.id == id }), item.interactionID == interactionID,
                   item.phase == .uploading else { return }
-            if item.removing { drop(id) } else { update(id) { $0.phase = .local; $0.serverID = nil } }
+            if item.removing {
+                drop(id)
+            } else {
+                update(id) { $0.phase = .local; $0.serverID = nil; $0.deferredFor = interactionID }
+            }
 
         case .refused(let id, let reason):
             guard let item = attachments.first(where: { $0.id == id }) else { return }
@@ -492,10 +508,12 @@ public struct CallSharing: Equatable, Sendable {
     }
 
     /// A new session continues the call (Resume): sharing starts off again, the new call's own
-    /// requests and hold come from its snapshots. Pending pictures and files stay to be re-sent.
+    /// requests and hold come from its snapshots. Pending pictures and files stay to be re-sent,
+    /// including ones the old session turned away.
     public mutating func resumed() {
         resetScreen()
         notice = nil
+        for index in attachments.indices { attachments[index].deferredFor = nil }
     }
 
     /// The call paused (`paused`) or ended. Paused keeps the pictures and files not sent yet (the

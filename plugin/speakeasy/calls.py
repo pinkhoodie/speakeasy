@@ -386,7 +386,9 @@ def publish_state(store: Any, interaction: Interaction, assistant_name: str = "H
 # -- look at this: what a handoff carries besides its words ----------------------------------------
 
 KEEP_CAPTURE_S = 60.0  # a request that asked a question first: its capture waits this long for the answer
+KEPT_ANSWER_WORDS = 6  # ... which is a short reply that doesn't point at the screen itself
 HOLD_S = 30.0          # a request that needs the screen waits this long for sharing to come on
+RELEASED_REPEAT_S = 10.0  # once it went, asking to look again this soon is the same request
 HOLD_OUTCOME_S = 8.0   # ... and its "Not sent" line stays this long once it ended unsent
 STOP_HEARD_SETTLE_S = 0.6  # "stop looking at my screen" heard in the transcript: act once the words settle
 STOP_WINDOW_S = 8.0    # the transcript words a stop phrase is looked for in
@@ -597,6 +599,10 @@ class SidebandWorker:
         # sharing last went off (or a hold ended) by voice, so the same words act once.
         self.held: Held | None = None
         self.hold_token = 0
+        # The held request that last went (its words, when), and handoffs a released hold is dispatching
+        # now: the handoff that was held must not give back what the release just bound for it.
+        self.released_hold: tuple[str, float] | None = None
+        self.releasing: set[str] = set()
         self.stop_words_after = 0.0
         self.stopped_at = float("-inf")
         self.stop_check: asyncio.Task[Any] | None = None
@@ -1086,15 +1092,24 @@ class SidebandWorker:
             last_request = rest  # sharing is off now; the rest of what they asked still goes ahead
         held = self.held
         if held is not None and (router.acknowledges(last_request) or _same_words(last_request, held.request)):
-            # "Ok, one sec" while they turn sharing on, or the same words handed off again: the request
-            # waiting for the screen keeps waiting, and this one never becomes a task.
+            # "Ok, one sec" or "I'm turning on the eye" while they turn sharing on, or the same words
+            # handed off again: the request waiting for the screen keeps waiting, and this one never
+            # becomes a task.
             self.handoff_at.pop(delegation_id, None)
             await self._drop(delegation_id, revision, "Waiting for the screen", None)
+            return
+        if held is None and self.repeats_released(last_request):
+            # "Now look at my screen" just as the request that waited for it went: that one has the screen.
+            logger.info("speakeasy: asked to look again as the held request went; not started twice")
+            self.handoff_at.pop(delegation_id, None)
+            await self._drop(delegation_id, revision, "Already on its way with your screen", None)
             return
         self.end_hold("superseded")  # a newer request ends one waiting for the screen
         # Pointing at their own screen, or with pictures waiting on the panel, "show me this" is about
         # what they're showing; only "show me what you're looking at" still means a task's own view.
-        showing = router.refers_to_screen(last_request) or bool(self.interaction.attachments.pending())
+        # Only in a call that can share: elsewhere (an iPhone, an older Mac) "this page" is a task's, as before.
+        refs = bool(self.interaction.attachments.declared) and router.refers_to_screen(last_request)
+        showing = refs or bool(self.interaction.attachments.pending())
         if (router.is_show_me(last_request) and (not showing or router.about_task_view(last_request))
                 and await self.show_me(delegation_id, last_request)):
             return
@@ -1110,7 +1125,10 @@ class SidebandWorker:
         try:
             await self._dispatch_bound(delegation_id, revision, context, marked, last_request, showing)
         finally:
-            self.finish_shared(delegation_id)
+            # Held, and sharing came on before the hold's own hint was out: the release dispatches this
+            # handoff now and owns what it bound (dispatch_held finishes it), so it isn't given back here.
+            if delegation_id not in self.releasing:
+                self.finish_shared(delegation_id)
 
     async def _dispatch_bound(self, delegation_id: str, revision: int, context: str, marked: Any,
                               last_request: str, showing: bool, released: bool = False) -> None:
@@ -1122,7 +1140,7 @@ class SidebandWorker:
         # so a breath mid-thought doesn't send half a request.
         if not released and not marked and router.continues_newest(last_request, self.open_tasks()) is None:
             settled = await self.settle(last_request)
-            if settled != last_request and router.refers_to_screen(settled):
+            if settled != last_request and self.interaction.attachments.declared and router.refers_to_screen(settled):
                 self.share_refs[delegation_id] = showing = True  # "what's" ... "this error?"
             last_request = settled
         if not released and await self.wait_for_screen(delegation_id, revision, context, marked, last_request):
@@ -1271,7 +1289,8 @@ class SidebandWorker:
         Jev, if on, is still deciding) plus one short sentence. Anything not clearly answered goes to
         Hermes as usual."""
         fast = self.rt.settings().get("fast_routing") or {}
-        if not fast.get("quick_answers", True) or not quick_mod.eligible(request):
+        can_share = bool(self.interaction.attachments.declared)  # "what's this error?" means their screen
+        if not fast.get("quick_answers", True) or not quick_mod.eligible(request, can_share=can_share):
             return False
         tasks = self.open_tasks()
         if router.quick_intent(request, tasks, self.replied_task) is not None:
@@ -1443,11 +1462,16 @@ class SidebandWorker:
     def bind_shared(self, delegation_id: str, request: str) -> bool:
         """Past the home lane, a handoff claims the pictures and files waiting on the panel and, in a
         call that is sharing its screen, asks the app for a capture now, so it overlaps the settle wait
-        and routing. True when it carries pictures or files or its words point at the screen."""
+        and routing. True when it carries pictures or files or its words point at the screen (only in a
+        call that can share: elsewhere "this page" is never theirs). A short reply to a question just
+        asked takes that question's capture (``keep_capture``); anything else gets a capture of its own."""
         attachments = self.interaction.attachments
         bound = attachments.bind_pending(delegation_id)
-        self.share_refs[delegation_id] = router.refers_to_screen(request)
-        capture_id = self.adopt_kept_capture(delegation_id) or self.request_capture(delegation_id)
+        refs = bool(attachments.declared) and router.refers_to_screen(request)
+        self.share_refs[delegation_id] = refs
+        answers = len(request.split()) <= KEPT_ANSWER_WORDS and not refs  # "Just keep it with me"
+        capture_id = (self.adopt_kept_capture(delegation_id if answers else None)
+                      or self.request_capture(delegation_id))
         if capture_id:
             self.capture_ids[delegation_id] = capture_id
         if bound:
@@ -1480,7 +1504,8 @@ class SidebandWorker:
             self.kept_capture = (capture_id, time.monotonic())
 
     def adopt_kept_capture(self, delegation_id: str | None) -> str | None:
-        """The next handoff takes the kept capture (the answer to that question); a stale one closes."""
+        """The next handoff takes the kept capture (the answer to that question); a stale one closes,
+        and so does one the next handoff doesn't answer with (``delegation_id`` None)."""
         kept, self.kept_capture = self.kept_capture, None
         if kept is None:
             return None
@@ -1627,11 +1652,15 @@ class SidebandWorker:
         share but isn't sharing, carrying nothing else (no pictures or files, no capture): in a
         ``ready`` call it waits for the button (``hold_request``); in a ``no_permission`` call the
         voice says where to allow Screen Recording and nothing runs. True when it went no further.
-        Calls that never said they can share (an iPhone, an older Mac) go on as words."""
+        Calls that never said they can share (an iPhone, an older Mac) go on as words, and so does a
+        follow-up the voice tied to a task (``marked``) or that continues the newest one: "what does
+        this error mean" right after a task reported one is about that task's result."""
         attachments = self.interaction.attachments
         if (attachments.declared not in A.DECLARATIONS or attachments.screen_on
                 or delegation_id in self.capture_ids or attachments.bound(delegation_id)
                 or not router.needs_screen(request)):
+            return False
+        if marked or router.continues_newest(request, self.open_tasks()) is not None:
             return False
         self.handoff_at.pop(delegation_id, None)
         if attachments.declared == "no_permission":
@@ -1715,6 +1744,18 @@ class SidebandWorker:
             with self.interaction.lock:
                 self.held = held
             self.end_hold("ended", held.token)
+            return
+        self.released_hold = (held.request, time.monotonic())  # "now look at my screen" right after: the same
+
+    def repeats_released(self, request: str) -> bool:
+        """Said within RELEASED_REPEAT_S of a held request going: the same words, talk about turning
+        sharing on ("it's on, take a look"), or only a request to look ("now look at my screen"). The
+        request that went has the screen; this one adds nothing."""
+        released = self.released_hold
+        if released is None or not request.strip() or time.monotonic() - released[1] > RELEASED_REPEAT_S:
+            return False
+        return (_same_words(request, released[0]) or router.about_sharing_on(request)
+                or router.needs_screen(request) and router.only_looks(request))
 
     def _start_release(self, held: Held) -> None:
         task = asyncio.get_running_loop().create_task(self.dispatch_held(held))
@@ -1724,7 +1765,10 @@ class SidebandWorker:
     async def dispatch_held(self, held: Held) -> None:
         """The held request, now that sharing is on: it claims what's waiting on the panel and asks for
         a capture like any handoff (``bind_shared``), then goes on from where it was held. Ends visibly
-        like ``dispatch``."""
+        like ``dispatch``. While it runs it owns the handoff's binding (``releasing``): the handoff that
+        was held may still be finishing (its hint can be on its way when sharing comes on), and must
+        not give back what was just bound here."""
+        self.releasing.add(held.delegation_id)
         try:
             await self.append("session.thinking.append", held.delegation_id, P.HOLD_RELEASED_NOTE)
             showing = self.bind_shared(held.delegation_id, held.request)
@@ -1739,6 +1783,8 @@ class SidebandWorker:
             logger.warning("speakeasy: held request failed before its task started (%s: %s)",
                            type(exc).__name__, str(exc)[:200])
             await self._handoff_failed(held.delegation_id, held.revision, exc)
+        finally:
+            self.releasing.discard(held.delegation_id)
 
     async def screen_words(self, delegation_id: str, intent: str, more: bool = False) -> None:
         """A handoff about screen sharing itself (``router.screen_intent``), answered here: ``stop``
@@ -1906,12 +1952,17 @@ class SidebandWorker:
         earlier = notice_text(self.store.request_text(key), 200) or "an earlier request"
         placed = self.store.continued_for(key)
         sharing = self.shares_with_task(delegation_id)
-        if status in ACTIVE_RUN_STATES and not run_id and sharing and target.deliver_to:
-            # A task working in a chat thread (a group chat's session) never gets what was shared: a new
-            # task that references it carries it, answered home.
-            logger.info("speakeasy: shared things never go into a thread; starting a task that references it")
+
+        async def answered_home(why: str) -> None:
+            # A new task that references the running one carries what was shared, answered home.
+            logger.info("speakeasy: %s; starting a task that references it", why)
             await self.start_task(delegation_id, revision, context, f"{part.request} (following up: {earlier})",
                                   focus=P.follow_up_focus(part.request, earlier, None, status))
+
+        if status in ACTIVE_RUN_STATES and sharing and target.deliver_to:
+            # A running task that posts its answer to a channel (one the user may never have named for
+            # this) or works in a chat thread (a group chat's session) never gets what was shared.
+            await answered_home("shared things never go into a task that posts to a channel or a thread")
             return
         if status in ACTIVE_RUN_STATES and not run_id and await self.message_thread_task(delegation_id, target, part.request):
             return
@@ -1924,9 +1975,15 @@ class SidebandWorker:
         if placed is not None:
             conv = await asyncio.to_thread(continuity.conversation_by_session, self.rt.state_db, placed["session_id"])
             if conv is not None:
+                # Only the user's own DM takes what was shared (start_continuity_task decides).
                 joins = status in ACTIVE_RUN_STATES
                 await self.start_continuity_task(delegation_id, revision, context, part.request, conv,
                                                  joins=target if joins else None)
+                return
+            if status in ACTIVE_RUN_STATES and sharing:
+                # It continued a chat that can't be looked up now, so nobody can tell it's the user's own:
+                # what was shared never goes into that chat's running turn.
+                await answered_home("a running task continued a chat that can't be looked up")
                 return
         if run_id and status in {"running", "working"}:
             items: list[dict[str, Any]] = []
@@ -1957,8 +2014,10 @@ class SidebandWorker:
         # Carrying what the user shared: never into a chat's session (the task continued a
         # conversation), and answered home rather than in the task's channel.
         carrying = self.carries(delegation_id)
-        if placed and not carrying:
-            self.forgo_capture(delegation_id)  # it continues that chat's session: no riding-along capture
+        if (placed or target.deliver_to) and not carrying:
+            # It continues that chat's session or posts to the task's channel (topical or named, it can't
+            # tell): no riding-along capture, as with a new request routed to a topical channel.
+            self.forgo_capture(delegation_id)
         await self.start_task(delegation_id, revision, context, f"{part.request} (following up: {earlier})",
                               focus=focus, session_id=None if carrying and placed else self.store.session_for(key),
                               replaces=target.delegation_id, deliver_to=None if carrying else target.deliver_to)
@@ -1982,8 +2041,10 @@ class SidebandWorker:
         if not platform or not thread_id or runner is None or not hasattr(runner, "post"):
             return False
         earlier = notice_text(self.store.request_text(key), 200) or "the task"
-        # "Look at my screen" is about theirs, never a request for the task's picture.
-        wants_picture = router.wants_to_see(request) and not router.refers_to_screen(request)
+        # In a call that can share, "look at my screen" is about theirs, never a request for the task's
+        # picture; elsewhere (an iPhone, an older Mac) the words ask for the picture as before.
+        wants_picture = router.wants_to_see(request) and not (
+            self.interaction.attachments.declared and router.refers_to_screen(request))
         message = P.thread_follow_up(self.names, request, show=wants_picture)
         delivered = await asyncio.to_thread(runner.post, platform, str(thread_id), message=message,
                                             delivery_id=f"{key[:40]}-{secrets.token_hex(4)}")

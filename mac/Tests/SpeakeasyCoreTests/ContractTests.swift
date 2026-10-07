@@ -113,7 +113,11 @@ final class ContractTests: XCTestCase {
     }
 
     /// Writes the in-call requests under `Contract/requests/call/`, so the top-level replay above (no
-    /// call open) skips them; the plugin's e2e replays them inside a call.
+    /// call open; plugin/tests/e2e_local.py reads only `requests/*.json`) skips them. Nothing replays
+    /// these files yet: today the plugin's route tests cover the same requests, built in Python
+    /// (plugin/tests/test_attachments_route.py, test_screen_dispatch.py, test_screen_hold.py), and the
+    /// test below checks these against the plugin's rules. Replaying them inside a call in the e2e is
+    /// a follow-up.
     func testRecordCallRequests() throws {
         let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .appendingPathComponent("Contract/requests/call", isDirectory: true)

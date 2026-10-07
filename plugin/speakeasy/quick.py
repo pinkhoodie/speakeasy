@@ -36,12 +36,17 @@ SYSTEM = ("Answer a spoken question in one or two short plain sentences, using o
           f"it, or they disagree, reply exactly {UNSURE}.")
 
 
-def eligible(request: str) -> bool:
-    """A short public question. Never one about the user's screen ("what's this error?"): a web
-    search can't see it, and Hermes gets it with the capture instead."""
-    from .router import refers_to_screen
+def eligible(request: str, can_share: bool = False) -> bool:
+    """A short public question. ``can_share``: the call can share the user's screen (it declared it),
+    so a question about it ("what's this error?") is never one: a web search can't see it, and Hermes
+    gets it with the capture instead. Calls that can't share (an iPhone, an older Mac) are as before."""
     text = (request or "").strip()
-    return 2 <= len(text.split()) <= 25 and not PERSONAL.search(text) and not refers_to_screen(text)
+    if not 2 <= len(text.split()) <= 25 or PERSONAL.search(text):
+        return False
+    if can_share:
+        from .router import refers_to_screen
+        return not refers_to_screen(text)
+    return True
 
 
 def search(query: str, limit: int = SEARCH_RESULTS) -> list[dict[str, str]]:

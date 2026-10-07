@@ -1186,10 +1186,12 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     /// Uploads what's waiting on this device once the call takes uploads (after a drop, at admission,
-    /// after a resume). Runs after the dispatch that made it necessary, never inside it.
+    /// after a resume). Runs after the dispatch that made it necessary, never inside it. An item this
+    /// call already turned away (404 / `ended`) waits for the next session instead of looping.
     private func scheduleUploadsIfNeeded() {
         let s = model.state
-        guard !uploadsScheduled, !previewMode, s.sharing.hasLocalAttachments, s.interactionID != nil,
+        guard !uploadsScheduled, !previewMode, let interactionID = s.interactionID,
+              !s.sharing.uploadable(to: interactionID).isEmpty,
               s.connection == .live || s.connection == .connecting, !s.pausing else { return }
         uploadsScheduled = true
         DispatchQueue.main.async { [weak self] in
@@ -1202,7 +1204,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         let s = model.state
         guard let api, let interactionID = s.interactionID, s.connection == .live || s.connection == .connecting,
               !s.pausing else { return }
-        for item in s.sharing.attachments where item.phase == .local && !item.removing {
+        for item in s.sharing.uploadable(to: interactionID) {
             guard let bytes = attachmentBytes[item.id] else { dispatch(.sharing(.removed(item.id))); continue }
             dispatch(.sharing(.uploading(item.id, interactionID: interactionID)))
             Task { [weak self] in
@@ -1217,7 +1219,8 @@ public final class NativeVoiceClient: VoiceCallClient {
                         self.deleteAttachment(current)
                     }
                 } catch let error as ServerClient.HTTPError where error.reason == "ended" || error.status == 404 {
-                    // The call paused (or the plugin lost it): kept here and sent to the next session.
+                    // The call paused (or the plugin lost it): kept here and sent to the next session,
+                    // never again to this one (CallSharing.uploadable).
                     self?.dispatch(.sharing(.uploadDeferred(item.id, interactionID: interactionID)))
                 } catch let error as ServerClient.HTTPError {
                     let reason = error.reason ?? (error.status == 413 ? "too_large" : error.status == 415 ? "unsupported" : nil)

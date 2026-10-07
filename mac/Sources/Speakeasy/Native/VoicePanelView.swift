@@ -1206,19 +1206,24 @@ struct SharedThumbnail: View {
     let item: SharedItem
     var load: (String, Int) async -> Data?
     @State private var image: NSImage?
+    /// Made once with `image`, so the detail redrawing during a call never re-rasterizes it.
+    @State private var cgImage: CGImage?
 
     var body: some View {
         Button {
             if let image { ImagePreviewWindow.shared.show(image, title: item.label) }
         } label: {
-            AttachmentTile(content: .picture(image?.cgImage(forProposedRect: nil, context: nil, hints: nil)))
+            AttachmentTile(content: .picture(cgImage))
         }
         .buttonStyle(.plain)
         .disabled(image == nil)
         .help(image == nil ? item.label : "\(item.label). Open full size")
         .accessibilityLabel("Sent \(item.label)")
         .task(id: "\(runID)/\(item.number)") {
-            if let data = await load(runID, item.number), let loaded = NSImage(data: data) { image = loaded }
+            if let data = await load(runID, item.number), let loaded = NSImage(data: data) {
+                cgImage = loaded.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                image = loaded
+            }
         }
     }
 }

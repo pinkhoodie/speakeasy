@@ -24,7 +24,8 @@ from .text import (MAX_CARDS, AUTHORED_PRECEDENCE_S, SETTLED, TERMINAL, notice_t
 STALE_AFTER_S = 90
 MAX_REVIEWS = 3  # finished-image review cards carried onto the call panel
 SHARED_KINDS = frozenset({"screen", "picture", "file"})
-MAX_SHARED = 12  # things shared with one task kept on its card (a running task can be shown more)
+MAX_SHARED = 12  # things shared with one task kept on its card (a running task can be shown more): the
+                 # first ones, so a position never renumbers (the app fetches images by position)
 
 
 def local_run_id(idem_key: str) -> str:
@@ -253,7 +254,9 @@ class StateStore:
     def add_shared(self, key: str, items: list[dict[str, Any]]) -> None:
         """What the user shared with this task, for its card: ``{kind, app, name, path, at}`` per
         screen, picture or file. Paths stay on the server (``shared_items``); the app gets
-        ``work()["shared"]`` and fetches images by position (``shared_image``)."""
+        ``work()["shared"]`` and fetches images by position (``shared_image``), so the first MAX_SHARED
+        are kept and a later one never shifts them (its saved copy is still recorded and cleared with
+        the task: ``add_shared_files``)."""
         clean = [{k: item.get(k) for k in ("kind", "app", "name", "path", "at")} for item in items
                  if item.get("kind") in SHARED_KINDS]
         if not clean:
@@ -264,7 +267,7 @@ class StateStore:
                 return
             known = self._shared_list(row[0])
             self._db.execute("UPDATE runs SET shared=? WHERE idem_key=?",
-                             (json.dumps((known + clean)[-MAX_SHARED:]), key))
+                             (json.dumps((known + clean)[:MAX_SHARED]), key))
 
     @staticmethod
     def _shared_list(raw: str | None) -> list[dict[str, Any]]:

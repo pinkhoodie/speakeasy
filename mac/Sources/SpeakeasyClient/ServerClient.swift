@@ -312,7 +312,7 @@ public final class ServerClient: @unchecked Sendable {
 
     /// A screen capture or picture a task carried (`number` from `SharedItem`), through the authenticated api.
     public func sharedImage(runID: String, number: Int) async throws -> Data {
-        guard (1...8).contains(number) else { throw HTTPError(status: 400, message: "Invalid picture") }
+        guard (1...SharedItem.maxItems).contains(number) else { throw HTTPError(status: 400, message: "Invalid picture") }
         let (data, response) = try await session.data(for: request(SharingRoute.sharedImage(runID, number)))
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               http.mimeType?.hasPrefix("image/") == true, !data.isEmpty, data.count <= 8_000_000 else {

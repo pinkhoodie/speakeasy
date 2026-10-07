@@ -460,7 +460,7 @@ fetched over HTTPS only, with no redirects to private addresses. 404 otherwise.
 
 ## GET /voice/shared-image/{run_id}/{n}
 
-`n` is 1-99, the position in that task's `shared` list (screens and pictures; a file there is 404).
+`n` is 1-12, the position in that task's `shared` list (a task keeps its first 12, so positions never shift) (screens and pictures; a file there is 404).
 Returns the bytes Speakeasy kept of an image the user shared with the task, from the speakeasy
 `shared` folder, with its `Content-Type`. Tasks list what they carried as
 `"shared": [{"kind": "screen" | "picture" | "file", "app"?, "name"?}]` (only when non-empty;
@@ -518,7 +518,9 @@ any of the body is read.
 | `X-Speakeasy-App` | optional: the captured app's name |
 
 `200 {"id", "kind"}`; uploading the same capture again returns the same id. Errors: `400` bad
-headers, `404` unknown call, `408` the body stalled, `409` with `reason` `ended`, `too_many` or
+headers, `404` unknown call, `408 {"reason": "timeout"}` the body stalled for 15 s or took longer than
+its size allows (a minute up to 1 MB, two minutes above, 15 s per MB for the largest, at most three),
+`409` with `reason` `ended`, `too_many` or
 `too_large` (no room left in the request), `410 {"reason": "closed"}` the capture request is no
 longer open, `413 {"reason": "too_large"}`, `415 {"reason": "unsupported"}` (image bytes that
 aren't the declared type).

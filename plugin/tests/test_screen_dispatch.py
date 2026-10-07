@@ -138,14 +138,23 @@ def test_screen_references_never_match(request_):
 
 
 def test_quick_answers_never_take_a_screen_question():
-    from speakeasy import quick
-    assert not quick.eligible("What's this error?") and not quick.eligible("is this layout right?")
-    assert quick.eligible("Who won the hockey game last night")
+    from speakeasy import quick  # in a call that can share; an undeclared call is as before (see below)
+    assert not quick.eligible("What's this error?", can_share=True)
+    assert not quick.eligible("is this layout right?", can_share=True)
+    assert quick.eligible("Who won the hockey game last night", can_share=True)
+    assert quick.eligible("What's this error?")  # a call that can't share: "this" is never their screen
 
 
 def test_the_task_view_stays_the_tasks():
     assert router.about_task_view("show me what you're looking at") and router.about_task_view("what's on your screen")
     assert not router.about_task_view("look at my screen") and not router.about_task_view("show me this")
+
+
+def test_curly_apostrophes_read_as_straight_ones():
+    # Transcripts use both: "What’s this?" points at the screen exactly like "What's this?".
+    assert router.refers_to_screen("What’s this?") and router.refers_to_screen("help me with what I’m looking at")
+    assert router.about_task_view("show me what you’re looking at")
+    assert router.needs_screen("What’s this?") and not router.needs_screen("show me what you’re looking at")
 
 
 def test_a_chat_with_no_recorded_type_is_never_private():
@@ -245,6 +254,42 @@ def test_an_undeclared_call_looking_at_the_screen_runs_text_only(open_call, serv
     assert isinstance(hermes.calls[0]["input"], str) and call.captures() == []
     snap = http(server.base_url, "GET", f"/voice/interactions/{call.iid}", token=server.token)[1]
     assert snap["hold"] is None and snap["captures"] == []
+
+
+def test_this_page_in_an_undeclared_call_is_still_the_tasks(open_call, server, service, hermes, home):
+    # An iPhone can't point at its own screen: "what does this page look like?" about a running task
+    # brings up the task's picture, as before Look at this.
+    folder = home / "cache" / "screenshots"
+    folder.mkdir(parents=True, exist_ok=True)
+    photo = folder / "hotel.png"
+    photo.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 64)
+    hermes.hold = True
+    hermes.live_events = [{"event": "media.seen", "path": str(photo), "source": "screenshot"}]
+    call = open_call("req_iphone_page", screen=None)
+    call.say("call_hotel", "Research the Lisbon hotels")
+    running = wait_for(lambda: (lambda r: r if r and r.run_id else None)(call.run("call_hotel")))
+    wait_for(lambda: service.store.live_image(running.idem_key))
+    hermes.hold, hermes.live_events = False, []
+    service.rt.route_call = lambda m: ('{"follow_up_task_id": "call_hotel", "parts": ["x"], "channel": null, "show": %s}'
+                                       % str("look like" in m[-1]["content"].rsplit("Request: ", 1)[-1]).lower())
+    call.say("call_page", "What does this page look like?")  # routing says: show the task's picture
+    show = wait_for(lambda: [p for _, k, p in list(call.interaction.feed.ring) if k == "show"])
+    assert show[-1]["task_id"] == "call_hotel" and show[-1]["image"] == "live"
+    call.say("call_put", "Put it on my screen")  # "show me" in words that name a screen: still the task's
+    show = wait_for(lambda: (lambda s: s if len(s) == 2 else None)(
+        [p for _, k, p in list(call.interaction.feed.ring) if k == "show"]))
+    assert show[-1]["task_id"] == "call_hotel"
+    assert hermes.steers == [] and len(hermes.calls) == 1 and call.captures() == []
+    hermes.runs[running.run_id]["done"].set()
+
+
+def test_a_screen_question_in_an_undeclared_call_keeps_the_quick_lane(open_call, server, service, hermes):
+    asked: list[str] = []
+    service.rt.quick_call = lambda request, today: asked.append(request) or "A 404 means the page wasn't found."
+    call = open_call("req_iphone_quick", screen=None)
+    call.say("call_err", "What's this error?")
+    wait_for(lambda: any("404" in c for c in call.spoken()))
+    assert asked == ["What's this error?"] and hermes.calls == [] and call.captures() == []
 
 
 # -- requests that never carry anything -----------------------------------------------------------
@@ -351,10 +396,11 @@ def test_look_at_my_screen_never_asks_for_the_tasks_picture(open_call, server, s
     wait_for(lambda: hermes.calls)
     assert P.SHOW_IT_FOCUS.strip() not in text_of(hermes.calls[0]["input"])
     assert not call.worker.wants_show and not [p for _, k, p in list(call.interaction.feed.ring) if k == "show"]
-    # A running thread task, in a call that can't share: words only, and no picture asked for.
+    # A running thread task, in a call that can share but isn't sharing: words only, and no picture asked
+    # for. (A call that can't share at all asks for the task's picture, as before: see message_thread_task.)
     runner = Threads(finish=False)
     thread_channel(service, runner)
-    other = open_call("req_noshow_thread", screen=None)
+    other = open_call("req_noshow_thread")
     other.say("call_book", "Get me a dentist cleaning on the 9th")
     wait_for(lambda: runner.opened)
     wait_for(lambda: service.store.continued_for(other.run("call_book").idem_key))
@@ -617,6 +663,31 @@ def test_a_clarifying_question_keeps_the_capture_for_its_answer(open_call, serve
     assert images_in(hermes.calls[0]["input"]) == [WINDOW] and len(call.captures()) == 1
 
 
+def test_a_kept_capture_never_goes_with_an_unrelated_request(open_call, server, service, hermes, monkeypatch):
+    asked = []
+
+    def explicit(request):
+        if asked:
+            return None
+        asked.append(request)
+        return channels.Choice(None, "clarify", clarify="Should that go in #work or #research?")
+    monkeypatch.setattr(service.rt, "explicit_channel", explicit)
+    chart, mail = jpeg(b"xcode-chart "), jpeg(b"mail-window ")
+    call = open_call("req_clarify_other")
+    call.sharing(True)
+    mac = call.mac_replies(lambda capture_id: {"data": chart if call.mac.seen.index(capture_id) == 0 else mail,
+                                               "app": "Xcode" if call.mac.seen.index(capture_id) == 0 else "Mail"})
+    call.say("call_ask", "Post this chart for the team")
+    wait_for(lambda: "Should that go in #work or #research?" in call.spoken())
+    wait_for(lambda: mac.answers)
+    # Not an answer to the question: a request of its own, with what's on screen now.
+    call.say("call_other", "Summarize the quarterly report for the board meeting tomorrow")
+    wait_for(lambda: hermes.calls)
+    kept, fresh = call.captures()
+    assert images_in(hermes.calls[0]["input"]) == [mail] and kept != fresh
+    assert call.interaction.attachments.wait_capture_blocking(kept, 0.1).reason == "cancelled"
+
+
 # -- limits and what the voice hears -------------------------------------------------------------
 
 def test_a_capture_over_the_image_budget_is_dropped_with_a_reason(open_call, server, service, hermes, monkeypatch):
@@ -694,3 +765,77 @@ def test_a_riding_along_capture_never_goes_to_a_topical_channel(open_call, serve
     wait_for(lambda: hermes.calls)
     assert call.run("call_notes").deliver_to == "discord:111"  # the topic decides as before
     assert images_in(hermes.calls[0]["input"]) == []          # and the screen stays out of it
+
+
+# -- follow-ups to tasks that post somewhere else ------------------------------------------------
+
+def topical_work(service) -> None:
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [WORK, RESEARCH], "mode": "topic"}})
+    service.rt.route_call = lambda m: '{"follow_up_task_id": null, "parts": ["x"], "channel": "#work"}'
+
+
+def test_a_screen_follow_up_to_a_running_channel_task_goes_home(open_call, server, service, hermes):
+    topical_work(service)
+    hermes.hold = True
+    call = open_call("req_topic_running")
+    call.say("call_notes", "Write up notes from the standup")
+    running = wait_for(lambda: (lambda r: r if r and r.run_id else None)(call.run("call_notes")))
+    assert running.deliver_to == "discord:111"  # routing put it in #work; the user never named it
+    hermes.hold = False
+    call.sharing(True)
+    call.mac_replies(window())
+    call.say("call_this", "What's this?", task_id="call_notes")
+    wait_for(lambda: len(hermes.calls) == 2)
+    # Never steered into the run that posts to #work: a new task that references it, answered home.
+    assert hermes.steers == [] and images_in(hermes.calls[1]["input"]) == [WINDOW]
+    assert "Write up notes from the standup" in text_of(hermes.calls[1]["input"])
+    assert call.run("call_this").deliver_to is None and call.run("call_notes").deliver_to == "discord:111"
+    hermes.runs[running.run_id]["done"].set()
+
+
+def test_a_screen_follow_up_to_a_chat_that_cant_be_looked_up_goes_home(open_call, server, service, hermes,
+                                                                        monkeypatch):
+    origin = json.dumps({"chat_id": "555", "user_id": "42", "chat_type": "group"})
+    conv = continuity._from_row("s_budget", "telegram", None, None, origin, "Budget", time.time())
+    release = threading.Event()
+    monkeypatch.setattr(continuity, "conversations_with_context", lambda db, request, **kw: [continuity.Candidate(conv, ())])
+    monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **kw: False)
+
+    def stream(base, key, c, message, callback, **kw):  # the group chat's turn keeps running
+        callback("run.started", {"run_id": "run_chat1"})
+        release.wait(10)
+        callback("assistant.completed", {"content": "Picked up.\nSPOKEN: Picked up."})
+        callback("run.completed", {})
+        return True
+    monkeypatch.setattr(continuity, "stream_session_chat", stream)
+    monkeypatch.setattr(continuity, "conversation_by_session", lambda db, sid: None)  # state.db can't tell now
+    steered: list = []
+    monkeypatch.setattr(service.hermes, "steer", lambda run_id, text: steered.append((run_id, text)) or True)
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": []}})
+    service.rt.route_call = lambda m: CONTINUE
+    call = open_call("req_group_running")
+    try:
+        call.say("call_budget", "Keep going on the budget in that chat")
+        wait_for(lambda: (lambda r: r if r and r.run_id == "run_chat1" else None)(call.run("call_budget")))
+        call.sharing(True)
+        call.mac_replies(window())
+        call.say("call_this", "What's this?", task_id="call_budget")
+        wait_for(lambda: hermes.calls)
+        assert steered == [] and images_in(hermes.calls[0]["input"]) == [WINDOW]
+        assert call.run("call_this").deliver_to is None
+    finally:
+        release.set()
+
+
+def test_a_plain_follow_up_to_a_channel_task_gives_up_its_capture(open_call, server, service, hermes):
+    topical_work(service)
+    call = open_call("req_topic_follow")
+    call.say("call_notes", "Write up notes from the standup")
+    wait_for(lambda: [t for t in tasks(server) if t["status"] == "completed"])
+    call.sharing(True)
+    call.mac_replies(window())
+    call.say("call_more", "Also add the action items", task_id="call_notes")
+    wait_for(lambda: len(hermes.calls) == 2)
+    # Words only: it goes to #work as before, and the riding-along screen never goes with it.
+    assert images_in(hermes.calls[1]["input"]) == [] and call.run("call_more").deliver_to == "discord:111"
+    assert P.screen_sent_line("Xcode") not in call.spoken()

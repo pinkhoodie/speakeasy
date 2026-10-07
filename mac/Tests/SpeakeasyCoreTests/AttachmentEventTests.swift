@@ -116,6 +116,18 @@ final class AttachmentEventTests: XCTestCase {
         XCTAssertEqual(SharingRoute.sharedImage("run_1", 2), "/voice/shared-image/run_1/2")
     }
 
+    func testATaskShowsUpToTwelveSharedThingsNumberedFromOne() {
+        // The plugin keeps a task's first 12 (MAX_SHARED), so positions never renumber.
+        XCTAssertEqual(SharedItem.maxItems, 12)
+        let thirteen: [Any] = (1...13).map { ["kind": "picture", "name": "p\($0).png"] }
+        let info = WorkInfo(json: ["run_id": "run_1", "status": "working", "shared": thirteen])!
+        XCTAssertEqual(info.shared.count, 12)
+        XCTAssertEqual(info.shared.map(\.number), Array(1...12))
+        XCTAssertEqual(info.shared.first?.name, "p1.png")
+        XCTAssertEqual(info.shared.last?.name, "p12.png", "the first twelve, at their server positions")
+        XCTAssertEqual(SharingRoute.sharedImage("run_1", 12), "/voice/shared-image/run_1/12")
+    }
+
     func testSnapshotDecodesScreenCapturesAttachmentsAndHold() {
         let snap = snapshot(["screen": ["on": true, "seq": 2, "declared": "ready"],
                              "captures": [["capture_id": "cap_1"], ["capture_id": "cap_1"], ["nope": 1]],
@@ -387,6 +399,44 @@ final class AttachmentEventTests: XCTestCase {
                 from: s)
         XCTAssertEqual(s.sharing.attachments.first?.phase, .local)
         XCTAssertEqual(s.sharing.attachments.count, 1)
+    }
+
+    func testAnItemTheCallTurnedAwayIsNotRetriedOnThatCall() {
+        // 404 or 409 `ended` while the call still looks live (a gateway restart, a pause the client
+        // saw fail): offering it to the same call again would only be refused again, in a loop.
+        var s = run([.sharing(.added(picture("p1"))), .sharing(.added(picture("p2"))),
+                     .sharing(.uploading("p1", interactionID: "vi_1")), .sharing(.uploadDeferred("p1", interactionID: "vi_1"))],
+                    from: ready())
+        XCTAssertEqual(s.connection, .live)
+        XCTAssertEqual(s.sharing.attachments.first?.phase, .local, "kept on this device")
+        XCTAssertEqual(s.sharing.attachments.first?.deferredFor, "vi_1")
+        XCTAssertTrue(s.sharing.hasLocalAttachments, "still shown, waiting")
+        XCTAssertEqual(s.sharing.uploadable(to: "vi_1").map(\.id), ["p2"], "never rescheduled for the call that refused it")
+
+        // Later events on the same call (another upload landing, a new drop) don't re-arm it.
+        s = run([.sharing(.uploading("p2", interactionID: "vi_1")),
+                 .sharing(.uploaded("p2", serverID: "att_2", interactionID: "vi_1")),
+                 .sharing(.added(picture("p3")))], from: s)
+        XCTAssertEqual(s.sharing.uploadable(to: "vi_1").map(\.id), ["p3"])
+        XCTAssertEqual(s.sharing.uploadable(to: "vi_9").map(\.id), ["p1", "p3"], "any other call takes it")
+    }
+
+    func testATurnedAwayItemIsUploadedAgainOnceANewInteractionIsAdmitted() {
+        var s = run([.sharing(.added(picture("p1"))), .sharing(.uploading("p1", interactionID: "vi_1")),
+                     .sharing(.uploadDeferred("p1", interactionID: "vi_1"))], from: ready())
+        XCTAssertEqual(s.sharing.uploadable(to: "vi_1"), [])
+        s = run([.pauseRequested, .sessionClosed], from: s, at: t0 + 2)
+        XCTAssertEqual(s.connection, .paused)
+        XCTAssertEqual(s.sharing.attachments.map(\.id), ["p1"], "kept through the pause")
+
+        s = run([.resumeRequested, .sharing(.declared(.ready)), .sessionAdmitted(interactionID: "vi_2"), .sessionStarted],
+                from: s, at: t0 + 3)
+        XCTAssertNil(s.sharing.attachments.first?.deferredFor, "a new session forgets the old one's refusal")
+        XCTAssertEqual(s.sharing.uploadable(to: "vi_2").map(\.id), ["p1"], "rescheduled for the resumed call")
+        s = run([.sharing(.uploading("p1", interactionID: "vi_2")),
+                 .sharing(.uploaded("p1", serverID: "att_9", interactionID: "vi_2"))], from: s, at: t0 + 4)
+        XCTAssertEqual(s.sharing.attachments.first?.phase, .pending)
+        XCTAssertEqual(s.sharing.attachments.first?.serverID, "att_9")
     }
 
     func testRemovingHidesAtOnceAndRestoresIfThePluginKeepsIt() {

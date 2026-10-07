@@ -4,8 +4,10 @@ off whether or not the voice hands it off (both voice backends), and "share my s
 button. The Mac is played by FakeMac over real HTTP; Hermes by the fake API server."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import queue
+import threading
 import time
 
 import pytest
@@ -176,7 +178,10 @@ def test_requests_that_need_the_screen(words):
     "draft this email to my landlord", "remind me to call Sam", "make this the header image", "summarize this",
     "look at this year's budget", "what time is it in Tokyo", "show me", "can I see this",
     "my screen keeps flickering", "my screen went black", "how do I share my screen in Zoom",
-    "how do I take a screenshot of my screen", "stop looking at my screen", "share my screen"])
+    "how do I take a screenshot of my screen", "stop looking at my screen", "share my screen",
+    # commands for the device itself
+    "lock my screen", "turn off my screen", "dim my display", "set my screen brightness to 50 percent",
+    "turn my screen off", "wake up my display", "change my display resolution"])
 def test_requests_that_never_wait_for_the_screen(words):
     assert not router.needs_screen(words)
 
@@ -184,6 +189,23 @@ def test_requests_that_never_wait_for_the_screen(words):
 def test_acknowledgements():
     assert router.acknowledges("ok, one sec") and router.acknowledges("There, it's on.")
     assert not router.acknowledges("ok, draft the release notes") and not router.acknowledges("what's this?")
+
+
+# What the user says after "Turn on the eye in my panel": about doing that, so a waiting request keeps waiting.
+@pytest.mark.parametrize("words", [
+    "I'm turning on the eye", "turning it on now", "how do I turn it on", "where's the eye", "where’s the eye?",
+    "it's on", "take a look now", "ok go", "okay I turned on screen sharing", "it's on now, take a look",
+    "ok turning on the eye", "I can't find the eye", "go ahead", "can you see it now?", "the eye is on now"])
+def test_talk_about_turning_sharing_on_keeps_a_hold(words):
+    assert router.acknowledges(words) and router.about_sharing_on(words)
+
+
+@pytest.mark.parametrize("words", [
+    "turn on the lights", "take a look at the weather in Boston", "draft the release notes", "what's this?",
+    "how do I share my screen in Zoom", "look at my screen", "turn on the kitchen lights and the eye",
+    "find the receipt from Amazon"])
+def test_requests_are_never_talk_about_sharing(words):
+    assert not router.about_sharing_on(words) and not router.acknowledges(words)
 
 
 # -- the hold --------------------------------------------------------------------------------------
@@ -321,7 +343,7 @@ def test_a_dropped_picture_goes_instead_of_waiting(open_call, server, hermes):
 
 @pytest.mark.parametrize("number,words", list(enumerate([
     "look at this year's budget", "what's that", "summarize this", "remind me to call Sam",
-    "my screen keeps flickering", "how do I share my screen in Zoom"])))
+    "my screen keeps flickering", "how do I share my screen in Zoom", "lock my screen"])))
 def test_requests_that_dont_need_the_screen_never_wait(open_call, hermes, number, words):
     call = open_call(f"hold_never_{number}")
     call.say("call_words", words)
@@ -503,6 +525,17 @@ def test_share_my_screen_keeps_a_waiting_request_waiting(open_call, hermes):
     ("stop looking at my screen please", ""),
     ("okay stop sharing my screen now thanks", ""),
     ("how do I stop sharing my screen", ""),
+    # leftovers that belong to the stop itself never become a request
+    ("you can stop looking at my screen", ""),
+    ("you can stop looking at my screen now", ""),
+    ("I'm done, stop looking at my screen", ""),
+    ("that's enough, stop looking at my screen", ""),
+    ("please stop looking at my screen for a bit", ""),
+    ("okay, stop looking at my screen for now", ""),
+    ("stop looking at my screen, that's enough for now", ""),
+    # a whole clause of its own, or one joined after a pause
+    ("Stop looking at my screen. What's the weather in Boston?", "What's the weather in Boston?"),
+    ("stop looking at my screen for now and set a timer for ten minutes", "set a timer for ten minutes"),
 ])
 def test_what_else_was_asked_with_a_stop(words, rest):
     assert router.after_stop(words) == rest
@@ -518,3 +551,101 @@ def test_a_stop_with_another_request_still_runs_the_request(open_call, hermes, m
     sent = hermes.calls[0]["input"]
     assert isinstance(sent, str) and "draft a note to Sam about Friday" in sent  # words only: sharing is off
     assert "stop looking" not in sent.lower().split("draft a note")[1]
+
+
+# -- around the hold: talk about the button, follow-ups, the release -------------------------------
+
+def test_talk_about_the_button_keeps_the_request_waiting(open_call, hermes):
+    call = open_call("hold_talk")
+    call.mac_replies(window())
+    call.say("call_look", "What's this error?")
+    waiting(call)
+    call.say("call_doing", "I'm turning on the eye now")
+    call.say("call_where", "Where's the eye?")
+    time.sleep(0.4)
+    assert call.snap()["hold"]["state"] == "waiting" and call.worker.held.delegation_id == "call_look"
+    assert hermes.calls == [] and call.run("call_doing").status == call.run("call_where").status == "rejected"
+    assert P.HOLD_DROPPED_NOTE not in call.notes()
+    call.sharing(True)
+    wait_for(lambda: hermes.calls)
+    assert images_in(hermes.calls[0]["input"]) == [WINDOW] and "What's this error?" in text_of(hermes.calls[0]["input"])
+    # Asking to look again just as it went: that request already has the screen.
+    call.say("call_now", "Now look at my screen")
+    call.say("call_again", "What's this error?")
+    call.say("call_go", "ok, take a look")
+    time.sleep(0.5)
+    assert len(hermes.calls) == 1 and len(call.captures()) == 1
+    assert {call.run(d).error for d in ("call_now", "call_again", "call_go")} == {"Already on its way with your screen"}
+
+
+def test_a_new_request_right_after_the_release_still_runs(open_call, hermes):
+    call = open_call("hold_then_more")
+    call.mac_replies(window())
+    call.say("call_look", "Look at my screen")
+    waiting(call)
+    call.sharing(True)
+    wait_for(lambda: hermes.calls)
+    call.say("call_more", "Look at my screen and tell me which tab has the invoice")  # it asks more than a look
+    wait_for(lambda: len(hermes.calls) == 2)
+    assert "which tab has the invoice" in text_of(hermes.calls[1]["input"])
+
+
+def test_a_follow_up_about_a_tasks_result_never_waits(open_call, hermes):
+    hermes.hold = True
+    call = open_call("hold_marked")
+    call.say("call_build", "Run the release build")
+    running = wait_for(lambda: (lambda r: r if r and r.run_id else None)(call.run("call_build")))
+    # The build reported an error; the voice ties the question to that task. Sharing is off.
+    call.say("call_err", "What does this error mean", task_id="call_build")
+    wait_for(lambda: hermes.steers)
+    assert hermes.steers[-1][1] == P.steer_text(call.service.rt.names, "What does this error mean")
+    assert never_held(call) and call.events("screen.hint") == [] and len(hermes.calls) == 1
+    hermes.runs[running.run_id]["done"].set()
+
+
+def test_sharing_on_while_the_hint_is_on_its_way_keeps_the_capture(open_call, service, hermes, monkeypatch):
+    call = open_call("hold_race")
+    call.mac_replies(window())
+    worker = call.worker
+    real_append, real_wait = worker.append, worker.wait_for_screen
+    hint_out, routing, held_done = threading.Event(), threading.Event(), threading.Event()
+
+    async def append(kind, delegation_id, content):
+        if content == P.screen_off_hint():
+            while not hint_out.is_set():  # the hint's round trip (Codex: a JSON-RPC request) takes a while
+                await asyncio.sleep(0.02)
+        await real_append(kind, delegation_id, content)
+
+    async def wait_for_screen(*args):
+        held = await real_wait(*args)
+        if held:
+            held_done.set()  # the held handoff's own dispatch finishes right after this
+        return held
+    monkeypatch.setattr(worker, "append", append)
+    monkeypatch.setattr(worker, "wait_for_screen", wait_for_screen)
+    service.rt.route_call = lambda m: routing.wait(2.5) and None  # the release waits in routing meanwhile
+    call.say("call_look", "Look at my screen")
+    waiting(call)
+    call.sharing(True)  # while the hint is still on its way
+    wait_for(call.captures)  # the release bound the handoff and asked for a capture
+    hint_out.set()
+    assert held_done.wait(5)
+    time.sleep(0.3)  # the held handoff's dispatch has finished: it must not have given the capture back
+    routing.set()
+    wait_for(lambda: hermes.calls)
+    assert images_in(hermes.calls[0]["input"]) == [WINDOW] and len(call.captures()) == 1
+
+
+def test_a_stop_with_only_leftover_words_starts_nothing(open_call, hermes, monkeypatch):
+    monkeypatch.setattr(calls, "STOP_HEARD_SETTLE_S", 1.0)  # the handoff gets there first
+    call = open_call("stop_leftover")
+    call.sharing(True)
+    call.say("call_stop", "You can stop looking at my screen now")
+    wait_for(lambda: P.SCREEN_STOPPED in call.spoken())
+    time.sleep(0.5)
+    assert hermes.calls == [] and call.events("screen.state") == [{"on": False, "seq": 2}]
+
+
+@pytest.mark.parametrize("words", ["Put it on my screen", "put the chart up on my screen", "show that on my screen"])
+def test_asking_for_the_tasks_picture_on_my_screen_never_waits(words):
+    assert router.about_task_view(words) and not router.needs_screen(words)

@@ -136,6 +136,90 @@ def test_an_oversized_upload_is_refused_before_its_body_is_read(server, kind, ca
     assert snapshot(server, iid)["attachments"] == []
 
 
+def upload_head(server, iid: str, length: int, kind: str = "picture", ctype: str = "image/jpeg",
+                name: str = "upload.bin") -> bytes:
+    return (f"POST /voice/interactions/{iid}/attachments HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            f"Authorization: Bearer {server.token}\r\nContent-Type: {ctype}\r\nX-Speakeasy-Kind: {kind}\r\n"
+            f"X-Speakeasy-Filename: {name}\r\nContent-Length: {length}\r\n\r\n").encode()
+
+
+def read_reply(sock) -> bytes:
+    reply = b""
+    try:
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            reply += chunk
+    except OSError:
+        pass  # reset after the reply: what arrived is what the app saw
+    return reply
+
+
+def test_the_upload_deadline_never_undercuts_the_mac(monkeypatch):
+    from speakeasy import server as srv
+    assert srv.upload_read_s(4_096) == srv.UPLOAD_READ_S  # the Mac gives up to 1 MB 30 s
+    assert srv.upload_read_s(1_500_000) >= 120             # ... and anything larger 120 s
+    assert srv.upload_read_s(A.MAX_FILE_BYTES) == 150      # the largest file: time for its size
+    assert all(srv.upload_read_s(n) <= srv.UPLOAD_READ_MAX_S for n in (1, 10**6, 10**7, 10**9))
+    monkeypatch.setattr(srv, "UPLOAD_READ_PER_MB_S", 60)
+    assert srv.upload_read_s(A.MAX_FILE_BYTES) == srv.UPLOAD_READ_MAX_S == 180  # capped
+
+
+def test_a_stalled_upload_gets_408_and_nothing_is_kept(server, monkeypatch):
+    from speakeasy import server as srv
+    monkeypatch.setattr(srv, "UPLOAD_RECV_S", 0.3)
+    monkeypatch.setattr(srv, "DRAIN_RECV_S", 0.2)
+    iid = open_call(server, "req_408_stall")
+    body = jpeg(50_000)
+    started = time.monotonic()
+    with socket.create_connection(("127.0.0.1", server.port), timeout=5) as sock:
+        sock.sendall(upload_head(server, iid, len(body)) + body[:10_000])  # part of it, then nothing; never closed
+        reply = read_reply(sock)
+    assert reply.startswith(b"HTTP/1.0 408") and b'"reason":"timeout"' in reply
+    assert time.monotonic() - started < 4
+    assert snapshot(server, iid)["attachments"] == []
+
+
+def test_a_crawling_upload_gets_408_at_its_deadline(server, monkeypatch):
+    from speakeasy import server as srv
+    monkeypatch.setattr(srv, "UPLOAD_READ_S", 0.5)
+    monkeypatch.setattr(srv, "UPLOAD_READ_PER_MB_S", 0)
+    monkeypatch.setattr(srv, "DRAIN_MAX_S", 0.5)
+    iid = open_call(server, "req_408_crawl")
+    body = jpeg(50_000)
+    stop = threading.Event()
+    with socket.create_connection(("127.0.0.1", server.port), timeout=5) as sock:
+        sock.sendall(upload_head(server, iid, len(body)))
+
+        def crawl():  # a trickle that never stalls long enough to time out on its own
+            try:
+                for start in range(0, len(body), 500):
+                    if stop.is_set():
+                        return
+                    sock.sendall(body[start:start + 500])
+                    time.sleep(0.05)
+            except OSError:
+                return
+        threading.Thread(target=crawl, daemon=True).start()
+        reply = read_reply(sock)
+        stop.set()
+    assert reply.startswith(b"HTTP/1.0 408") and b'"reason":"timeout"' in reply
+    assert snapshot(server, iid)["attachments"] == []
+
+
+def test_a_refused_large_upload_still_gets_its_reason(server):
+    iid = open_call(server, "req_drain")
+    for number in range(A.MAX_ATTACHMENTS):
+        assert upload(server, iid, b"notes", "file", "text/plain", {"X-Speakeasy-Filename": f"n{number}.txt"})[0] == 200
+    big = b"%PDF-1.7\n" + b"0" * 3_000_000  # refused (no room) before its body is read, then drained
+    with socket.create_connection(("127.0.0.1", server.port), timeout=10) as sock:
+        sock.sendall(upload_head(server, iid, len(big), "file", "application/pdf", "big.pdf") + big)  # as the app sends it
+        reply = read_reply(sock)
+    assert reply.startswith(b"HTTP/1.0 409") and b'"reason":"too_many"' in reply
+    assert len(snapshot(server, iid)["attachments"]) == A.MAX_ATTACHMENTS
+
+
 def test_a_fourth_attachment_is_refused(server):
     iid = open_call(server, "req_four")
     for i in range(2):
@@ -462,6 +546,22 @@ def test_call_end_drops_what_was_only_waiting(server, service, home):
 
 
 # -- Speakeasy's copies: cleared tasks, the weekly prune ------------------------------------------
+
+def test_a_tasks_shared_things_keep_their_positions(service):
+    from speakeasy.store import MAX_SHARED
+    store, key = service.store, "req_many-call_many-1"
+    store.reserve_run(key, "int_many", "call_many", 1)
+    store.update_run(key, "run_many", "running")
+    shots = [{"kind": "screen", "app": "Xcode", "path": f"/shared/{n}.jpg", "at": 1.0} for n in range(1, MAX_SHARED + 1)]
+    store.add_shared(key, shots[:5])  # the request's own, then steers that pointed at the screen
+    store.add_shared(key, shots[5:])
+    store.add_shared(key, [{"kind": "picture", "app": None, "path": "/shared/late.jpg", "at": 2.0}])
+    # The app fetches images by position (and caches them): one more never renumbers the ones it has.
+    assert [i["path"] for i in store.shared_items(key)] == [s["path"] for s in shots]
+    assert store.shared_image("run_many", 1) == "/shared/1.jpg"
+    assert store.shared_image("run_many", MAX_SHARED) == f"/shared/{MAX_SHARED}.jpg"
+    assert store.shared_image("run_many", MAX_SHARED + 1) is None
+
 
 def test_clearing_a_task_deletes_its_shared_files(server, service, home):
     iid = open_call(server, "req_clear")

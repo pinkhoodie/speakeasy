@@ -235,9 +235,13 @@ public struct SharedItem: Equatable, Sendable, Identifiable {
         }
     }
 
+    /// How many things one task's card keeps (the plugin's `MAX_SHARED`). The plugin keeps the first
+    /// ones shared, so a position never renumbers; the image route is asked for 1...this.
+    public static let maxItems = 12
+
     /// Numbers count every listed entry (an unknown kind keeps its place) so they match the server's.
     public static func list(json: Any?) -> [SharedItem] {
-        Array((json as? [Any] ?? []).prefix(8).enumerated()).compactMap { SharedItem(json: $0.element, number: $0.offset + 1) }
+        Array((json as? [Any] ?? []).prefix(maxItems).enumerated()).compactMap { SharedItem(json: $0.element, number: $0.offset + 1) }
     }
 }
 

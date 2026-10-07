@@ -301,7 +301,13 @@ _VIEWER = re.compile(r"(?i)\b(?:let me|lemme|let's|can i|could i|may i|i want to
 # "Show me what you're looking at": the task's own view, even while the user is sharing theirs.
 _TASK_VIEW = re.compile(
     r"(?i)\b(?:what (?:are|r) you (?:looking at|seeing|working on)|what you(?:'re| are)? (?:looking at|seeing|doing|"
-    r"working on|made|have|got|found)|(?:on )?your screen)\b")
+    r"working on|made|have|got|found)|(?:on )?your screen"
+    r"|(?:put|show|bring|pull) (?:it|that|them|those|the \w+) (?:up )?on my screen)\b")
+
+
+def _plain(text: str | None) -> str:
+    """Whitespace collapsed; a curly apostrophe (transcripts use both) reads as a straight one."""
+    return " ".join((text or "").replace("\u2019", "'").split())
 
 
 def refers_to_screen(request: str) -> bool:
@@ -309,8 +315,9 @@ def refers_to_screen(request: str) -> bool:
     "is this layout right?", "what's on my screen". Conservative on purpose: "look at this weekend's
     forecast", "show me what you're looking at" (the task's own view) and "let me look at this" never
     match. Dispatch skips the quick lanes for these and steers a running task with the screen; holds
-    and spoken screen intents (U4) build on the same matcher."""
-    text = " ".join((request or "").split())
+    and spoken screen intents (U4) build on the same matcher. "What’s this?" with a curly apostrophe
+    reads the same as with a straight one."""
+    text = _plain(request)
     if not text:
         return False
     if _WHAT_IS_THIS.match(text):
@@ -326,7 +333,7 @@ def refers_to_screen(request: str) -> bool:
 def about_task_view(request: str) -> bool:
     """A "show me" about what the task itself is looking at ("show me what you're looking at",
     "what's on your screen"): still the task's own view while the user shares theirs."""
-    return bool(_TASK_VIEW.search(request or ""))
+    return bool(_TASK_VIEW.search(_plain(request)))
 
 
 # -- spoken screen intents: "stop looking at my screen", "share my screen" ----------------------------
@@ -366,8 +373,9 @@ _SHARE_REQUEST = re.compile(
     rf"|(?:look at|watch|keep an eye on) my {_SCREEN_NOUN} from now on"
     r")(?: (?:please|now|for me|with you|for a (?:bit|sec|second|minute|while)))*\W*$")
 # Talk about a screen itself, which a look at it can't answer: the device ("my screen keeps flickering"),
-# sharing it somewhere else ("how do I share my screen in Zoom"), how-to questions ("how do I record
-# my screen").
+# commands for the device ("lock my screen", "turn off my display", "set my screen brightness to 50
+# percent"), sharing it somewhere else ("how do I share my screen in Zoom"), how-to questions ("how do I
+# record my screen").
 _DEVICE_TROUBLE = (r"flicker\w*|black|blank|dark|dim|frozen|froze|freez\w*|cracked|broken|broke|blurry|fuzzy|"
                    r"glitch\w*|dead|tearing|upside down|sideways|too (?:bright|dark|dim)|turned off|shaking|stuck|"
                    r"unresponsive|not working|isn't working|won't turn on|won't wake up|"
@@ -375,6 +383,11 @@ _DEVICE_TROUBLE = (r"flicker\w*|black|blank|dark|dim|frozen|froze|freez\w*|crack
 _SCREEN_ITSELF = re.compile(
     rf"(?i)\b(?:my|the) {_SCREEN_NOUN}(?:'s| is| was| has been| keeps| kept| just| seems| looks| got| is all)*"
     rf" (?:{_DEVICE_TROUBLE})\b"
+    r"|\b(?:lock|unlock|dim|brighten|darken|wake(?: up)?|rotate|flip|mirror|clean|wipe|record|calibrate|"
+    rf"(?:turn|switch|shut) (?:on|off)) (?:my|the|this) {_SCREEN_NOUN}\b"
+    rf"|\b(?:turn|switch|shut) (?:my|the|this) {_SCREEN_NOUN} (?:on|off)\b"
+    rf"|\b(?:my|the|this) {_SCREEN_NOUN}(?:'s)? (?:brightness|resolution|timeout|time-?out|settings?|scaling|"
+    r"refresh rate|orientation|sleep|lock)\b"
     r"|\b(?:share|sharing|record|recording|mirror|mirroring|cast|casting|present|presenting|project|projecting)"
     rf" (?:my|the) {_SCREEN_NOUN}(?= (?:in|on|during|for|from|with|to|onto|over) {_ELSEWHERE}\b)"
     r"|\bhow (?:do|can|could|should|would|to|does|did)(?: i| we| you| one)?(?: \w+)? (?:share|record|mirror|cast|"
@@ -391,15 +404,45 @@ _ACKNOWLEDGE = re.compile(
     r"(?:i'm |i am )?turning it on|i turned it on|let me (?:turn it on|do that|find it)|will do)\W*)+$")
 
 
-def _plain(text: str | None) -> str:
-    """Whitespace collapsed; a curly apostrophe (transcripts use both) reads as a straight one."""
-    return " ".join((text or "").replace("\u2019", "'").split())
+# Talk about turning sharing on, said after the voice asked them to ("I'm turning on the eye", "how do I
+# turn it on?", "where's the eye?", "ok, take a look now"). Matched per clause: each one must be about
+# the button (or a plain acknowledgement), so "take a look at the weather" or "turn on the lights" never is.
+_SHARING_THING = (r"(?:it|that|this|(?:the )?(?:screen ?shar(?:e|ing)|sharing)|the screen|my screen|"
+                  r"the (?:eye|button|icon|toggle|switch)(?: button| icon| thing)?)")
+_SHARING_TALK = re.compile(
+    rf"(?i)^\W*{_LEAD}(?:"
+    # doing it: "I'm turning on the eye", "turning it on now", "ok I pressed the button"
+    r"(?:(?:i'm|i am|i'll|i will|i|we're|let me|gonna|going to|about to|trying to|just|still|now)\s+)*"
+    rf"(?:(?:turn|switch|flip|put)(?:s|ed|ing)?\s+(?:on\s+{_SHARING_THING}|{_SHARING_THING}\s+on)"
+    rf"|(?:press|click|hit|tap|push|enable|find|found)(?:es|s|ed|ing|ting|ping)?\s+(?:on\s+)?{_SHARING_THING})"
+    # it's on: "it's on", "the eye is on now", "sharing is on"
+    r"|(?:it|that|the eye|the button|sharing|screen sharing|now it|ok it)(?:'s| is| should be)\s+"
+    r"(?:on|turned on|enabled|green|lit|active|working)"
+    # how and where: "how do I turn it on?", "where's the eye?", "I can't find the button"
+    r"|(?:how|where|which|what)\b[^.!?]*?\b(?:the eye|eye button|the button|turn (?:it|that|this|sharing|"
+    r"screen ?sharing) on|turn on (?:the eye|it|sharing|screen ?sharing)|screen ?sharing|sharing on)\b[^.!?]*"
+    r"|(?:i )?(?:can't|cannot|couldn't|don't|do not) (?:find|see) (?:the eye|the button|it|that)(?: button| icon)?"
+    # the go-ahead: "take a look now", "ok go", "go ahead", "can you see it now?"
+    r"|(?:go|go ahead|go for it|take a look|have a look|look now|try (?:it )?(?:now|again)|check (?:it )?(?:now|again)"
+    r"|(?:can|do) you see (?:it|that|this|my screen)|you can (?:look|see)(?: it)?)"
+    r")(?:\s+(?:now|please|then|for me|there|again|yet))*\W*$")
 
 
 def acknowledges(request: str) -> bool:
-    """Only an acknowledgement ("ok, one sec", "there, it's on"): a request waiting for the screen keeps
-    waiting through it."""
-    return bool(_ACKNOWLEDGE.match(_plain(request)))
+    """Only an acknowledgement ("ok, one sec", "there, it's on") or talk about turning sharing on ("I'm
+    turning on the eye", "where's the eye?", "ok, take a look now"): a request waiting for the screen
+    keeps waiting through it."""
+    text = _plain(request)
+    return bool(_ACKNOWLEDGE.match(text)) or about_sharing_on(text)
+
+
+def about_sharing_on(request: str) -> bool:
+    """Talk about turning sharing on, after being asked to ("I'm turning on the eye", "how do I turn it
+    on?", "it's on now, take a look"): every clause is about the button or a plain acknowledgement, and
+    at least one is about the button. Never a request of its own."""
+    clauses = [c for c in re.split(r"[,.!?;]+|\b(?:and then|and|then|so)\b", _plain(request)) if c.strip()]
+    talk = [bool(_SHARING_TALK.match(c)) for c in clauses]
+    return any(talk) and all(t or bool(_ACKNOWLEDGE.match(c)) for t, c in zip(talk, clauses))
 
 
 def stops_looking(request: str) -> bool:
@@ -422,18 +465,54 @@ _STOP_JOINER = re.compile(r"(?i)^(?:[\s,.;:!-]|\b(?:and then|and|then|also|but|s
                           r"|(?:[\s,.;:!-]|\b(?:and then|and|then|also|but|so|please|now|thanks|thank you)\b)+$")
 
 
+# What makes the words around a stop phrase a request of their own: joined to it by and / then / also
+# ("set a timer and stop looking at my screen", "stop looking at my screen, then check the weather"), or
+# a whole clause on its own side of a break ("Stop looking at my screen. What's the weather in Boston?").
+# Anything else ("you can stop looking ...", "I'm done, stop looking ...", "... for a bit") is part of
+# the stop itself.
+_STOP_JOINS = r"(?:and then|and also|and|then|also)"
+_STOP_POLITE = r"(?:please|ok(?:ay)?|now|(?:can|could|would|will) you(?: please)?)"
+_STOP_FOR_NOW = (r"(?:for (?:now|a (?:bit|sec|second|minute|moment|while)|today|the (?:moment|day|rest of the call))"
+                 r"|right now|now|please|thanks|thank you)")
+_JOINED_BEFORE = re.compile(rf"(?i)[\s,;:.!?-]*\b{_STOP_JOINS}\b(?:[\s,]+{_STOP_POLITE}\b)*[\s,;:.!?-]*$")
+_JOINED_AFTER = re.compile(rf"(?i)^(?:[\s,;:.!?-]*\b{_STOP_FOR_NOW}\b)*[\s,;:.!?-]*\b{_STOP_JOINS}\b")
+_CLAUSE_BEFORE = re.compile(r"[.!?;]\s*$")
+_CLAUSE_AFTER = re.compile(r"^\s*[.!?;,]")
+# Leftovers that are no request: closings and acknowledgements said with the stop.
+_STOP_LEFTOVER = re.compile(
+    r"(?i)^(?:\W*\b(?:you can(?: go)?|you may|i'm done|i am done|we're done|we are done|i'm good|i'm all set|"
+    r"that's (?:it|all|enough|fine)|that is (?:it|all|enough)|enough|all done|done|"
+    r"for (?:now|a (?:bit|sec|second|minute|moment|while)|today|the (?:moment|day|rest of the call))|"
+    r"right now|now|ok|okay|yeah|yes|sure|alright|all right|thanks|thank you(?: so much)?|please|for me|"
+    r"any ?more|again|too|as well|already|cool|great|got it|good|perfect|so)\b)+\W*$")
+
+
 def after_stop(request: str) -> str:
-    """What else was asked alongside "stop looking at my screen" ("… and set a timer for ten
-    minutes"): the words around the stop phrase without the joiners. Empty when the stop phrase was
-    all of it, so a stop never swallows a real request."""
+    """What else was asked alongside "stop looking at my screen": words joined to the stop phrase by
+    and / then / also ("set a timer for ten minutes and stop looking at my screen", "... , then check
+    the weather in Boston"), or a whole clause of its own beside it ("Stop looking at my screen. What's
+    the weather in Boston?"), without the joiners. Empty when the rest is part of the stop itself ("you
+    can", "I'm done", "that's enough", "for a bit", "okay") or under three words: a stop never starts a
+    task from its leftovers, and never swallows a real request."""
     text = _plain(request)
     for match in _STOP_LOOKING.finditer(text):
         before, after = text[:match.start()], text[match.end():]
         if _STOP_ASKED_ABOUT.search(before) or _STOP_NEGATED.search(before) or _STOP_ELSEWHERE.match(after):
             continue
-        rest = " ".join(f"{_STOP_JOINER.sub('', before)} {_STOP_JOINER.sub('', after)}".split())
-        rest = _STOP_JOINER.sub("", rest).strip()
-        return rest if len(rest.split()) >= 2 else ""
+        kept = []
+        joined = _JOINED_BEFORE.search(before)
+        if joined:
+            kept.append(before[:joined.start()])
+        elif _CLAUSE_BEFORE.search(before):
+            kept.append(before)
+        joined = _JOINED_AFTER.match(after)
+        if joined:
+            kept.append(after[joined.end():])
+        elif _CLAUSE_AFTER.match(after):
+            kept.append(after)
+        asks = [words for said, words in ((k, _STOP_JOINER.sub("", k).strip()) for k in kept)
+                if len(words.split()) >= 3 and not _STOP_LEFTOVER.match(said) and not acknowledges(words)]
+        return " and ".join(asks)
     return ""
 
 
@@ -456,6 +535,20 @@ def needs_screen(request: str) -> bool:
     if screen_intent(request) or about_task_view(request):
         return False
     return refers_to_screen(_SCREEN_ITSELF.sub(" ", _plain(request)))
+
+
+# Words that only ask for a look ("now look at my screen", "ok, can you see this now?"): nothing a look
+# already being taken doesn't answer. A thing named ("this error") or a question word is more than that.
+_LOOK_WORDS = frozenset("""a again ahead alright and at can check could display do does glance go have hey here it
+just look looking my now ok okay out please quick real screen see so take that the there these this well window
+would yeah yes you""".split())
+
+
+def only_looks(request: str) -> bool:
+    """The request asks for a look at the screen and nothing else ("now look at my screen", "can you see
+    my screen now"); "what's this error?" or "look at my screen and tell me what's wrong" ask more."""
+    words = set(re.findall(r"[a-z']+", _plain(request).lower()))
+    return bool(words) and not words - _LOOK_WORDS
 
 
 def show_me_target(request: str, tasks: list[OpenTask], has_image: set[str]) -> OpenTask | None:
