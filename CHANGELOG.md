@@ -4,12 +4,17 @@ Speakeasy has two parts that update separately: the **Mac app** (updates through
 
 ## Mac (next)
 
+- **iPhone: calls stop coming up deaf.** Talk-while-connecting is off on iPhone: its listener and the call fought over the phone's one mic and could leave the call's audio switched off for later calls. Every call now starts with the phone's call audio reset. A tap tells you when to talk.
 - **"Listening" means it's listening.** While connecting, it says Listening only once sound is actually coming from the mic. If none arrives within a second and a half, the call takes the mic itself.
 - **A call that doesn't connect says so.** Before, a call that never finished connecting sat on "Listening" forever. Now it retries once after 12 seconds, then says it couldn't connect so you can tap again. Where it got stuck is logged.
 - **Old questions stop greeting you.** An unanswered question stays pinned for 20 minutes, then lives only in its task. Closing a card or answering one is remembered across launches. On iPhone, a question's answers can now be tapped.
 - **iPhone: an Action Button call never ends up behind the app with no mic.** The call starts only once the app is fully in front (iOS gives the mic only to the app in front). If the mic is lost while the app is in the background, it says so and fixes itself the moment you open the app, instead of reconnecting in a loop.
 - **iPhone: no more "Fixing the mic…" loop at the start of a call.** The mic check judged the mic dead 2.5 seconds after the call took it over from the talk-while-connecting listener, before the phone's call audio (and AirPods' call mode) had started, then reconnected twice. A phone now gets 7 seconds for the first sound, the listener fully lets go of the mic, and a repair reconnects without the listener. Repairs log what the check saw.
 - No more "didn't get that" while a task is clearly still working. It showed 45 seconds after any follow-up or status question that didn't start a new task.
+
+## Plugin 0.2.50
+
+- Mic reports from the app can carry the phone's audio state, so a deaf call says why.
 
 ## Plugin 0.2.49 — Talk it through first
 

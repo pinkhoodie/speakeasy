@@ -259,6 +259,32 @@ public final class NativeCallEngine: NSObject, RTCPeerConnectionDelegate, RTCDat
     }
 
     public var isAudioHeld: Bool { audioHeld }
+
+    /// iPhone: WebRTC's audio session is one object for the whole app. A hold from an earlier call
+    /// (or a listener) that was never released leaves it in manual mode with audio off, and every
+    /// later call is deaf: 0 packets, no input route. Start each call from a clean state.
+    public static func resetSharedAudio() {
+        #if os(iOS) || os(visionOS)
+        let session = RTCAudioSession.sharedInstance()
+        if session.useManualAudio || !session.isAudioEnabled {
+            session.isAudioEnabled = true
+            session.useManualAudio = false
+        }
+        #endif
+    }
+
+    /// The audio session as WebRTC sees it (for the mic report).
+    public static func sharedAudioSummary() -> String {
+        #if os(iOS) || os(visionOS)
+        let s = RTCAudioSession.sharedInstance()
+        let category = s.category.replacingOccurrences(of: "AVAudioSessionCategory", with: "")
+        let mode = s.mode.replacingOccurrences(of: "AVAudioSessionMode", with: "")
+        return "session \(s.isActive ? "active" : "inactive") \(category)/\(mode)"
+            + (s.useManualAudio ? " manual" : "") + (s.isAudioEnabled ? "" : " audio-off")
+        #else
+        return ""
+        #endif
+    }
     private var audioHeld = false
 
     public func close() {

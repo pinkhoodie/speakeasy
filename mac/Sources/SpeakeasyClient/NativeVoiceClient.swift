@@ -315,13 +315,14 @@ public final class NativeVoiceClient: VoiceCallClient {
         let outs = route.outputs.map { $0.portType.rawValue }.joined(separator: "+")
         parts.append("in " + (ins.isEmpty ? "none" : ins))
         parts.append("out " + (outs.isEmpty ? "none" : outs))
+        parts.append(NativeCallEngine.sharedAudioSummary())
         #endif
         return parts.joined(separator: ", ")
     }
 
     private func reportMic(_ note: String) {
         guard let api, let id = model.state.interactionID else { return }
-        Task { _ = try? await api.post("/voice/interactions/\(id)/mic-check", ["note": String(note.prefix(200))]) }
+        Task { _ = try? await api.post("/voice/interactions/\(id)/mic-check", ["note": String(note.prefix(400))]) }
     }
 
     private func applySideEffects(from old: VoiceState, to new: VoiceState) {
@@ -476,6 +477,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         armConnectWatchdog(api)
         if skipEarlyCapture { stopEarlyCapture() } else { startEarlyCapture() }
         connectionUsedEarlyCapture = earlyCapture != nil
+        if earlyCapture == nil { NativeCallEngine.resetSharedAudio() }
         let engine = NativeCallEngine()
         self.engine = engine
         if earlyCapture != nil { engine.holdAudio() }

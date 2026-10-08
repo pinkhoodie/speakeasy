@@ -549,10 +549,10 @@ class VoiceService:
         """The app found the call's mic wasn't getting through and reopened the connection.
         Logged (no audio, no words) so dead-mic calls show up in the logs with a reason."""
         note = body.get("note") if isinstance(body, dict) else None
-        if set(body or {}) != {"note"} or not isinstance(note, str) or len(note) > 200:
+        if set(body or {}) != {"note"} or not isinstance(note, str) or len(note) > 400:
             raise ServiceError(400, "body must contain only note")
         self.interaction(interaction_id)
-        logger.warning("speakeasy: mic check on %s: %s", interaction_id[:10], re.sub(r"[^\w :.,()-]", "", note))
+        logger.warning("speakeasy: mic check on %s: %s", interaction_id[:10], re.sub(r"[^\w :.,()/;+-]", "", note))
         return {"interaction_id": interaction_id, "logged": True}
 
     def skip_tour(self, interaction_id: str) -> dict[str, Any]:
