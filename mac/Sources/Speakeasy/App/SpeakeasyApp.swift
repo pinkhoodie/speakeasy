@@ -461,7 +461,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func configureListening() {
         // nil = no status yet (Hermes unreachable at launch): turning listening on asks again.
-        room.pluginSupportsRoom = { [weak self] in self?.app.status.map { $0.roomListening == true } }
+        // Listening mode always resumes the call it paused, so the plugin must take room text on a resume.
+        room.pluginSupportsRoom = { [weak self] in
+            self?.app.status.map { $0.roomListening == true && $0.roomOnResume == true }
+        }
         room.refreshStatus = { [weak self] in await self?.app.refresh() }
         room.callBusy = { [weak self] in
             guard let self else { return false }

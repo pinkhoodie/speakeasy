@@ -89,7 +89,7 @@ public enum RoomUnavailability: Equatable, Sendable {
     public var message: String {
         switch self {
         case .systemTooOld: return "Needs macOS 26 or later"
-        case .pluginTooOld: return "Update the Speakeasy plugin on your Hermes machine to use it"
+        case .pluginTooOld: return "Your Hermes runs an older Speakeasy plugin: update it, then run hermes voice reload"
         case .noTranscriber: return "On-device transcription isn't available on this Mac"
         case .languageNotSupported(let language): return "On-device transcription doesn't support \(language) yet"
         case .modelDownloadFailed: return "Couldn't download the speech model · check the connection and try again"

@@ -191,8 +191,11 @@ final class MultitaskTests: XCTestCase {
     }
 
     func testStatusSaysWhetherTheServerTakesRoomText() throws {
-        let newer = try JSONDecoder().decode(ServerStatus.self, from: Data(#"{"version":"0.2.51","room_listening":true}"#.utf8))
+        let newer = try JSONDecoder().decode(ServerStatus.self, from: Data(#"{"version":"0.2.51","room_listening":true,"room_on_resume":true}"#.utf8))
         XCTAssertEqual(newer.roomListening, true)
+        XCTAssertEqual(newer.roomOnResume, true)
+        let firstCut = try JSONDecoder().decode(ServerStatus.self, from: Data(#"{"room_listening":true}"#.utf8))
+        XCTAssertNil(firstCut.roomOnResume, "a plugin that takes room text only on new calls can't do listening mode during a call")
         let older = try JSONDecoder().decode(ServerStatus.self, from: Data(#"{"version":"0.2.50"}"#.utf8))
         XCTAssertNil(older.roomListening, "older plugins reject unknown session fields: never send room to them")
     }

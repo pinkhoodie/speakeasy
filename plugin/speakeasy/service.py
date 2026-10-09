@@ -177,7 +177,10 @@ class VoiceService:
         with self.lock:
             live = list(self.interactions.values())
         for interaction in live:
-            if not interaction.call_closed or interaction.paused:
+            # A paused call counts until its pause is bookkept as ended (PAUSE_NOTICE_AFTER_S): a call
+            # paused and never resumed (or ended on the device while paused) must not hold back an
+            # update forever. Resuming it after a reload starts a fresh call on the app's side.
+            if not interaction.call_closed or (interaction.paused and not interaction.pause_bookkept):
                 return True
             if any(r.status in ACTIVE_RUN_STATES for r in interaction.runs.values()):
                 return True
@@ -982,8 +985,10 @@ class VoiceService:
             "routing_model": routing_model(), "routing_hint": ROUTING_HINT, "routing_explainer": ROUTING_EXPLAINER,
             "routing_choice": self.routing_choices(),
             "advertised_url": s["server"]["advertised_url"], "tailscale_name": s["server"]["tailscale_name"],
-            # Listening mode: POST /voice/sessions takes "room" (the app sends it only when this is true).
+            # Listening mode: POST /voice/sessions takes "room" (the app sends it only when this is true),
+            # also with resume_from (listening mode during a call pauses it, then resumes it with "room").
             "room_listening": True,
+            "room_on_resume": True,
             "version": __version__,
         }
 

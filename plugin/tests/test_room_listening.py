@@ -58,7 +58,7 @@ def test_room_text_reaches_the_codex_voice_as_fenced_background(server, service)
 
 def test_status_says_the_server_takes_room_text(server):
     status, body = http(server.base_url, "GET", "/voice/status", token=server.token)
-    assert status == 200 and body["room_listening"] is True
+    assert status == 200 and body["room_listening"] is True and body["room_on_resume"] is True
 
 
 def test_a_plain_call_has_no_room_block(server, service):

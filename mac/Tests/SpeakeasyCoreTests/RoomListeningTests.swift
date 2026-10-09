@@ -199,7 +199,7 @@ final class RoomListeningTests: XCTestCase {
     func testUnavailableGivesTheReason() {
         let cases: [(RoomUnavailability, String)] = [
             (.systemTooOld, "Needs macOS 26 or later"),
-            (.pluginTooOld, "Update the Speakeasy plugin on your Hermes machine to use it"),
+            (.pluginTooOld, "Your Hermes runs an older Speakeasy plugin: update it, then run hermes voice reload"),
             (.noTranscriber, "On-device transcription isn't available on this Mac"),
             (.languageNotSupported(language: "Klingon"), "On-device transcription doesn't support Klingon yet"),
             (.modelDownloadFailed, "Couldn't download the speech model · check the connection and try again"),

@@ -574,8 +574,11 @@ public final class NativeVoiceClient: VoiceCallClient {
         // server still takes it (the plugin can be updated or rolled back during a long listen) is
         // asked while the offer is made, so the check never delays the call.
         // nil = the status didn't come back (unknown); a status without the flag = an older plugin.
-        let roomSupport: Task<Bool?, Never>? = roomCall?.sends(resuming: model.state.resumeFrom != nil) == true
-            ? Task { (try? await api.status()).map { $0.roomListening ?? false } } : nil
+        let resuming = model.state.resumeFrom != nil
+        let roomSupport: Task<Bool?, Never>? = roomCall?.sends(resuming: resuming) == true
+            ? Task {
+                (try? await api.status()).map { ($0.roomListening ?? false) && (!resuming || ($0.roomOnResume ?? false)) }
+            } : nil
         startTask = Task { [weak self] in
             var sentRoom = false
             do {
@@ -593,7 +596,7 @@ public final class NativeVoiceClient: VoiceCallClient {
                     // anyway: a server that can't take it answers 400 and the call falls back below.
                     let supported = await Self.firstAnswer(of: roomSupport, within: 1)
                     if supported == false {
-                        self.dropRoomContext("This Speakeasy plugin can't use what listening mode heard. Update it on the Hermes machine.")
+                        self.dropRoomContext("This Speakeasy plugin can't use what listening mode heard. Update it on the Hermes machine, then run hermes voice reload.")
                     } else {
                         room = context
                     }
