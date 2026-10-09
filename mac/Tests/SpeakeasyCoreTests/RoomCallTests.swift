@@ -78,6 +78,15 @@ final class RoomCallTests: XCTestCase {
         XCTAssertTrue(c.speechSinceLive)
     }
 
+    func testTheRoomRidesUntilTheServerHasItThenOnlyOnNewAdmissions() {
+        var c = call()
+        XCTAssertTrue(c.sends(resuming: false))
+        XCTAssertTrue(c.sends(resuming: true), "listening mode turned off mid-call: the resume carries it")
+        c.markDelivered()
+        XCTAssertFalse(c.sends(resuming: true), "a later pause/resume relies on the server's copy")
+        XCTAssertTrue(c.sends(resuming: false), "a resume that fell back to a new call sends it again")
+    }
+
     func testCarriedWordsSurviveUntilHandedOver() {
         var c = call()
         c.carriedWords = "what did Sam say"

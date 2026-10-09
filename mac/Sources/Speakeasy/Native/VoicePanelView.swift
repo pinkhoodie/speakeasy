@@ -284,10 +284,10 @@ struct ListenButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help(blocked ?? (["Listening mode: hear the room without answering. Turn it off to ask about it.",
+        .help(blocked ?? (["Listening mode: pause the call and hear the room without answering. Turn it off to ask about it.",
                            shortcutHint].filter { !$0.isEmpty }.joined(separator: "\n")))
         .accessibilityLabel("Turn on listening mode")
-        .accessibilityHint(blocked ?? "Transcribes the room on this Mac without answering")
+        .accessibilityHint(blocked ?? "Pauses the call and transcribes the room on this Mac without answering")
     }
 }
 
@@ -420,7 +420,9 @@ struct VoicePanelView: View {
             if model.tourActive && model.state.connection.isOpen && !model.state.workOnly {
                 TourStrip(action: model.onSkipTour)
             }
-            if !model.state.connection.isOpen && !model.state.workOnly && (model.room != nil || model.roomNotice != nil) {
+            // Beside the call, never in it: shown with no call open, or while the call is paused
+            // (listening mode turned on mid-conversation pauses it).
+            if !model.state.connection.isInCall && !model.state.workOnly && (model.room != nil || model.roomNotice != nil) {
                 RoomStrip(room: model.room, notice: model.roomNotice, canAsk: model.roomCanAsk, onAsk: model.onAskRoom,
                           onDiscard: model.onDiscardRoom, onDismissNotice: model.onDismissRoomNotice)
                     .padding(.horizontal, 12).padding(.bottom, 10)
@@ -572,6 +574,12 @@ struct VoicePanelView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
             // Quiet (silence the current reply) is intentionally not exposed in Speakeasy.
+            // Listening mode mid-conversation: pauses the call and listens; turning it off resumes it.
+            if model.roomOffered && model.room?.isOn != true
+                && (model.state.connection == .live || model.state.connection == .paused) {
+                ListenButton(blocked: model.roomBlocked, shortcutHint: model.roomShortcutHint, action: model.onToggleRoom)
+                    .fixedSize()
+            }
             if let label = p.pauseLabel {
                 PauseButton(label: label, enabled: p.pauseEnabled, shortcutHint: model.pauseShortcutHint,
                             action: model.onTogglePause)
@@ -588,11 +596,7 @@ struct VoicePanelView: View {
                     .fixedSize()
             }
             if !model.state.connection.isOpen {
-                if model.roomOffered && model.room?.isOn != true {
-                    ListenButton(blocked: model.roomBlocked, shortcutHint: model.roomShortcutHint, action: model.onToggleRoom)
-                        .fixedSize()
-                }
-                // While listening, Start turns listening off into the call (it knows what was said).
+                // While listening mode holds what it heard, Start asks about it in a new call.
                 StartButton(action: model.onStart)
                     .fixedSize()
             } else {

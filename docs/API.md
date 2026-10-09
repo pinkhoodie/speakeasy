@@ -105,10 +105,12 @@ words, and drops it the moment they say skip. Its value names the shortcuts to m
 optional: `{"call": "⌃⌥Space", "mute": "⌃⌥M", "pause": "⌃⌥P"}` (`{}` for none).
 
 `room` (optional, plugin 0.2.51+, only when `GET /voice/status` has `room_listening: true`) is what
-listening mode heard before this call: `[HH:MM] text` lines, at most 24,000 Unicode code points.
-The app sends it only on a new call, never with `resume_from` (400); a resume keeps the server's
-copy. `""` means no room. With a room, `tour` is ignored. The room is part of the idempotency
-fingerprint (a retry with the same key must send the same room).
+listening mode heard: `[HH:MM] text` lines, at most 24,000 Unicode code points. The app sends it
+with `resume_from` when listening mode (turned on mid-call, which paused the call) is turned off:
+it's added to any room text the call already had (newest kept within the cap) and the voice may
+respond from the room once more. A new call can carry it too (a resume that fell back to a new
+call). A plain resume keeps the server's copy. `""` means no room. With a room, `tour` is ignored.
+The room is part of the idempotency fingerprint (a retry with the same key must send the same room).
 
 ```json
 {"sdp": "v=0\r\n...", "room": "[14:02] Sam says the deadline is Friday the 14th.\n[14:03] Priya will send the deck by Wednesday."}
@@ -136,8 +138,7 @@ call, and is dropped when the call ends or 15 minutes after it was paused.
 
 `voice_provider` is `codex` (default: the user's own `codex login`, via `codex app-server`) or
 `openai` (`SPEAKEASY_OPENAI_API_KEY` in the profile `.env`). A resumed call also carries
-`"resumed_from": "<old interaction_id>"`. Errors: 400 bad body (including a `room` over the cap or
-with `resume_from`), 409 the call was already resumed or the Idempotency-Key was reused with a
+`"resumed_from": "<old interaction_id>"`. Errors: 400 bad body (including a `room` over the cap), 409 the call was already resumed or the Idempotency-Key was reused with a
 different SDP or room, 502 the voice provider could not start (see `GET /voice/status` →
 `codex_message`).
 

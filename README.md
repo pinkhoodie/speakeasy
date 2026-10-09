@@ -98,12 +98,13 @@ Settings › Home, or from the terminal:
 
 ## Listening mode (Mac, macOS 26+)
 
-Turn on listening mode (the ear button in the panel, or the menu bar) and Speakeasy transcribes the
-room on your Mac without answering: nothing leaves the Mac and no voice session runs. Turn it off
-and a call starts that already knows the last 30 minutes of what was said. Ask about it, ask for
+During a call, tap the ear button: the call pauses and Speakeasy transcribes the room on your Mac
+without answering. Nothing leaves the Mac while it listens and nothing is billed. Turn it off and
+the call picks up again, already knowing what was said (the last 30 minutes): ask about it, ask for
 something, or say nothing and it responds to the conversation. What it heard goes to the voice and
-to tasks from that call. Speakeasy never keeps it; Hermes keeps what those tasks received, like any task. It stops by itself after 2 hours or when the Mac sleeps.
-Needs the Hermes plugin 0.2.51 or later. Let the people in the room know it's on.
+to tasks from that call. Speakeasy never keeps it; Hermes keeps what those tasks received, like any
+task. It stops when the call ends, after 2 hours, or when the Mac sleeps. Needs the Hermes plugin
+0.2.51 or later. Let the people in the room know it's on.
 
 ## Updating
 

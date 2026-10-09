@@ -51,32 +51,37 @@ Not in v1: iPhone and Watch clients, platform-specific routing rules (results go
 `prompt/rules.md` + `prompt/builder.py`, templated with `{assistant_name}`, `{user_name}` and
 `{machine_description}`. A request is a new task unless the voice model marks it as a follow-up.
 
-## Listening mode (Mac, macOS 26+)
+## Listening mode (Mac, macOS 26+, during a call)
 
-Listening mode lets the Mac hear a conversation without answering, so the call that follows already
-knows what was said. It sits beside the call, not inside it: it can only be on while no call is open
-or paused, and every way of starting a call while it's on turns it off into that call.
+Listening mode lets the Mac hear the conversation around a call without the voice answering, then
+go back to the call knowing what was said. It exists only during a call: turning it on pauses the
+call, and every way of resuming or starting a call while it's on turns it off into that call.
 
-- **While on:** `RoomListener` (SpeakeasyClient) transcribes the default input on-device with Apple's
-  SpeechAnalyzer + SpeechTranscriber, built for long-form, distant audio and needing no
-  speech-recognition permission. The text (`RoomTranscript`, SpeakeasyCore) is kept in memory only,
-  the last 30 minutes. Nothing goes to the server or the voice provider and no voice session is open.
-  The panel strip and menu bar ring show it's on; "Listening mode" is never shown before real sound
-  arrives, and a mic delivering only digital silence for 10 s shows as not hearing.
-  `RoomListeningController` (app) holds an idle-sleep assertion, stops after 2 hours or on sleep,
-  and Discard drops everything without a call.
-- **Turning it off** releases the mic and starts an ordinary call with the rendered transcript as
-  `room` on `POST /voice/sessions` (sent only when `GET /voice/status` says `room_listening`). The
-  call opens unmuted; the existing listen-while-connecting capture (`EarlyCapture`) catches what's
-  said next as the first request. If nothing is said, ~2 s after turning it off (and once the call is
-  live, with no speech on its mic) the app sends an empty early request and the voice responds from
-  the room (`RoomTakeoffPolicy`). A call that fails before going live returns to listening with the
-  transcript intact; one the server can't take room text for carries on as a plain call.
+- **Turning it on** (the ear button with the call's controls, the menu bar, or an optional shortcut)
+  pauses the live call through the ordinary Pause (the voice session closes, nothing is billed, the
+  conversation and tasks are kept), then `RoomListener` (SpeakeasyClient) transcribes the default
+  input on-device with Apple's SpeechAnalyzer + SpeechTranscriber (long-form, distant audio, no
+  speech-recognition permission). The text (`RoomTranscript`, SpeakeasyCore) stays in memory only,
+  the last 30 minutes. Nothing goes to the server or the voice provider while it listens. The panel
+  strip and menu bar ring show it's on; it's never shown as listening before real sound arrives,
+  and a mic delivering only digital silence for 10 s shows as not hearing. `RoomListeningController`
+  (app) holds an idle-sleep assertion and stops after 2 hours, on sleep, or when the call ends;
+  Discard drops what it heard and leaves the call paused.
+- **Turning it off** (Turn off and ask, Resume, the call or pause shortcut) releases the mic and
+  resumes the call with the rendered transcript as `room` on `POST /voice/sessions` + `resume_from`
+  (sent only when `GET /voice/status` says `room_listening`). The call comes back unmuted; the
+  existing listen-while-connecting capture (`EarlyCapture`) catches what's said next as the request.
+  If nothing is said, ~2 s after turning it off (once the call is live, with no speech on its mic)
+  the app sends an empty early request and the voice responds from the room (`RoomCall` /
+  `RoomTakeoffPolicy`), once per take-off. If the call can't come back, what was heard is kept (not
+  listening) to ask about in a new call or discard; if the server can't take room text, the call
+  carries on without it.
 - **On the server:** the room text is redacted for secrets, kept only on the in-memory
   `Interaction` (never in the transcript fragments, call log, recent voice, Tune or the store), put
   in the voice's instructions as a fenced background block, and added to Hermes run inputs for tasks
   from that call (new tasks, follow-ups, splits and continued chats; never posts to a chat thread).
-  It moves to a resumed call and is cleared when the call ends or 15 minutes after a pause.
+  Each take-off adds to the room text the call already has (newest kept within the cap). It moves to
+  a resumed call and is cleared when the call ends or 15 minutes after a pause.
 
 ## Server API (all JSON; Bearer device token unless noted)
 

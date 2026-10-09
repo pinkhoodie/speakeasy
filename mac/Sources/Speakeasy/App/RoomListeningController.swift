@@ -6,9 +6,10 @@ import SpeakeasyCore
 /// Listening mode on the Mac: owns the on-device room listener and what it heard, decides when it
 /// may run, and turns it off into a call. It never answers; the call it's turned off into does.
 ///
-/// It lives beside the call, never inside it: it can be turned on only while no call is open or
-/// paused, and every way of starting a call while it's on (button, menu, shortcut) turns it off
-/// into that call instead. What it heard stays in memory only, on this Mac, until then.
+/// It exists only during a call. Turning it on pauses the call (the voice stops hearing and
+/// answering, nothing is billed); turning it off resumes that conversation with what was heard.
+/// Every way of resuming or starting a call while it's on (button, menu, shortcut) turns it off
+/// into that call. Ending the call stops it. What it heard stays in memory only, on this Mac.
 @MainActor
 final class RoomListeningController {
     /// Listening stops by itself after this long (battery, and nobody forgets it's on).
@@ -27,14 +28,21 @@ final class RoomListeningController {
     /// Ask the server for its status again (a launch-time answer goes stale: Hermes unreachable
     /// then, or the plugin updated since).
     var refreshStatus: () async -> Void = {}
-    /// A call is open or paused (listening can't start then).
-    var callOpen: () -> Bool = { false }
+    /// A call is connecting or ending (listening waits for it to settle).
+    var callBusy: () -> Bool = { false }
+    /// A call is live or paused: listening mode can only be turned on then.
+    var callActive: () -> Bool = { false }
+    /// Free the mic before listening starts: pause a live call (false if it couldn't be paused).
+    var prepareMic: () async -> Bool = { true }
 
     private let listener = RoomListener()
     /// When the listening that was turned off into a call began, held until the call reports back
     /// (it resumes from there if the call fails before it goes live).
     private var pendingSince: Date?
     private var awaitingCall = false
+    /// The call didn't come back after listening was turned off: what was heard is kept (not
+    /// listening) so it can still be asked about, which starts a call, or discarded.
+    private var heldAfterCall = false
     private(set) var notice: String?
     private var activity: NSObjectProtocol?
     private var capTimer: Timer?
@@ -76,15 +84,18 @@ final class RoomListeningController {
         if case .failed = listener.state { return !listener.transcript.isEmpty }
         return false
     }
-    /// What it heard can be turned into a call (or discarded): while on, or held after a failure.
-    var canAsk: Bool { isOn || heldAfterFailure }
+    /// What it heard is kept without listening (after a failure), to ask about or discard.
+    var held: Bool { heldAfterFailure || heldAfterCall }
+    /// What it heard can be turned into the call (or discarded): while on, or while held.
+    var canAsk: Bool { isOn || held }
 
     /// Why it can't be turned on right now, or nil when it can. An unknown plugin status isn't a
     /// reason: turning it on asks the server again first.
     var blocker: String? {
         if !RoomListener.isSupported { return RoomUnavailability.systemTooOld.message }
         if pluginSupportsRoom() == false { return RoomUnavailability.pluginTooOld.message }
-        if callOpen() { return "Turn it on when no call is open or paused" }
+        if callBusy() { return "Wait until the call has connected" }
+        if !callActive() && !held { return "Listening mode works during a call" }
         return nil
     }
 
@@ -94,6 +105,11 @@ final class RoomListeningController {
     /// What the strip shows, or nil when listening mode is off with nothing to say.
     func presentation(now: Date = Date()) -> RoomPresentation? {
         let state = listener.state
+        if heldAfterCall {
+            return RoomPresentation(title: "Listening mode kept what it heard", detail: "The call didn't come back",
+                                    hint: "Ask about it (starts a call) or discard it · kept for 30 minutes",
+                                    tone: .warning, warnings: [], isOn: false)
+        }
         guard state != .off else { return nil }
         var shown = presentRoom(state, now: now, heardWords: !listener.transcript.isEmpty, warnings: warnings)
         if heldAfterFailure {
@@ -118,15 +134,16 @@ final class RoomListeningController {
     func toggle() { isOn ? takeOff() : turnOn() }
 
     func turnOn() {
-        guard !isOn, !awaitingCall else { return }
-        if callOpen() { return }   // the button and menu item already say why; no note to outlive the call
+        guard !isOn, !awaitingCall, !heldAfterCall else { return }
+        // Only during a call, once it's settled; the button and menu item already say why.
+        if callBusy() || !callActive() { return }
         if !RoomListener.isSupported { show(RoomUnavailability.systemTooOld.message); return }
         if pluginSupportsRoom() == true { start(); return }
         // Unknown, or an answer that may be stale: ask the server again before saying no.
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.refreshStatus()
-            guard !self.isOn, !self.awaitingCall, !self.callOpen() else { return }
+            guard !self.isOn, !self.awaitingCall, !self.callBusy(), self.callActive() else { return }
             switch self.pluginSupportsRoom() {
             case true?: self.start()
             case false?: self.show(RoomUnavailability.pluginTooOld.message)
@@ -138,8 +155,17 @@ final class RoomListeningController {
     private func start() {
         guard explainOnce() else { return }
         notice = nil
-        // After a failure, turning it on again carries on with what it had heard.
-        begin(continuing: heldAfterFailure ? listener.transcript : RoomTranscript(), since: nil)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Mid-conversation: the call pauses first, so the voice stops hearing and answering.
+            guard await self.prepareMic() else {
+                self.show("Couldn't pause the call, so listening mode didn't start")
+                return
+            }
+            guard !self.isOn, !self.awaitingCall else { return }
+            // After a failure, turning it on again carries on with what it had heard.
+            self.begin(continuing: self.heldAfterFailure ? self.listener.transcript : RoomTranscript(), since: nil)
+        }
     }
 
     private func show(_ note: String) {
@@ -155,6 +181,7 @@ final class RoomListeningController {
         guard canAsk else { return }
         let at = Date()
         let since = state.since
+        heldAfterCall = false
         notice = nil   // an older note (e.g. "the call didn't connect") no longer applies
         let heard = listener.transcript   // the words in progress are its volatile tail
         _ = listener.stop()
@@ -174,6 +201,7 @@ final class RoomListeningController {
     /// Stop listening and forget everything it heard, without a call.
     func discard() {
         listener.discard()
+        heldAfterCall = false
         awaitingCall = false
         pendingSince = nil
         notice = nil
@@ -192,11 +220,13 @@ final class RoomListeningController {
         awaitingCall = false
         switch outcome {
         case .failedBeforeLive:
-            // R10: nothing heard is lost; listen on from where it stopped.
-            let since = pendingSince
+            // Nothing heard is lost, but listening doesn't start again by itself (it only runs
+            // during a call): keep what was heard to ask about (which starts a call) or discard.
             pendingSince = nil
-            notice = "The call didn't connect · still listening, nothing heard was lost"
-            begin(continuing: listener.transcript, since: since)
+            heldAfterCall = true
+            notice = nil
+            expireHeldTranscript()
+            onShowPanel?()
         case .wentLive, .endedBeforeLive, .notUsed:
             // The call has (or had its chance at) the transcript: let it go here.
             pendingSince = nil
@@ -260,10 +290,17 @@ final class RoomListeningController {
         capTimer?.invalidate()
         capTimer = Timer.scheduledTimer(withTimeInterval: RoomTranscript.window, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.heldAfterFailure else { return }
+                guard let self, self.held else { return }
                 self.stopAndDiscard(note: "What listening mode heard before it stopped was discarded after 30 minutes")
             }
         }
+    }
+
+    /// The call ended while listening mode was on (or held what it heard after stopping by
+    /// itself): listening mode only exists during a call, so it stops and forgets.
+    func callEnded() {
+        guard isOn || heldAfterFailure else { return }
+        stopAndDiscard(note: "The call ended, so listening mode stopped · what it heard was discarded")
     }
 
     private func stopAndDiscard(note: String) {
@@ -285,10 +322,10 @@ final class RoomListeningController {
         alert.icon = NSApp.applicationIconImage
         alert.messageText = "Listening mode"
         alert.informativeText = """
-        While it's on, Speakeasy transcribes the room on this Mac and doesn't answer. It keeps the \
-        last 30 minutes, as text only, and nothing leaves the Mac.
+        It pauses this call and transcribes the room on this Mac without answering. It keeps the \
+        last 30 minutes, as text only, and nothing leaves the Mac while it listens.
 
-        When you turn it off, a call starts that already knows what was said: ask about it, or say \
+        When you turn it off, the call picks up again and knows what was said: ask about it, or say \
         nothing and it responds to the conversation. What it heard goes to the voice and to any \
         task from that call, then it's gone from Speakeasy. Hermes keeps what its tasks receive in its own \
         history, like any task.

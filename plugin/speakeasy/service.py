@@ -88,6 +88,15 @@ def _room(value: Any) -> str:
         raise ServiceError(400, f"room must be at most {MAX_ROOM_CHARS} characters")
     return safe_room_text(value)
 
+
+def _merge_rooms(kept: str, heard: str) -> str:
+    """A call paused for listening mode resumes with what was just heard added to any room text it
+    already had (oldest lines dropped first to stay within MAX_ROOM_CHARS)."""
+    lines = [line for line in (kept + "\n" + heard).split("\n") if line.strip()]
+    while lines and len("\n".join(lines)) > MAX_ROOM_CHARS:
+        lines.pop(0)
+    return "\n".join(lines)
+
 class VoiceService:
     def __init__(self, hermes_home: Path, *, hermes: Any = None, notifier: Any = None,
                  codex_factory: Callable[..., Any] | None = None, openai_negotiate: Callable[..., Any] | None = None,
@@ -236,10 +245,10 @@ class VoiceService:
         if (not set(body) <= {"sdp", "resume_from", "tour", "room"} or not isinstance(body.get("sdp"), str)
                 or resume_from is not None and not (isinstance(resume_from, str) and ID_RE.fullmatch(resume_from))):
             raise ServiceError(400, "body must contain only an SDP offer, an optional resume_from, tour and room")
-        # Listening mode: the room text rides only on a new call. A resumed call keeps its own (adopt).
+        # Listening mode: what was heard rides on a new call, or on the resume of a call paused for
+        # listening mode (it's added to any room text that call already had; see adopt).
         room = _room(body["room"]) if "room" in body else ""
-        if room and resume_from:
-            raise ServiceError(400, "room is only for a new call; a resumed call keeps the room it started with")
+        heard = room
         tour = _tour(body.get("tour")) if "tour" in body and not resume_from else None
         if tour is not None and self.store.get_meta("last_call_end") is not None:
             # The app asks per Mac (a new Mac, a reinstall or an update all look like a first call
@@ -277,7 +286,9 @@ class VoiceService:
             history = self.pause_history(source)
             resume = P.resume_block(interaction_tasks(self.store, source, names.assistant_name), names)
             with source.lock:
-                room = source.room  # a call started from listening mode keeps its room across Pause/Resume
+                # A call started from listening mode keeps its room across Pause/Resume; one paused
+                # for listening mode comes back with what was just heard added.
+                room = _merge_rooms(source.room, heard) if heard else source.room
         else:
             away, resume = self.store.away(), ""
         if room:
@@ -326,6 +337,12 @@ class VoiceService:
         if source is not None:  # a resume: adopt moves the room text over from the paused call
             self.adopt(source, interaction, history)
             client_result["resumed_from"] = source.interaction_id
+            if heard:
+                # Listening mode was just turned off mid-conversation: a new take-off, so the voice
+                # may respond from the room once more if nothing is said.
+                with interaction.lock:
+                    interaction.room = room
+                    interaction.room_nudged = False
         with self.lock:
             self.interactions[interaction_id] = interaction
         self.store.complete_session(request_id, client_result)

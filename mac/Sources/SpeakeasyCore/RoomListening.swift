@@ -212,6 +212,12 @@ public struct RoomPresentation: Equatable, Sendable {
     public var warnings: [String]
     /// The mic is held for listening mode (the menu bar shows it's on).
     public var isOn: Bool
+
+    public init(title: String, detail: String, hint: String? = nil, tone: StatusTone = .plain,
+                warnings: [String] = [], isOn: Bool) {
+        self.title = title; self.detail = detail; self.hint = hint
+        self.tone = tone; self.warnings = warnings; self.isOn = isOn
+    }
 }
 
 /// The wording for `state`. `heardWords` is whether the transcript holds any words yet;
@@ -326,6 +332,8 @@ public struct RoomCall: Equatable, Sendable {
     public private(set) var endRequested = false
     /// Words the connecting listener had heard when a stalled call was retried without it.
     public var carriedWords: String?
+    /// The server has the room text (an admission carrying it succeeded).
+    public private(set) var delivered = false
     private var loudSamples = 0
     private var outcomeReported = false
 
@@ -356,6 +364,12 @@ public struct RoomCall: Equatable, Sendable {
     }
 
     public mutating func markRequestHandled() { requestHandled = true }
+
+    public mutating func markDelivered() { delivered = true }
+
+    /// Whether this admission carries the room text: every new admission does (first try, connect
+    /// retry, a resume that fell back to a new call); a resume only until the server has it.
+    public func sends(resuming: Bool) -> Bool { !resuming || !delivered }
 
     /// The user asked to end the call; it counts only before the call went live.
     public mutating func noteEndRequested() {

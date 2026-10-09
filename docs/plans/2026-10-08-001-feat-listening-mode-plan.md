@@ -8,7 +8,7 @@ date: 2026-10-08
 
 ## Summary
 
-Add a listening mode to the Mac app. While it is on, the Mac transcribes the room on-device and never answers. Turning it off starts an ordinary call that already has the last 30 minutes of what was said. Whatever the user says in the next ~2 seconds is the request. If they say nothing, the voice responds from the context. The feature sits beside the existing call flow, so calls that don't come from listening mode behave exactly as they do today.
+Add a listening mode to the Mac app, used during a call. Turning it on pauses the call; while it is on, the Mac transcribes the room on-device and the voice never answers. Turning it off resumes the call, which now has the last 30 minutes of what was said. Whatever the user says in the next ~2 seconds is the request. If they say nothing, the voice responds from the context. The feature sits beside the existing call flow, so calls that don't come from listening mode behave exactly as they do today.
 
 ---
 
@@ -23,18 +23,18 @@ The user's constraints: no wake word for now, a simple on/off button, and as few
 ## Requirements
 
 **Listening**
-- R1. The user turns listening mode on from the panel, the menu bar, or an optional shortcut. Speakeasy never turns it on by itself.
+- R1. During a call, the user turns listening mode on from the panel, the menu bar, or an optional shortcut; that pauses the call. Speakeasy never turns it on by itself, and it isn't offered outside a call.
 - R2. While on, the Mac transcribes the room on-device and never answers. No audio or text leaves the Mac, and no voice session is open.
 - R3. The menu bar and panel show that listening is on and for how long. "Listening" appears only once real mic signal arrives. Preparing, unavailable and failed states say so honestly.
 - R4. Speakeasy keeps only the last 30 minutes of transcript, within a size cap. Listening stops itself after 2 hours and when the Mac sleeps, discards what it heard, and says so.
 - R5. A Discard control stops listening and drops everything without starting a call.
 
 **Turning it off**
-- R6. Turning listening off (panel, menu bar, call hotkey or shortcut) starts a call that has the room transcript as context.
+- R6. Turning listening off (panel, Resume, menu bar, call or pause hotkey, shortcut) resumes the call with the room transcript as context.
 - R7. Words said while the call connects, or within ~2 seconds of turning listening off, are the request. The voice answers questions about the room itself and hands real work to Hermes as usual.
 - R8. If nothing is said, the voice responds from the context. It takes up a question or task from the end of the transcript, or briefly says what it heard and asks what the user needs.
 - R9. Hermes tasks started in that call receive the room transcript as labeled background.
-- R10. If the call fails before it goes live, Speakeasy returns to listening with the transcript intact.
+- R10. If the call can't come back, what was heard is kept (not listening) so it can still be asked about in a new call, or discarded.
 
 **Boundaries**
 - R11. The voice and Hermes treat room speech as background, never as instructions.
@@ -50,7 +50,7 @@ The user's constraints: no wake word for now, a simple on/off button, and as few
 - No background work while listening, and no automatic recap.
 - No speaker identification.
 - No audio is kept, only text in memory.
-- Listening can't start while a call is open or paused; the button says why.
+- Listening mode exists only during a call (decided after the first build): no ear button with no call open, and ending the call stops it.
 
 ### Deferred to Follow-Up Work
 

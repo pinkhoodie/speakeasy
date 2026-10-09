@@ -529,15 +529,29 @@ enum PanelSmoke {
         c.model.orbLevel = 0
     }
 
-    // MARK: Listening mode: the ear button, the strip in each state, and a note
+    // MARK: Listening mode (during a call): the ear button, the strip in each state, and notes
 
     static func roomListening(_ c: NativeVoiceClient, dir: String) async {
+        guard let (live, _) = PreviewFixtures.state("listening"), let (paused, _) = PreviewFixtures.state("paused") else {
+            fail("listening mode: fixtures missing"); return
+        }
+        func snap(_ name: String) {
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/\(name).png")); record("snapshot \(dir)/\(name).png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
+        // No call: no ear button (listening mode exists only during a call).
         c.showPreview(VoiceState(), workExpanded: false)
         c.model.roomOffered = true
         await settle()
-        let idleHeight = c.panel.window.frame.height
-        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/room-offered.png")); record("snapshot \(dir)/room-offered.png") }
-        catch { fail("snapshot failed: \(error)") }
+        snap("room-idle-no-button")
+        // A live call: the ear button sits with the call's controls.
+        c.showPreview(live, workExpanded: false)
+        await settle()
+        snap("room-offered-in-call")
+        // Turned on: the call is paused and the strip shows what listening mode is doing.
+        c.showPreview(paused, workExpanded: false)
+        await settle()
+        let pausedHeight = c.panel.window.frame.height
         let now = Date()
         let since = now.addingTimeInterval(-12 * 60 - 4)
         let states: [(String, RoomListeningState, Set<RoomWarning>, String?)] = [
@@ -546,44 +560,39 @@ enum PanelSmoke {
             ("room-warnings", .listening(since: since), [.bluetoothInput, .speechRecognitionDenied], nil),
             ("room-not-hearing", .notHearing(since: since), [], nil),
             ("room-failed", .failed(.transcriberStopped), [], nil),
-            ("room-retry", .listening(since: since), [], "The call didn't connect · still listening, nothing heard was lost"),
         ]
         for (name, state, warnings, notice) in states {
             c.model.room = presentRoom(state, now: now, heardWords: true, warnings: warnings)
             c.model.roomNotice = notice
             c.surface.setNeedsResize()
             await settle()
-            if state.isOn { check(c.panel.window.frame.height > idleHeight, "\(name): the listening strip adds height") }
-            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/\(name).png")); record("snapshot \(dir)/\(name).png") }
-            catch { fail("snapshot failed: \(error)") }
+            if state.isOn { check(c.panel.window.frame.height > pausedHeight, "\(name): the listening strip adds height") }
+            snap(name)
         }
-        // Stopped by itself but kept what it heard: ask about it or discard it.
-        var held = presentRoom(.failed(.micStopped), now: now, heardWords: true)
-        held.hint = "What it heard is kept for 30 minutes: ask about it, turn it on again, or discard it"
-        c.model.room = held
+        // The call didn't come back after listening was turned off: what was heard is kept to ask about.
+        c.showPreview(VoiceState(), workExpanded: false)
+        c.model.room = RoomPresentation(title: "Listening mode kept what it heard", detail: "The call didn't come back",
+                                        hint: "Ask about it (starts a call) or discard it · kept for 30 minutes",
+                                        tone: .warning, isOn: false)
         c.model.roomCanAsk = true
         c.model.roomNotice = nil
         c.surface.setNeedsResize()
         await settle()
-        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/room-held.png")); record("snapshot \(dir)/room-held.png") }
-        catch { fail("snapshot failed: \(error)") }
+        snap("room-held")
         c.model.roomCanAsk = false
-        // Off, with a note about why it stopped.
+        // The call ended while listening: a note says it stopped.
         c.model.room = nil
-        c.model.roomNotice = "Listening mode stopped when your Mac went to sleep · what it heard was discarded"
+        c.model.roomNotice = "The call ended, so listening mode stopped · what it heard was discarded"
         c.surface.setNeedsResize()
         await settle()
-        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/room-notice.png")); record("snapshot \(dir)/room-notice.png") }
-        catch { fail("snapshot failed: \(error)") }
-        // A call hides the strip (listening mode exists only while no call is open).
-        guard let (live, _) = PreviewFixtures.state("listening") else { return }
+        snap("room-notice")
+        // Back in the live call the strip is gone.
         c.model.room = presentRoom(.listening(since: since), now: now, heardWords: true)
+        c.model.roomNotice = nil
         c.showPreview(live, workExpanded: false)
         await settle()
-        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/room-hidden-in-call.png")); record("snapshot \(dir)/room-hidden-in-call.png") }
-        catch { fail("snapshot failed: \(error)") }
+        snap("room-hidden-in-call")
         c.model.room = nil
-        c.model.roomNotice = nil
         c.model.roomOffered = false
         c.surface.setNeedsResize()
     }

@@ -456,9 +456,37 @@ public final class NativeVoiceClient: VoiceCallClient {
     /// Start the call listening mode was turned off into. It carries what was heard, opens
     /// unmuted whatever "start muted" says (you turned listening off to ask something), and when
     /// nothing is said it answers from what it heard about 2 s after `takeoffAt`.
+    /// If listening mode was turned on mid-conversation (which paused this call), it resumes that
+    /// same conversation instead, with what was heard added.
     public func start(room: String, takeoffAt: Date) {
+        if model.state.connection == .paused {
+            roomNudgeTask?.cancel(); roomNudgeTask = nil
+            if !room.isEmpty { roomCall = RoomCall(room: room, takeoffAt: takeoffAt) }   // a new take-off
+            resume(unmuted: true)
+            return
+        }
         guard !model.state.connection.isOpen else { return }
         startCall(room: room.isEmpty ? nil : room, takeoffAt: takeoffAt)
+    }
+
+    /// Listening mode turned on mid-conversation: pause this call (the voice stops hearing and
+    /// answering, nothing is billed, the conversation and tasks are kept) and report whether it
+    /// paused, so the mic is free for listening mode. Turning listening off resumes it.
+    public func pauseForListening() async -> Bool {
+        if model.state.connection == .paused { return true }
+        guard model.state.canPause else { return false }
+        pause()
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            switch model.state.connection {
+            case .paused: return true
+            case .live where !model.state.pausing: return false   // the server couldn't hold the call
+            case .idle, .ended, .failed: return false
+            default: continue
+            }
+        }
+        return false
     }
 
     private func startCall(room: String?, takeoffAt: Date?) {
@@ -546,7 +574,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         // server still takes it (the plugin can be updated or rolled back during a long listen) is
         // asked while the offer is made, so the check never delays the call.
         // nil = the status didn't come back (unknown); a status without the flag = an older plugin.
-        let roomSupport: Task<Bool?, Never>? = roomCall != nil && model.state.resumeFrom == nil
+        let roomSupport: Task<Bool?, Never>? = roomCall?.sends(resuming: model.state.resumeFrom != nil) == true
             ? Task { (try? await api.status()).map { $0.roomListening ?? false } } : nil
         startTask = Task { [weak self] in
             var sentRoom = false
@@ -577,6 +605,7 @@ public final class NativeVoiceClient: VoiceCallClient {
                                                               resumeFrom: self.model.state.resumeFrom, tour: tour,
                                                               room: room)
                 guard self.engine === engine else { engine.close(); return }
+                if sentRoom { self.roomCall?.markDelivered() }   // later resumes rely on the server's copy
                 if tour != nil {
                     self.pendingTour = nil
                     self.model.tourActive = true
@@ -611,7 +640,7 @@ public final class NativeVoiceClient: VoiceCallClient {
                 if sentRoom, let http = error as? ServerClient.HTTPError, http.status == 400 || http.status == 413,
                    self.model.state.connection == .connecting {
                     engine.close()
-                    self.dropRoomContext("Couldn't use what listening mode heard; started a normal call")
+                    self.dropRoomContext("Couldn't use what listening mode heard; carried on without it")
                     self.connect(api)
                     return
                 }
@@ -716,11 +745,13 @@ public final class NativeVoiceClient: VoiceCallClient {
     private func audioDevicesChanged() {}
     #endif
 
-    private func resume() {
+    /// `unmuted`: listening mode was just turned off to talk, so the call comes back with the mic on.
+    private func resume(unmuted: Bool = false) {
         guard model.state.connection == .paused, let api else { return }
         pollTask?.cancel(); pollTask = nil
         appliedMic = nil; appliedRemote = nil
         dispatch(.resumeRequested)
+        if unmuted { dispatch(.setMic(.live)) }
         connectAttempts = 0
         surface.show()
         startTicker()

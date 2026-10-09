@@ -77,8 +77,6 @@ def test_room_rejects_junk(server, service):
     assert open_call(server, service, {"room": 5}, "req_room_bad_1")[0] == 400
     assert open_call(server, service, {"room": ["a"]}, "req_room_bad_2")[0] == 400
     assert open_call(server, service, {"room": "x" * (MAX_ROOM_CHARS + 1)}, "req_room_bad_3")[0] == 400
-    # Only a new call takes room text; a resumed call keeps its own.
-    assert open_call(server, service, {"room": ROOM, "resume_from": "vi_" + "0" * 32}, "req_room_bad_4")[0] == 400
 
 
 def test_room_is_part_of_the_idempotency_fingerprint(server, service):
@@ -246,6 +244,51 @@ def test_pause_and_resume_keep_the_room_on_the_resumed_call_only(server, service
     assert "Resumed call" in instructions
     assert service.interaction(resumed["interaction_id"]).room == ROOM
     assert service.interaction(source_id).room == ""  # moved, not copied
+
+
+def test_a_call_paused_for_listening_mode_resumes_with_what_was_heard(server, service):
+    """Listening mode turned on mid-conversation pauses the call; turning it off resumes the same
+    conversation with the room text, and the voice may respond from it once more."""
+    status, first, _ = open_call(server, service, {}, "req_room_mid_1")
+    assert status == 201
+    source_id = first["interaction_id"]
+    assert http(server.base_url, "POST", f"/voice/interactions/{source_id}/pause", {}, server.token)[0] == 200
+    status, resumed, instructions = open_call(server, service, {"resume_from": source_id, "room": ROOM}, "req_room_mid_2")
+    assert status == 201 and resumed["resumed_from"] == source_id
+    assert_room_block(instructions)
+    assert "Resumed call" in instructions
+    interaction = service.interaction(resumed["interaction_id"])
+    assert interaction.room == ROOM and not interaction.room_nudged
+    assert http(server.base_url, "POST", f"/voice/interactions/{resumed['interaction_id']}/early-request",
+                {"text": ""}, server.token)[0] == 200
+    assert [kind for kind, _, _ in service.workers[-1].sent] == ["session.commentary.append"]
+
+
+def test_listening_again_mid_call_adds_to_the_room_and_allows_one_more_response(server, service):
+    status, first, _ = open_call(server, service, {"room": ROOM}, "req_room_again_1")
+    assert status == 201
+    source_id = first["interaction_id"]
+    assert http(server.base_url, "POST", f"/voice/interactions/{source_id}/early-request",
+                {"text": ""}, server.token)[0] == 200
+    assert service.interaction(source_id).room_nudged
+    assert http(server.base_url, "POST", f"/voice/interactions/{source_id}/pause", {}, server.token)[0] == 200
+    later = "[15:10] Priya: the venue moved to the second floor"
+    status, resumed, instructions = open_call(server, service, {"resume_from": source_id, "room": later},
+                                              "req_room_again_2")
+    assert status == 201
+    interaction = service.interaction(resumed["interaction_id"])
+    assert interaction.room == ROOM + "\n" + later
+    assert not interaction.room_nudged
+    assert "venue moved to the second floor" in instructions and "deadline is Friday the 14th" in instructions
+
+
+def test_merged_room_text_keeps_the_newest_lines_within_the_cap():
+    from speakeasy.service import _merge_rooms
+    kept = "\n".join(f"[10:{i % 60:02d}] line {i:03d} " + "a" * 90 for i in range(300))   # ~31k: over the cap
+    heard = "[11:00] the newest line"
+    merged = _merge_rooms(kept, heard)
+    assert len(merged) <= MAX_ROOM_CHARS and merged.endswith("[11:00] the newest line")
+    assert merged.split("\n")[0] != kept.split("\n")[0]   # oldest lines went first
 
 
 def test_a_paused_room_call_that_is_never_resumed_drops_the_room(server, service):

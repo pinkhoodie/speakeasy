@@ -171,7 +171,7 @@ final class MultitaskTests: XCTestCase {
         }
     }
 
-    func testRoomRequestBodyOnlyForNewCallsAndReplacesTheTour() throws {
+    func testRoomRequestBodyRidesOnANewCallOrTheResumeAndReplacesTheTour() throws {
         let sdp = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n"
         let room = "[10:42] Sam says the deadline is Friday the 14th."
         let tour = ["call": "⌃⌥Space"]
@@ -181,7 +181,11 @@ final class MultitaskTests: XCTestCase {
         XCTAssertNil(body?["tour"], "a call from listening mode isn't the first-call tour")
         let resumed = try JSONSerialization.jsonObject(with: sessionRequestBody(sdp: sdp, resumeFrom: "vi_1", room: room))
             as? [String: String]
-        XCTAssertEqual(resumed, ["sdp": sdp, "resume_from": "vi_1"], "a resume relies on the server's copy of the room")
+        XCTAssertEqual(resumed, ["sdp": sdp, "resume_from": "vi_1", "room": room],
+                       "listening mode turned on mid-call: the resume brings what was heard")
+        let plainResume = try JSONSerialization.jsonObject(with: sessionRequestBody(sdp: sdp, resumeFrom: "vi_1", tour: tour))
+            as? [String: String]
+        XCTAssertEqual(plainResume, ["sdp": sdp, "resume_from": "vi_1"], "an ordinary resume is unchanged")
         let empty = try JSONSerialization.jsonObject(with: sessionRequestBody(sdp: sdp, room: "")) as? [String: String]
         XCTAssertEqual(empty, ["sdp": sdp], "nothing heard means no room field (the exact body older servers accept)")
     }

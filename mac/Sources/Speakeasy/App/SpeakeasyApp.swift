@@ -207,7 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         continuity.onOpenSettings = { [weak self] in self?.openSettings() }
         continuity.onResume = { [weak self] in
             guard let self, self.native.isPaused else { self?.showRecentWork(); return }
-            self.native.togglePause()
+            self.togglePause()
         }
         continuity.onBadge = { [weak self] on in self?.setBadge(on) }
         continuity.notifyWhenDone = UserDefaults.standard.bool(forKey: Prefs.notifyWhenDone)
@@ -380,7 +380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else {
                 listenItem.title = "Turn on listening mode" + shortcut
             }
-            listenItem.isHidden = !room.isSupported
+            listenItem.isHidden = !room.isSupported || !(room.callActive() || room.canAsk)   // during a call only
             listenItem.isEnabled = app.isPaired && (room.canAsk || room.blocker == nil)
             listenItem.toolTip = room.canAsk ? nil : room.blocker
             discardListenItem?.isHidden = !room.canAsk
@@ -440,6 +440,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func beginCall(room text: String?, takeoffAt: Date?) {
+        if native.isPaused, let text, let takeoffAt {
+            // Listening mode was turned on mid-conversation: back to that conversation, with what was heard.
+            native.start(room: text, takeoffAt: takeoffAt)
+            updateMenu()
+            refreshListening()
+            return
+        }
         active = true
         idle?.callStarted()
         native.pendingTour = UserDefaults.standard.bool(forKey: Prefs.tourPending) ? tourShortcuts() : nil
@@ -456,9 +463,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // nil = no status yet (Hermes unreachable at launch): turning listening on asks again.
         room.pluginSupportsRoom = { [weak self] in self?.app.status.map { $0.roomListening == true } }
         room.refreshStatus = { [weak self] in await self?.app.refresh() }
-        room.callOpen = { [weak self] in
+        room.callBusy = { [weak self] in
             guard let self else { return false }
-            return self.active || self.native.model.state.connection.isOpen
+            let connection = self.native.model.state.connection
+            return connection == .connecting || connection == .ending
+        }
+        room.callActive = { [weak self] in
+            guard let self else { return false }
+            let connection = self.native.model.state.connection
+            return connection == .live || connection == .paused
+        }
+        // Mid-conversation, the call pauses first: the voice stops hearing and answering.
+        room.prepareMic = { [weak self] in
+            guard let self else { return false }
+            guard self.native.model.state.connection == .live else { return true }
+            let paused = await self.native.pauseForListening()
+            self.updateMenu()
+            return paused
         }
         room.onChange = { [weak self] in self?.refreshListening() }
         room.onShowPanel = { [weak self] in self?.native.showPanel() }
@@ -556,6 +577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.updateMenu()
         }
         native.model.onStart = { [weak self] in self?.startConversation() }
+        native.model.onTogglePause = { [weak self] in self?.togglePause() }
         native.model.onSkipTour = { [weak self] in self?.native.skipTour() }
         native.onTourStarted = { UserDefaults.standard.set(false, forKey: Prefs.tourPending) }
         native.onPausedTaskSettled = { [weak self] notice in
@@ -571,7 +593,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let state = self.native.model.state
             // A delegated run whose first work update never arrived is still in flight.
             self.idle?.callEnded(lastWork: state.workInfo ?? state.runID.map { WorkInfo(runID: $0, status: "running") })
-            self.refreshListening()   // listening mode can be turned on again
+            self.room.callEnded()   // listening mode only exists during a call
+            self.refreshListening()
             if self.quitPending { NSApp.terminate(nil) }
         }
     }
@@ -647,8 +670,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Pause / Resume (panel, menu, shortcut, the paused-task notice). While listening mode holds a
+    /// paused call, Resume turns listening off into that conversation, with what was heard.
     private func togglePause() {
         guard active else { return }
+        if native.isPaused && room.canAsk { startConversation(); return }
         native.togglePause()
         updateMenu()
     }
