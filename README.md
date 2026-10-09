@@ -96,6 +96,15 @@ Settings › Home, or from the terminal:
 - **Privacy:** the token stays in Hermes' `.env`; turning this on never changes your Hermes config.
   The device names you tick are sent to your task-routing model to plan each request.
 
+## Listening mode (Mac, macOS 26+)
+
+Turn on listening mode (the ear button in the panel, or the menu bar) and Speakeasy transcribes the
+room on your Mac without answering: nothing leaves the Mac and no voice session runs. Turn it off
+and a call starts that already knows the last 30 minutes of what was said. Ask about it, ask for
+something, or say nothing and it responds to the conversation. What it heard goes to the voice and
+to tasks from that call. Speakeasy never keeps it; Hermes keeps what those tasks received, like any task. It stops by itself after 2 hours or when the Mac sleeps.
+Needs the Hermes plugin 0.2.51 or later. Let the people in the room know it's on.
+
 ## Updating
 
 On the machine that runs Hermes:

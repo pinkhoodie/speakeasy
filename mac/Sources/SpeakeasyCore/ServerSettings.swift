@@ -319,6 +319,9 @@ public struct ServerStatus: Codable, Equatable, Sendable {
     /// The address `hermes voice setup` advertised for other devices (empty = local only).
     public var advertisedURL: String?
     public var tailscaleName: String?
+    /// The server accepts what listening mode heard with a new call (`room` on POST /voice/sessions).
+    /// Missing on older plugins, which reject unknown session fields: never send `room` then.
+    public var roomListening: Bool?
 
     enum CodingKeys: String, CodingKey {
         case assistantName = "assistant_name", provider, codexSignedIn = "codex_signed_in"
@@ -328,6 +331,7 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         case routingModel = "routing_model", routingHint = "routing_hint", routingChoice = "routing_choice"
         case routingExplainer = "routing_explainer"
         case advertisedURL = "advertised_url", tailscaleName = "tailscale_name"
+        case roomListening = "room_listening"
     }
 
     public init(assistantName: String? = nil, provider: String? = nil, codexSignedIn: Bool? = nil, apiKeySet: Bool? = nil,
@@ -356,6 +360,7 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         routingExplainer = try? c.decodeIfPresent(String.self, forKey: .routingExplainer)
         advertisedURL = try? c.decodeIfPresent(String.self, forKey: .advertisedURL)
         tailscaleName = try? c.decodeIfPresent(String.self, forKey: .tailscaleName)
+        roomListening = try? c.decodeIfPresent(Bool.self, forKey: .roomListening)
     }
 
     /// A new thread can be opened for tasks sent to `target` (the server supports it and the

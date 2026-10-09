@@ -312,9 +312,14 @@ public struct SessionAdmission: Equatable, Sendable {
 /// `resumeFrom` names a paused call whose conversation the new session continues.
 /// `tour` asks for the one-time first-call tour; values are the shortcut labels to mention
 /// (`call`, `mute`, `pause`). Never sent with `resumeFrom`.
-public func sessionRequestBody(sdp: String, resumeFrom: String? = nil, tour: [String: String]? = nil) throws -> Data {
+/// `room` is what listening mode heard before this call (rendered transcript lines). Only for a
+/// new call (a resume keeps the server's copy), only to servers whose status says
+/// `room_listening`, and it replaces the tour: a call opened from listening mode isn't a tour.
+public func sessionRequestBody(sdp: String, resumeFrom: String? = nil, tour: [String: String]? = nil,
+                               room: String? = nil) throws -> Data {
     var body: [String: Any] = ["sdp": sdp]
     if let resumeFrom { body["resume_from"] = resumeFrom }
+    else if let room, !room.isEmpty { body["room"] = room }
     else if let tour { body["tour"] = tour }
     return try JSONSerialization.data(withJSONObject: body, options: [])
 }

@@ -163,6 +163,36 @@ final class MultitaskTests: XCTestCase {
         XCTAssertNil(resumed?["tour"], "a resumed call continues the old one; the tour never restarts")
     }
 
+    func testSuggestedListeningShortcutIsValidAndDistinct() {
+        XCTAssertEqual(KeyShortcut.suggestedListening.display, "⌃⌥L")
+        XCTAssertEqual(KeyShortcut.parse("ctrl+opt+l"), .success(.suggestedListening))
+        for other in [KeyShortcut.call, .defaultMute, .defaultPause] {
+            XCTAssertNotEqual(KeyShortcut.suggestedListening, other)
+        }
+    }
+
+    func testRoomRequestBodyOnlyForNewCallsAndReplacesTheTour() throws {
+        let sdp = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n"
+        let room = "[10:42] Sam says the deadline is Friday the 14th."
+        let tour = ["call": "⌃⌥Space"]
+        let body = try JSONSerialization.jsonObject(with: sessionRequestBody(sdp: sdp, tour: tour, room: room)) as? [String: Any]
+        XCTAssertEqual(body?["room"] as? String, room)
+        XCTAssertEqual(body?["sdp"] as? String, sdp, "the SDP's trailing CRLF must survive")
+        XCTAssertNil(body?["tour"], "a call from listening mode isn't the first-call tour")
+        let resumed = try JSONSerialization.jsonObject(with: sessionRequestBody(sdp: sdp, resumeFrom: "vi_1", room: room))
+            as? [String: String]
+        XCTAssertEqual(resumed, ["sdp": sdp, "resume_from": "vi_1"], "a resume relies on the server's copy of the room")
+        let empty = try JSONSerialization.jsonObject(with: sessionRequestBody(sdp: sdp, room: "")) as? [String: String]
+        XCTAssertEqual(empty, ["sdp": sdp], "nothing heard means no room field (the exact body older servers accept)")
+    }
+
+    func testStatusSaysWhetherTheServerTakesRoomText() throws {
+        let newer = try JSONDecoder().decode(ServerStatus.self, from: Data(#"{"version":"0.2.51","room_listening":true}"#.utf8))
+        XCTAssertEqual(newer.roomListening, true)
+        let older = try JSONDecoder().decode(ServerStatus.self, from: Data(#"{"version":"0.2.50"}"#.utf8))
+        XCTAssertNil(older.roomListening, "older plugins reject unknown session fields: never send room to them")
+    }
+
     func testPauseShortcutDefaultIsValidAndDistinct() {
         XCTAssertEqual(KeyShortcut.defaultPause.display, "⌃⌥P")
         XCTAssertEqual(KeyShortcut.parse("ctrl+opt+p"), .success(.defaultPause))

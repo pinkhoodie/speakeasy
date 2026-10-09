@@ -321,8 +321,9 @@ enum PanelSmoke {
 
     static func snapshots(_ c: NativeVoiceClient, dir: String) async {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        for (name, badge) in [("menubar-glyph", false), ("menubar-glyph-badge", true)] {
-            let image = BrandGlyph.menuBarImage(badge: badge, height: 128)
+        for (name, badge, listening) in [("menubar-glyph", false, false), ("menubar-glyph-badge", true, false),
+                                         ("menubar-glyph-listening", false, true), ("menubar-glyph-badge-listening", true, true)] {
+            let image = BrandGlyph.menuBarImage(badge: badge, listening: listening, height: 128)
             if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
                let png = rep.representation(using: .png, properties: [:]) {
                 try? png.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
@@ -334,6 +335,7 @@ enum PanelSmoke {
         do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/work-long-status.png")); record("snapshot \(dir)/work-long-status.png") }
         catch { fail("snapshot failed: \(error)") }
         await longStrings(c, dir: dir)
+        await roomListening(c, dir: dir)
         await slim(c, dir: dir)
         // Screens for the website: the task list, a card result, and an approval.
         for name in ["tasklist", "products", "approval", "detail", "home"] {
@@ -525,6 +527,65 @@ enum PanelSmoke {
         do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/orb-loud.png")); record("snapshot \(dir)/orb-loud.png") }
         catch { fail("snapshot failed: \(error)") }
         c.model.orbLevel = 0
+    }
+
+    // MARK: Listening mode: the ear button, the strip in each state, and a note
+
+    static func roomListening(_ c: NativeVoiceClient, dir: String) async {
+        c.showPreview(VoiceState(), workExpanded: false)
+        c.model.roomOffered = true
+        await settle()
+        let idleHeight = c.panel.window.frame.height
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/room-offered.png")); record("snapshot \(dir)/room-offered.png") }
+        catch { fail("snapshot failed: \(error)") }
+        let now = Date()
+        let since = now.addingTimeInterval(-12 * 60 - 4)
+        let states: [(String, RoomListeningState, Set<RoomWarning>, String?)] = [
+            ("room-preparing", .preparing(.downloadingModel(fraction: 0.4)), [], nil),
+            ("room-listening", .listening(since: since), [], nil),
+            ("room-warnings", .listening(since: since), [.bluetoothInput, .speechRecognitionDenied], nil),
+            ("room-not-hearing", .notHearing(since: since), [], nil),
+            ("room-failed", .failed(.transcriberStopped), [], nil),
+            ("room-retry", .listening(since: since), [], "The call didn't connect · still listening, nothing heard was lost"),
+        ]
+        for (name, state, warnings, notice) in states {
+            c.model.room = presentRoom(state, now: now, heardWords: true, warnings: warnings)
+            c.model.roomNotice = notice
+            c.surface.setNeedsResize()
+            await settle()
+            if state.isOn { check(c.panel.window.frame.height > idleHeight, "\(name): the listening strip adds height") }
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/\(name).png")); record("snapshot \(dir)/\(name).png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
+        // Stopped by itself but kept what it heard: ask about it or discard it.
+        var held = presentRoom(.failed(.micStopped), now: now, heardWords: true)
+        held.hint = "What it heard is kept for 30 minutes: ask about it, turn it on again, or discard it"
+        c.model.room = held
+        c.model.roomCanAsk = true
+        c.model.roomNotice = nil
+        c.surface.setNeedsResize()
+        await settle()
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/room-held.png")); record("snapshot \(dir)/room-held.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.model.roomCanAsk = false
+        // Off, with a note about why it stopped.
+        c.model.room = nil
+        c.model.roomNotice = "Listening mode stopped when your Mac went to sleep · what it heard was discarded"
+        c.surface.setNeedsResize()
+        await settle()
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/room-notice.png")); record("snapshot \(dir)/room-notice.png") }
+        catch { fail("snapshot failed: \(error)") }
+        // A call hides the strip (listening mode exists only while no call is open).
+        guard let (live, _) = PreviewFixtures.state("listening") else { return }
+        c.model.room = presentRoom(.listening(since: since), now: now, heardWords: true)
+        c.showPreview(live, workExpanded: false)
+        await settle()
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/room-hidden-in-call.png")); record("snapshot \(dir)/room-hidden-in-call.png") }
+        catch { fail("snapshot failed: \(error)") }
+        c.model.room = nil
+        c.model.roomNotice = nil
+        c.model.roomOffered = false
+        c.surface.setNeedsResize()
     }
 
     // MARK: Slim mode shrinks a busy panel to the controls, and comes back
