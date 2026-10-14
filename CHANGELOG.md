@@ -2,6 +2,11 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Mac 0.3.2 — The answer leads, pictures fold away
+
+- **A picture no longer hides the answer.** When a finished answer also came with a screenshot, the app treated it as something waiting for you to look at: the job said "Needs you", the picture filled the view, and the actual answer sat far below. Now it's a new answer: the headline and any scoreboard, numbers or list come first, then the report, and the picture folds into a one-line "1 picture" row you can open.
+- **Projected scores.** Scoreboards show a "Projected" tag when the numbers are projections rather than a live or final score.
+
 ## Plugin 0.3.3 — A picture of the answer, even when the agent didn't draw one
 
 - **Answers with numbers get a picture.** When a finished answer has data but the agent didn't draw a card (tasks continued in a chat thread never could), Speakeasy now draws one from the answer itself: a matchup or projection as a scoreboard, a few numbers as tiles, things compared side by side, a trend as a chart, or a short list of picks. It picks whatever fits what the answer says, never a format tied to a topic, and uses only names and numbers that are in the answer.

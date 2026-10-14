@@ -10,7 +10,7 @@ extension PreviewFixtures {
                            "orb-idle", "orb-talking", "orb-working", "orb-needs", "orb-failed", "orb-answers",
                            "jobs-answers", "answer-weather", "answer-nightly", "answer-laptops",
                            "declutter-board", "declutter-weather", "declutter-events", "declutter-three", "declutter-many",
-                           "events-board", "answer-events"]
+                           "events-board", "answer-events", "answer-matchup"]
 
     /// Answers the fixtures treat as already read (run ids), so only the new ones show as new.
     static let readAnswers = ["run_weather", "run_notes"]
@@ -52,6 +52,7 @@ extension PreviewFixtures {
         // A finished events report that brought one incidental picture along: an answer, not a review.
         case "events-board": return JobSetup(seen: [])
         case "answer-events": return JobSetup(open: "job:wevents", seen: [])
+        case "answer-matchup": return JobSetup(open: "job:match", seen: [])
         default: return nil
         }
     }
@@ -294,6 +295,23 @@ extension PreviewFixtures {
                                    ["title": "Sunday", "points": ["Guided river walk, 10:00, free", "Outdoor film screening, 20:00"]]],
                       "open": ["Brunch tables book up by Friday"]]]
         let weekendEvents = TaskItem(json: weekendJSON)!
+        // A matchup answer the plugin drew as a projected scoreboard, plus an incidental screenshot.
+        var matchJSON: [String: Any] = ["task_id": "m_match", "run_id": "run_m_match", "status": "completed",
+                                        "title": "This week's matchup", "updated_at": now.timeIntervalSince1970 - 30,
+                                        "status_source": "authored", "job": ["id": "match", "name": "This week's matchup"],
+                                        "review": ["images": [1], "settled_at": now.timeIntervalSince1970 - 30]]
+        matchJSON["result"] = [
+            "spoken": "You're projected to win, 118.4 to 97.2, about a 64% chance.",
+            "full": "You're projected to win 118.4 to 97.2, about a 64% chance. Your top scorer is projected at 24.6.\n\nStill open: check Friday's injury report for your second receiver.",
+            "label": "Projected win",
+            "cards": [["kind": "image", "name": "league-page.png"]],
+            "views": [["kind": "game", "league": "League", "status": "projected", "detail": "64% win chance",
+                       "teams": [["name": "Your team", "score": "118.4", "winner": true],
+                                 ["name": "Opponent", "score": "97.2", "winner": false, "record": "1-4"]]]],
+            "shape": ["type": "answer", "headline": "Projected win, 118.4 to 97.2",
+                      "sections": [["title": "Matchup outlook", "points": ["About a 64% chance to win", "Top scorer projected at 24.6"]]],
+                      "open": ["Check Friday's injury report for your second receiver"]]]
+        let matchup = TaskItem(json: matchJSON)!
         let planPlaces: [String: Any] = ["kind": "list", "title": "Saturday plan", "items": [
             ["text": "Jazz brunch", "detail": "11:00 · Corner Café"], ["text": "Gallery opening", "detail": "15:00 · North Hall"],
             ["text": "Night market", "detail": "19:00 · Pier 4"]]]
@@ -316,6 +334,8 @@ extension PreviewFixtures {
             // More jobs than the panel can show at once: the board has to scroll.
             s.tasks = [declutterWeather, declutterEvents, declutterPlan, answerWeek, answerLaptops, routerTask, indexTask, rollRunning]
                 + nightTasks + rollTasks + relTasks
+        case "answer-matchup":
+            s.tasks = [rollRunning, matchup]
         case "events-board", "answer-events":
             s.exchange = Exchange(you: "Anything cool going on this weekend?", assistant: "Six good ones; it's on your board.", replyStarted: true)
             s.tasks = [rollRunning, weekendEvents]

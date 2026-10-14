@@ -9,11 +9,11 @@ def _shape(visual, **extra):
 
 
 def test_a_two_sided_projection_becomes_a_game_card():
-    shape = _shape({"kind": "game", "league": "League", "status": "Projected", "detail": "68% to win",
-                    "teams": [{"name": "Your team", "score": "129.8", "winner": True},
-                              {"name": "Opponent", "score": "105.7", "winner": False}]})
+    shape = _shape({"kind": "game", "league": "League", "status": "Projected", "detail": "64% to win",
+                    "teams": [{"name": "Your team", "score": "118.4", "winner": True},
+                              {"name": "Opponent", "score": "97.2", "winner": False}]})
     assert shape and shape["_visual"]["kind"] == "game" and shape["_visual"]["status"] == "projected"
-    assert [t["score"] for t in shape["_visual"]["teams"]] == ["129.8", "105.7"]
+    assert [t["score"] for t in shape["_visual"]["teams"]] == ["118.4", "97.2"]
 
 
 def test_only_data_kinds_and_valid_cards_pass():

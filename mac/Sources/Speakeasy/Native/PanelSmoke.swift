@@ -673,6 +673,16 @@ enum PanelSmoke {
               "answer-events: unfolding the row shows the capped picture (\(Int(LayoutProbe.frames["answer.pictures"]?.height ?? -1))pt)")
         onScreenCheck(win, visible, "answer-events open")
         snap("answer-events-picture")
+
+        guard PreviewFixtures.showJobFixture("answer-matchup", on: c) else { fail("answer-matchup: fixture missing"); return }
+        await settle(1.2)
+        guard let matchJob = c.model.selectedJob else { fail("answer-matchup: no job open"); return }
+        check(matchJob.answerTask != nil && !matchJob.stage.needsYou, "answer-matchup: a drawn matchup with a screenshot is an answer")
+        let mblocks = JobCards.answerBlocks(matchJob, model: c.model)
+        check(mblocks.firstIndex(of: .pictures).map { p in mblocks.firstIndex(where: { $0 != .pictures }).map { $0 < p } ?? false } ?? false,
+              "answer-matchup: the picture comes after the answer (\(mblocks))")
+        onScreenCheck(win, visible, "answer-matchup")
+        snap("answer-matchup")
     }
 
     static func onScreenCheck(_ win: NSWindow, _ visible: NSRect, _ label: String) {

@@ -154,6 +154,9 @@ struct GameCard: View {
                 if status == "live" {
                     Text("LIVE").font(.system(size: 9.5, weight: .bold)).foregroundStyle(.white)
                         .padding(.horizontal, 5).padding(.vertical, 1.5).background(Capsule().fill(.red))
+                } else if status == "projected" {
+                    Text("PROJECTED").font(.system(size: 9.5, weight: .bold)).foregroundStyle(.secondary)
+                        .padding(.horizontal, 5).padding(.vertical, 1.5).background(Capsule().fill(.primary.opacity(0.08)))
                 }
             }
             ForEach(Array(card["teams"].array.enumerated()), id: \.offset) { _, side in
