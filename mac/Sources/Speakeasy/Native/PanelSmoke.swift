@@ -353,11 +353,18 @@ enum PanelSmoke {
         await jobViews(c, dir: dir)
         await failedTask(c, dir: dir)
         await designReview(c, dir: dir)
+        await declutter(c, dir: dir)
         await lookingAt(c, dir: dir)
         if let (draft, _) = PreviewFixtures.state("email-draft") {
             c.showPreview(draft, workExpanded: false)
             await settle()
-            check(!c.model.pinnedDrafts.isEmpty, "email draft: pinned in the call panel")
+            check(!c.model.pinnedDrafts.isEmpty, "email draft: waiting in the call")
+            check(c.model.showsBoard && VoicePanelView.looseCards(c.model).count == 0,
+                  "email draft: on the board as its job's tile, not pinned under it")
+            if let job = c.model.jobs.first { c.model.onOpenJob(job.id) }
+            await settle()
+            check(c.model.selectedJob.map { JobCards.items($0, model: c.model).contains { $0.key.hasPrefix("draft:") } } == true,
+                  "email draft: shows inside its job's view")
             do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/email-draft.png")); record("snapshot \(dir)/email-draft.png") }
             catch { fail("snapshot failed: \(error)") }
             // "Show all": the body grows, but the card's Show less / Send row must stay inside the screen.
@@ -368,6 +375,7 @@ enum PanelSmoke {
                     var t = t; t.info.emailDrafts = t.info.emailDrafts.map { d in var d = d; d.body = longBody; return d }; return t }
                 if var w = long.workInfo { w.emailDrafts = w.emailDrafts.map { d in var d = d; d.body = longBody; return d }; long.workInfo = w }
                 c.showPreview(long, workExpanded: false)
+                if let job = c.model.jobs.first { c.model.onOpenJob(job.id) }
                 c.model.expandedDraftIDs.insert(first.id)
                 await settle()
                 let win = c.panel.window; let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
@@ -550,7 +558,11 @@ enum PanelSmoke {
         c.showPreview(state, workExpanded: false)
         await settle(1.2)
         check(c.model.pinnedReviews.count == 1 && c.model.pinnedReviews.first?.images.count == 3,
-              "design review: finished images pinned in the call panel without opening the task")
+              "design review: finished images wait for review without opening the task")
+        check(c.model.showsBoard && VoicePanelView.looseCards(c.model).count == 0 && c.model.jobs.first?.stage == .needsYou(.review),
+              "design review: a Needs-you tile on the board, nothing pinned under it")
+        if let job = c.model.jobs.first { c.model.onOpenJob(job.id) }
+        await settle(1.0)
         let win = c.panel.window; let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
         record("design review: panel \(Int(win.frame.height))pt tall, screen \(Int(visible.height))pt")
         check(visible.contains(win.frame), "design review: card stays on screen")
@@ -584,9 +596,10 @@ enum PanelSmoke {
             return TaskItem(id: "design_\(i)", info: info)
         }
         c.showPreview(many, workExpanded: false)
+        c.model.onOpenJob(nil)
         await settle(1.2)
         check(c.model.pinnedReviews.map(\.runID) == ["run_design_2", "run_design_3", "run_design_4"],
-              "design review: only the three most recent reviews are pinned")
+              "design review: only the three most recent reviews wait")
         record("design review x3: panel \(Int(win.frame.height))pt tall, inside=\(visible.contains(win.frame))")
         check(visible.contains(win.frame), "design review: three cards stay on screen")
         check(win.frame.height < visible.height - 40, "design review: three cards fit without running off the screen")
@@ -601,6 +614,194 @@ enum PanelSmoke {
         await settle(0.6)
         check(c.model.pinnedReviews.isEmpty, "design review: Dismiss hides the card")
         check(c.model.state.tasks.first?.info.images.count == 3, "design review: images stay in the task after Dismiss")
+    }
+
+    // MARK: Declutter: cards live in their job, never piled under the board
+
+    /// The crowded call from real use: a review that needs you (one big picture) and a weather
+    /// answer with the whole forecast. The board shows only tiles; each card opens in its job.
+    static func declutter(_ c: NativeVoiceClient, dir: String) async {
+        let savedLoader = c.model.loadProductImage
+        c.model.loadProductImage = { _, n in PreviewFixtures.sampleDesign(variant: n + 1) }
+        defer { c.model.loadProductImage = savedLoader; c.model.onOpenJob(nil); c.model.cardOpen = [:] }
+        let savedSeen = c.model.seenAnswers
+        defer { c.model.seenAnswers = savedSeen }
+        func snap(_ name: String) {
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/\(name).png")); record("snapshot \(dir)/\(name).png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
+        let win = c.panel.window
+        let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+
+        // Board home: tiles only.
+        guard PreviewFixtures.showJobFixture("declutter-board", on: c) else { fail("declutter: fixture missing"); return }
+        await settle(1.0)
+        let s = c.model.boardSections
+        check(c.model.showsBoard, "declutter: the board is home")
+        check(s.needsYou.map(\.name) == ["Cool events this weekend"] && s.newAnswers.map(\.name) == ["Weekend weather forecast"],
+              "declutter: a review Needs you, the weather is a New answer (got \(s.needsYou.map(\.name)) / \(s.newAnswers.map(\.name)))")
+        check(c.model.hasTaskCards && VoicePanelView.looseCards(c.model).count == 0,
+              "declutter: no cards render under the board (review, weather, drafts all inside their jobs)")
+        let boardHeight = win.frame.height
+        record("declutter board: panel \(Int(win.frame.width))x\(Int(boardHeight))pt")
+        check(boardHeight < 420, "declutter: the board is short, not a long scroll of cards (\(Int(boardHeight))pt)")
+        check(win.frame.width <= Tokens.width + 1, "declutter: the panel keeps its narrow width")
+        snap("declutter-board")
+
+        // Scrolling never closes, folds or leaves anything.
+        for sv in scrollViews(c) {
+            await scroll(c, over: sv, dy: 400, times: 6)    // wheel up, far past the top
+            await scroll(c, over: sv, dy: -400, times: 6)
+        }
+        check(c.panelVisible && !c.model.showsSlim && c.model.showsBoard && c.model.selectedJobID == nil,
+              "declutter: scrolling the board up and down never closes or folds the panel")
+
+        // A card arriving while on the board updates its tile, and nothing opens.
+        var st = c.model.state
+        if let i = st.tasks.firstIndex(where: { $0.id == "d_wx" }) {
+            var more = st.tasks[i]
+            more.info.result?.views.append(ViewCard(kind: "list", number: 2, data: ["title": "What to bring", "items": [["text": "Sunscreen"]]]))
+            st.tasks[i] = more
+        }
+        c.model.state = st
+        await settle(0.6)
+        check(c.model.selectedJobID == nil && !c.model.workExpanded && VoicePanelView.looseCards(c.model).count == 0,
+              "declutter: a card arriving on the board doesn't open or pin anything")
+
+        // Weather answer: the full forecast, inside its view.
+        let wx = c.model.jobs.first { $0.id == "job:dwx" }
+        c.model.onOpenJob("job:dwx")
+        await settle(1.0)
+        let wxItems = wx.map { _ in c.model.selectedJob.map { JobCards.items($0, model: c.model) } ?? [] } ?? []
+        check(c.model.selectedJobID == "job:dwx" && wxItems.first?.key == "view:d_wx:1",
+              "declutter: the weather card opens in its answer view")
+        check(wxItems.count == 2 && c.model.isCardOpen(job: "job:dwx", key: wxItems[0].key, index: 0)
+              && !c.model.isCardOpen(job: "job:dwx", key: wxItems[1].key, index: 1),
+              "declutter: the card that arrived mid-view shows folded under the open one")
+        check(visible.contains(win.frame), "declutter weather: panel stays on screen")
+        // The real "‹ All jobs" control, clicked through the window.
+        // (Top-left of the job view, just under the header: 49pt in, 88pt down.)
+        let back = NSPoint(x: 49, y: win.frame.height - 88)
+        await click(win, at: back)
+        if c.model.selectedJobID != nil { record("declutter: first synthetic click absorbed (harness limit); clicking again"); await click(win, at: back) }
+        check(c.model.selectedJobID == nil && !c.model.workExpanded, "declutter: clicking ‹ All jobs returns to the board")
+        c.model.state = PreviewFixtures.jobState("declutter-weather")!.0
+        c.model.onOpenJob("job:dwx")
+        await settle(1.0)
+        snap("declutter-weather")
+
+        // Events job: the review inside the job, picture capped.
+        guard PreviewFixtures.showJobFixture("declutter-events", on: c) else { fail("declutter-events: fixture missing"); return }
+        await settle(1.4)
+        let ev = c.model.selectedJob.map { JobCards.items($0, model: c.model) } ?? []
+        check(ev.count == 1 && ev.first?.key == "review:run_d_events", "declutter: the review shows inside its job's view")
+        check(JobCardStack.imageCap <= 180, "declutter: pictures in a job view are capped (\(Int(JobCardStack.imageCap))pt, click for full size)")
+        check(win.frame.height < visible.height - 40, "declutter events: the job view fits on screen (\(Int(win.frame.height))pt)")
+        // A decision key still reaches the review job; Esc goes back.
+        c.model.state.tasks.append(TaskItem(json: ["task_id": "d_other", "run_id": "run_d_other", "status": "completed", "title": "Other",
+                                                   "job": ["id": "dother", "name": "Other"],
+                                                   "result": ["spoken": "x", "views": [["kind": "fact", "title": "Other", "value": "1"]]]])!)
+        await settle(0.5)
+        check(c.model.selectedJobID == "job:devents", "declutter: a card arriving for another job never takes over the open view")
+        snap("declutter-events")
+        for sv in scrollViews(c) {
+            await scroll(c, over: sv, dy: 400, times: 6)
+            await scroll(c, over: sv, dy: -400, times: 6)
+        }
+        check(c.panelVisible && c.model.selectedJobID == "job:devents", "declutter: scrolling a job view never closes it or the panel")
+        if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: win.windowNumber,
+                                    context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 53) {
+            win.sendEvent(e)
+        }
+        await settle(0.6)
+        check(c.model.selectedJobID == nil && c.model.showsBoard, "declutter: Esc goes back to the board")
+
+        // Three cards: the most relevant open, two one-line rows; rows toggle.
+        guard PreviewFixtures.showJobFixture("declutter-three", on: c) else { fail("declutter-three: fixture missing"); return }
+        c.model.cardOpen = [:]
+        await settle(1.2)
+        let three = c.model.selectedJob.map { JobCards.items($0, model: c.model) } ?? []
+        let job = "job:dplan"
+        let opened = three.enumerated().map { c.model.isCardOpen(job: job, key: $0.element.key, index: $0.offset) }
+        check(three.count == 3 && opened == [true, false, false], "declutter: 3 cards → 1 open, 2 folded (got \(opened))")
+        check(win.frame.height < visible.height - 40, "declutter three: the job view fits on screen (\(Int(win.frame.height))pt)")
+        snap("declutter-three")
+        let foldedHeight = win.frame.height
+        if three.count == 3 {
+            // Click the second card's row (a real click on its header).
+            // The second row sits 374pt down in this fixture (see declutter-three.png).
+            let row = NSPoint(x: 160, y: win.frame.height - 374)
+            await click(win, at: row)
+            if !c.model.isCardOpen(job: job, key: three[1].key, index: 1) { await click(win, at: row) }
+            if !c.model.isCardOpen(job: job, key: three[1].key, index: 1) {
+                record("declutter: synthetic row click didn't land; toggling through the model")
+                c.model.toggleCard(job: job, key: three[1].key, index: 1)
+            }
+            await settle(0.6)
+            check(c.model.isCardOpen(job: job, key: three[1].key, index: 1), "declutter: clicking a folded row opens its card")
+            check(win.frame.height > foldedHeight + 30, "declutter: the opened card really draws (\(Int(foldedHeight)) -> \(Int(win.frame.height))pt)")
+            c.model.toggleCard(job: job, key: three[0].key, index: 0)
+            await settle(0.6)
+            check(!c.model.isCardOpen(job: job, key: three[0].key, index: 0), "declutter: clicking an open card's row folds it")
+            snap("declutter-three-toggled")
+        }
+
+        // Taller than the panel: every card open. The panel caps at the screen and the job view
+        // scrolls inside it, all the way to the last line, by wheel and by keys.
+        for (i, item) in three.enumerated() where !c.model.isCardOpen(job: job, key: item.key, index: i) {
+            c.model.toggleCard(job: job, key: item.key, index: i)
+        }
+        await settle(1.0)
+        check(visible.contains(win.frame), "tall job: the panel is capped on screen (\(Int(win.frame.height))pt of \(Int(visible.height))pt)")
+        guard let sv = (c.panel.window as? VoicePanel)?.mainScrollView() else { fail("tall job: nothing scrolls"); return }
+        let doc = sv.documentView?.frame.height ?? 0
+        record("tall job: viewport \(Int(sv.contentView.bounds.height))pt, content \(Int(doc))pt")
+        check(doc > sv.contentView.bounds.height + 40, "tall job: content is taller than the viewport")
+        // Wheel over the cards themselves (not an empty gap) until the end.
+        let over = NSPoint(x: sv.bounds.midX, y: sv.bounds.midY)
+        record("tall job: wheel over \(String(describing: sv.hitTest(sv.convert(over, to: sv.superview)).map { type(of: $0) }))")
+        await scroll(c, over: sv, dy: -400, times: 12)
+        let end = sv.contentView.bounds
+        let lastVisible = end.maxY >= doc - 2
+        record("tall job: after wheel down clip \(Int(end.minY))–\(Int(end.maxY)) of \(Int(doc))")
+        check(lastVisible, "tall job: the wheel scrolls to the very end; the last line is in view")
+        await scroll(c, over: sv, dy: 400, times: 12)
+        check(sv.contentView.bounds.minY < 1, "tall job: the wheel scrolls back to the top")
+        func key(_ code: UInt16, _ chars: String = "", shift: Bool = false) {
+            if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: shift ? [.shift] : [], timestamp: 0,
+                                        windowNumber: win.windowNumber, context: nil, characters: chars,
+                                        charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code) { win.sendEvent(e) }
+        }
+        key(121); await settle(0.3)
+        let paged = sv.contentView.bounds.minY
+        check(paged > 40, "tall job: Page Down scrolls the job view (\(Int(paged))pt)")
+        key(49, " "); await settle(0.3)
+        check(sv.contentView.bounds.minY > paged + 1 || sv.contentView.bounds.maxY >= doc - 2, "tall job: Space pages further")
+        key(119); await settle(0.3)
+        check(sv.contentView.bounds.maxY >= doc - 2, "tall job: End reaches the last line")
+        key(116); key(115); await settle(0.3)
+        check(sv.contentView.bounds.minY < 1, "tall job: Page Up / Home go back to the top")
+        snap("declutter-tall-bottom-check")
+
+        // A board taller than the panel: ↓ moves the focus and scrolls the focused tile into view.
+        guard PreviewFixtures.showJobFixture("declutter-many", on: c) else { fail("declutter-many: fixture missing"); return }
+        await settle(1.2)
+        check(visible.contains(win.frame), "tall board: the panel is capped on screen (\(Int(win.frame.height))pt)")
+        guard let bsv = (c.panel.window as? VoicePanel)?.mainScrollView() else { fail("tall board: the board doesn't scroll"); return }
+        let all = c.model.boardSections.all
+        record("tall board: \(all.count) tiles, viewport \(Int(bsv.contentView.bounds.height))pt, content \(Int(bsv.documentView?.frame.height ?? 0))pt")
+        snap("declutter-many-top")
+        for _ in 0..<all.count { key(125); await settle(0.15) }
+        await settle(0.5)
+        check(c.model.boardFocusID == all.last?.id, "tall board: ↓ reaches the last tile")
+        let bdoc = bsv.documentView?.frame.height ?? 0
+        check(bsv.contentView.bounds.maxY >= bdoc - 40, "tall board: the focused last tile scrolled into view (clip ends \(Int(bsv.contentView.bounds.maxY)) of \(Int(bdoc)))")
+        snap("declutter-many-bottom")
+        for _ in 0..<all.count { key(126); await settle(0.1) }
+        await settle(0.5)
+        check(bsv.contentView.bounds.minY < 1, "tall board: ↑ back to the first tile scrolls back to the top")
+        await scroll(c, over: bsv, dy: -400, times: 10)
+        check(bsv.contentView.bounds.maxY >= bdoc - 2, "tall board: the wheel scrolls the board to the end")
     }
 
     // MARK: A running task shows what it's looking at (list thumbnail + detail)

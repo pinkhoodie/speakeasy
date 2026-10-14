@@ -476,9 +476,10 @@ struct VoicePanelView: View {
                 ApprovalRow(approval: approval, busy: model.busy, onChoice: model.onApproval)
                     .padding(.horizontal, 12).padding(.bottom, 12)
             }
-            // On the board a waiting decision sits in its job's tile; other cards still pin here.
-            if !(model.workExpanded || model.state.workOnly), let pinned = model.pinnedViews,
-               !(board && pinned.views.contains { $0.kind == "question" }) {
+            // Nothing pins under the board: every card opens from its job's tile (see `showsBoard`,
+            // which is on whenever a card, draft or review exists). These only draw without a board.
+            let loose = Self.looseCards(model)
+            if let pinned = loose.views {
                 VStack(spacing: 8) {
                     ForEach(pinned.views.prefix(2)) { card in ViewCardView(card) }
                         .environment(\.questionActions, model.questionActions(for: pinned.taskID))
@@ -492,19 +493,15 @@ struct VoicePanelView: View {
                 .padding(.horizontal, 12).padding(.bottom, 12)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            if !(model.workExpanded || model.state.workOnly) {
-                ForEach(model.pinnedDrafts) { draft in
-                    EmailDraftCard(draft: draft, model: model)
-                        .padding(.horizontal, 12).padding(.bottom, 12)
-                }
-                // Finished images pop up for review without opening the task; they stay until dismissed.
-                let reviews = model.pinnedReviews
-                let open = ImageReviewLayout.focused(reviews, picked: model.focusedReviewID)
-                ForEach(reviews) { review in
-                    ImageReviewCard(review: review, shownCount: reviews.count + model.pinnedDrafts.count,
-                                    compact: review.runID != open, model: model)
-                        .padding(.horizontal, 12).padding(.bottom, review.runID == reviews.last?.runID ? 12 : 6)
-                }
+            ForEach(loose.drafts) { draft in
+                EmailDraftCard(draft: draft, model: model)
+                    .padding(.horizontal, 12).padding(.bottom, 12)
+            }
+            let open = ImageReviewLayout.focused(loose.reviews, picked: model.focusedReviewID)
+            ForEach(loose.reviews) { review in
+                ImageReviewCard(review: review, shownCount: loose.reviews.count + loose.drafts.count,
+                                compact: review.runID != open, model: model)
+                    .padding(.horizontal, 12).padding(.bottom, review.runID == loose.reviews.last?.runID ? 12 : 6)
             }
         }
         .frame(width: model.panelWidth, alignment: .top)
@@ -528,6 +525,19 @@ struct VoicePanelView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.pinnedReviews.map(\.id))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.slim)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.room?.isOn)
+    }
+
+    /// Cards drawn loose in the panel, outside any job view. With a board (on whenever a card,
+    /// draft or review exists) there are none: each card opens from its job's tile.
+    struct LooseCards {
+        var views: (taskID: String, views: [ViewCard])?
+        var drafts: [EmailDraft] = []
+        var reviews: [ImageReview] = []
+        var count: Int { (views?.views.count ?? 0) + drafts.count + reviews.count }
+    }
+    static func looseCards(_ model: VoicePanelModel) -> LooseCards {
+        guard !(model.workExpanded || model.state.workOnly || model.showsSlim || model.showsBoard) else { return LooseCards() }
+        return LooseCards(views: model.pinnedViews, drafts: model.pinnedDrafts, reviews: model.pinnedReviews)
     }
 
     private func header(_ p: PillPresentation) -> some View {

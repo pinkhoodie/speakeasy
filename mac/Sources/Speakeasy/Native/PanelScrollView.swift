@@ -17,12 +17,17 @@ struct PanelScrollView<Content: View>: NSViewRepresentable {
     /// Height the user sized the panel to; short content keeps this room instead of collapsing.
     var minHeight: CGFloat = 0
     var followsBottom = false
+    /// A rect in the content's coordinates (top-left origin) to bring into view when it changes,
+    /// e.g. the keyboard-focused tile.
+    var reveal: CGRect?
     var content: Content
 
-    init(maxHeight: CGFloat, minHeight: CGFloat = 0, followsBottom: Bool = false, @ViewBuilder content: () -> Content) {
+    init(maxHeight: CGFloat, minHeight: CGFloat = 0, followsBottom: Bool = false, reveal: CGRect? = nil,
+         @ViewBuilder content: () -> Content) {
         self.maxHeight = maxHeight
         self.minHeight = min(minHeight, maxHeight)
         self.followsBottom = followsBottom
+        self.reveal = reveal
         self.content = content()
     }
 
@@ -36,6 +41,7 @@ struct PanelScrollView<Content: View>: NSViewRepresentable {
     func updateNSView(_ view: PanelNSScrollView, context: Context) {
         view.followsBottom = followsBottom
         view.setContent(AnyView(content))
+        view.reveal(reveal)
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: PanelNSScrollView, context: Context) -> CGSize? {
@@ -76,6 +82,50 @@ final class PanelNSScrollView: NSScrollView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    private var revealed: CGRect?
+
+    /// Scroll just enough to show `rect` (content coordinates, flipped) with a little margin.
+    func reveal(_ rect: CGRect?) {
+        guard let rect, rect != revealed else { return }
+        revealed = rect
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let doc = self.documentView else { return }
+            self.layoutSubtreeIfNeeded()
+            let visible = self.contentView.bounds
+            var y = visible.origin.y
+            // Near the top, go all the way so the section label above the first tile shows too.
+            if rect.minY - 8 < visible.minY { y = rect.minY < 60 ? 0 : rect.minY - 28 }
+            else if rect.maxY + 8 > visible.maxY { y = rect.maxY + 8 - visible.height }
+            y = min(max(0, y), max(0, doc.frame.height - visible.height))
+            guard abs(y - visible.origin.y) > 0.5 else { return }
+            self.contentView.scroll(to: NSPoint(x: 0, y: y))
+            self.reflectScrolledClipView(self.contentView)
+        }
+    }
+
+    /// Page Up/Down, Space (Shift+Space up), Home/End. Returns false when there's nothing to scroll.
+    @discardableResult
+    func page(_ key: PageKey) -> Bool {
+        guard let doc = documentView else { return false }
+        let visible = contentView.bounds
+        let maxY = max(0, doc.frame.height - visible.height)
+        guard maxY > 0.5 else { return false }
+        let step = max(40, visible.height - 40)
+        let y: CGFloat
+        switch key {
+        case .up: y = visible.origin.y - step
+        case .down: y = visible.origin.y + step
+        case .top: y = 0
+        case .bottom: y = maxY
+        }
+        contentView.scroll(to: NSPoint(x: 0, y: min(max(0, y), maxY)))
+        reflectScrolledClipView(contentView)
+        return true
+    }
+    enum PageKey { case up, down, top, bottom }
+
+    var scrollMaxY: CGFloat { max(0, (documentView?.frame.height ?? 0) - contentView.bounds.height) }
 
     /// Within 2pt of the end, or not yet scrollable.
     var isAtBottom: Bool {

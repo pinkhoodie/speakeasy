@@ -251,9 +251,18 @@ struct OrbBar: View {
 struct JobBoardView: View {
     @ObservedObject var model: VoicePanelModel
 
+    /// Where each tile sits in the scrolling content, so the keyboard focus scrolls into view.
+    @State private var tileFrames: [String: CGRect] = [:]
+
+    /// The board's scroll room: what the screen allows, less the transcript above it when open.
+    static func scrollHeight(_ model: VoicePanelModel) -> CGFloat {
+        let transcript: CGFloat = model.captionExpanded ? 150 + model.extraHeight + 24 : 56
+        return min(max(200, JobStyle.scrollCap - transcript), 520 + model.extraHeight)
+    }
+
     var body: some View {
         let sections = model.boardSections
-        PanelScrollView(maxHeight: min(JobStyle.scrollCap, 520 + model.extraHeight)) {
+        PanelScrollView(maxHeight: Self.scrollHeight(model), reveal: model.boardFocusID.flatMap { tileFrames[$0] }) {
             VStack(alignment: .leading, spacing: 7) {
                 Text(summary(sections)).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(.secondary)
                     .padding(.bottom, 1)
@@ -265,6 +274,7 @@ struct JobBoardView: View {
                     SectionLabel(text: "New answers").padding(.top, sections.needsYou.isEmpty ? 0 : 4)
                     ForEach(sections.newAnswers) { job in
                         AnswerTile(job: job, focused: model.boardFocusID == job.id) { model.onOpenJob(job.id) }
+                            .modifier(TileFrame(id: job.id))
                     }
                 }
                 if !sections.running.isEmpty {
@@ -276,6 +286,7 @@ struct JobBoardView: View {
                     WrapLayout(spacing: 5) {
                         ForEach(sections.doneToday) { job in
                             DoneChip(job: job, focused: model.boardFocusID == job.id) { model.onOpenJob(job.id) }
+                                .modifier(TileFrame(id: job.id))
                         }
                     }
                 }
@@ -283,6 +294,10 @@ struct JobBoardView: View {
             }
             .padding(.trailing, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .coordinateSpace(name: "board")
+            .onPreferenceChange(TileFrameKey.self) { frames in
+                MainActor.assumeIsolated { if frames != tileFrames { tileFrames = frames } }
+            }
         }
     }
 
@@ -302,6 +317,24 @@ struct JobBoardView: View {
 
     @ViewBuilder private func tile(_ job: Job) -> some View {
         JobTile(job: job, model: model, focused: model.boardFocusID == job.id)
+            .modifier(TileFrame(id: job.id))
+    }
+}
+
+struct TileFrameKey: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+/// Reports a tile's frame in the board's scrolling content.
+struct TileFrame: ViewModifier {
+    var id: String
+    func body(content: Content) -> some View {
+        content.background(GeometryReader { g in
+            Color.clear.preference(key: TileFrameKey.self, value: [id: g.frame(in: .named("board"))])
+        })
     }
 }
 
@@ -502,9 +535,13 @@ struct JobDetailView: View {
         let next = model.nextJobNeedingYou(after: job.id)
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
-                PillButton(title: "‹ Back", action: { model.onOpenJob(nil) })
-                    .help("Back to your jobs (Esc)")
+                AllJobsButton { model.onOpenJob(nil) }
                 Spacer(minLength: 4)
+                Text("esc").font(.system(size: 10, weight: .medium)).foregroundStyle(.tertiary)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.75))
+                    .help("Esc goes back to all jobs")
+                    .accessibilityHidden(true)
             }
             HStack(spacing: 5) {
                 Image(systemName: "mic.fill").font(.system(size: 9, weight: .semibold))
@@ -551,17 +588,15 @@ struct JobDetailView: View {
     /// An answer: its cards first and large, then the sorted report or the text, then sources.
     /// Nothing to decide here.
     @ViewBuilder private func answerSections(_ task: TaskItem) -> some View {
-        let visuals = task.info.views.filter { $0.kind != "question" }
-        if !visuals.isEmpty {
-            VStack(spacing: 8) { ForEach(visuals) { ViewCardView($0) } }
-        }
+        let cards = JobCards.items(job, model: model)
+        if !cards.isEmpty { JobCardStack(job: job, items: cards, model: model) }
         if let shape = task.info.result?.shape {
             ReportBoard(shape: shape, full: task.info.result?.full ?? task.info.result?.spoken, showHeadline: false,
                         expanded: model.expandedReports.contains(task.id),
                         toggle: { if model.expandedReports.contains(task.id) { model.expandedReports.remove(task.id) } else { model.expandedReports.insert(task.id) } })
         } else if let text = task.info.result?.full ?? task.info.result?.spoken {
             VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: visuals.isEmpty ? "Answer" : "In words")
+                SectionLabel(text: cards.isEmpty ? "Answer" : "In words")
                 // Links read as their names here; the addresses are listed under Sources.
                 Text(Self.readable(text)).font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
@@ -639,10 +674,13 @@ struct JobDetailView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        // Every card of the job (a review, drafts, result cards): the most relevant open, the rest
+        // one-line rows. Nothing else in the panel draws them.
+        let cards = JobCards.items(job, model: model)
+        if !cards.isEmpty { JobCardStack(job: job, items: cards, model: model) }
         LiveSteps(job: job, model: model)
         let reportTask = job.tasks.last { $0.info.result != nil && $0.id != decisionTask?.id }
         if let task = reportTask {
-            let visuals = task.info.views.filter { $0.kind != "question" }
             if let shape = task.info.result?.shape {
                 ReportBoard(shape: shape, full: task.info.result?.full ?? task.info.result?.spoken,
                             expanded: model.expandedReports.contains(task.id),
@@ -652,17 +690,6 @@ struct JobDetailView: View {
                     SectionLabel(text: "Result")
                     Text(text).font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 }
-            }
-            if !visuals.isEmpty {
-                VStack(spacing: 8) { ForEach(visuals) { ViewCardView($0) } }
-                    .environment(\.questionActions, model.questionActions(for: task.id))
-            }
-        }
-        let drafts = job.tasks.flatMap(\.info.emailDrafts)
-        if !drafts.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                SectionLabel(text: drafts.count == 1 ? "Email draft" : "Email drafts")
-                ForEach(drafts) { EmailDraftCard(draft: $0, model: model) }
             }
         }
         if job.tasks.count > 1 {
@@ -957,5 +984,167 @@ struct ReportBoard: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Cards in a job view
+
+/// "‹ All jobs": the way back to the board, top-left of every job and answer view.
+struct AllJobsButton: View {
+    var action: () -> Void
+    @State private var hover = false
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.left").font(.system(size: 10, weight: .bold))
+                Text("All jobs").font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(JobStyle.blueInk)
+            .padding(.leading, 7).padding(.trailing, 10).frame(height: 26)
+            .background(Capsule().fill(JobStyle.blueInk.opacity(hover ? 0.2 : 0.12)))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help("Back to all your jobs (Esc)")
+        .accessibilityLabel("All jobs")
+    }
+}
+
+/// One card of a job: a review, an email draft, or a result card.
+struct JobCardItem: Identifiable {
+    enum Content { case review(ImageReview), draft(EmailDraft), view(taskID: String, card: ViewCard) }
+    var key: String
+    var icon: String
+    var title: String
+    var summary: String
+    var content: Content
+    var id: String { key }
+}
+
+enum JobCards {
+    /// A job's cards, most relevant first: what waits on you (a review, then drafts), then the
+    /// newest result's cards, then older ones. The decision's own pictures stay in its brief.
+    @MainActor static func items(_ job: Job, model: VoicePanelModel) -> [JobCardItem] {
+        var out: [JobCardItem] = []
+        let ids = Set(job.tasks.map(\.id))
+        for r in model.pinnedReviews.reversed() where ids.contains(r.taskID) {
+            out.append(JobCardItem(key: "review:\(r.runID)", icon: "photo.on.rectangle.angled", title: "Ready to review",
+                                   summary: r.countLabel, content: .review(r)))
+        }
+        var seen = Set<String>()
+        for d in job.tasks.reversed().flatMap(\.info.emailDrafts) where seen.insert(d.draftID).inserted {
+            let to = d.to.first.map { "To \($0)" } ?? ""
+            out.append(JobCardItem(key: "draft:\(d.draftID)", icon: "envelope", title: d.subject.isEmpty ? "Email draft" : d.subject,
+                                   summary: to, content: .draft(d)))
+        }
+        for t in job.tasks.reversed() where t.id != job.decisionTaskID {
+            for v in t.info.views where v.kind != "question" {
+                let (icon, title, summary) = describe(v)
+                out.append(JobCardItem(key: "view:\(t.id):\(v.number)", icon: icon, title: title, summary: summary,
+                                       content: .view(taskID: t.id, card: v)))
+            }
+        }
+        return out
+    }
+
+    /// Icon, title and a few words for a card's one-line row.
+    static func describe(_ c: ViewCard) -> (String, String, String) {
+        let title = c["title"].string ?? c["place"].string ?? c["name"].string
+        func label(_ fallback: String) -> String { title ?? fallback }
+        switch c.kind {
+        case "weather":
+            let parts = [c["temp"].double.map { ViewCard.degrees($0) }, c["condition"].string?.capitalized]
+            return ("cloud.sun", "Weather" + (c["place"].string.map { " · \($0)" } ?? ""), parts.compactMap { $0 }.joined(separator: " · "))
+        case "quote":
+            let price = c["price"].double.map { ViewCard.money($0, currency: c["currency"].string) }
+            return ("chart.line.uptrend.xyaxis", c["name"].string ?? c["symbol"].string ?? "Price", price ?? "")
+        case "chart": return ("chart.bar", label("Chart"), c["labels"].strings.count > 1 ? "\(c["labels"].strings.first!)–\(c["labels"].strings.last!)" : "")
+        case "stats", "nutrition":
+            let items = c["items"].array.prefix(2).compactMap { i in i["value"].string.map { "\($0) \((i["label"].string ?? "").lowercased())" } }
+            return ("square.grid.2x2", label("Numbers"), items.joined(separator: " · "))
+        case "comparison": return ("rectangle.split.2x1", label("Comparison"), c["winner"].string.map { "\($0) comes out ahead" } ?? "")
+        case "list", "steps": return ("list.bullet", label("List"), "\(c["items"].array.count) items")
+        case "place", "places", "route", "transit": return ("mappin.and.ellipse", label("Places"), c["items"].array.isEmpty ? "" : "\(c["items"].array.count) places")
+        case "news": return ("newspaper", label("News"), c["items"].array.isEmpty ? "" : "\(c["items"].array.count) stories")
+        case "agenda", "calendar_day":
+            let n = c["days"].array.reduce(0) { $0 + $1["events"].array.count } + c["events"].array.count
+            return ("calendar", label("Calendar"), n == 0 ? "" : "\(n) events")
+        case "flight": return ("airplane", label("Flight"), c["status"].string ?? "")
+        case "devices": return ("laptopcomputer.and.iphone", label("Devices"), "\(c["items"].array.count) devices")
+        case "lanes": return ("chart.bar.xaxis", label("Timeline"), c["note"].string ?? "")
+        case "flow": return ("arrow.triangle.branch", label("Flow"), "")
+        case "before_after": return ("arrow.left.arrow.right", label("Before and after"), c["after"]["text"].string ?? "")
+        case "fact", "conversion", "math": return ("number", label("Answer"), c["value"].string ?? c["to_value"].string ?? c["result"].string ?? "")
+        default: return ("square.text.square", label(c.summary), "")
+        }
+    }
+}
+
+/// A job's cards: one card shows whole, the others fold to a one-line row (icon, title, a few
+/// words, chevron). Clicking a row opens it; clicking an open card's row folds it. A single card
+/// shows whole with no row.
+struct JobCardStack: View {
+    var job: Job
+    var items: [JobCardItem]
+    @ObservedObject var model: VoicePanelModel
+
+    /// How tall a picture in a job view gets; click it for full size.
+    static let imageCap: CGFloat = 170
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if items.count == 1, let only = items.first {
+                content(only)
+            } else {
+                ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
+                    let open = model.isCardOpen(job: job.id, key: item.key, index: i)
+                    VStack(alignment: .leading, spacing: 6) {
+                        JobCardRow(item: item, open: open) { model.toggleCard(job: job.id, key: item.key, index: i) }
+                        if open { content(item).padding(.bottom, 4) }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func content(_ item: JobCardItem) -> some View {
+        switch item.content {
+        case .review(let review):
+            ImageReviewCard(review: review, shownCount: 1, model: model, inJob: true, previewCap: Self.imageCap)
+        case .draft(let draft):
+            EmailDraftCard(draft: draft, model: model)
+        case .view(let taskID, let card):
+            ViewCardView(card).environment(\.questionActions, model.questionActions(for: taskID))
+        }
+    }
+}
+
+struct JobCardRow: View {
+    var item: JobCardItem
+    var open: Bool
+    var action: () -> Void
+    @State private var hover = false
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: item.icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(JobStyle.blueInk)
+                    .frame(width: 16)
+                Text(item.title).font(.system(size: 12, weight: .semibold)).lineLimit(1).layoutPriority(1)
+                if !item.summary.isEmpty {
+                    Text(item.summary).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: open ? "chevron.down" : "chevron.right").font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10).frame(height: 30)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(hover ? 0.10 : 0.055)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(open ? "Fold this card" : "Open this card")
+        .accessibilityLabel("\(item.title)\(item.summary.isEmpty ? "" : ", \(item.summary)"), \(open ? "open" : "folded")")
     }
 }

@@ -166,12 +166,12 @@ public final class VoicePanelModel: ObservableObject {
     /// Review cards to pin in the call panel (like drafts): most recent three.
     public var pinnedReviews: [ImageReview] { state.pendingReviews }
 
-    /// The open review card when it has more than one image and is on screen.
+    /// The review card on screen when it has more than one image: reviews live in their job's view,
+    /// so this is the open job's review.
     public var steppableReview: ImageReview? {
-        guard !(workExpanded || state.workOnly),
-              let open = ImageReviewLayout.focused(pinnedReviews, picked: focusedReviewID),
-              let review = pinnedReviews.first(where: { $0.runID == open }), review.images.count > 1 else { return nil }
-        return review
+        guard workExpanded, let job = selectedJob else { return nil }
+        let ids = Set(job.tasks.map(\.id))
+        return pinnedReviews.last(where: { ids.contains($0.taskID) && $0.images.count > 1 })
     }
 
     /// Arrow keys on the panel: step the open review card's images. False when there's nothing to step
@@ -264,10 +264,27 @@ public final class VoicePanelModel: ObservableObject {
     public var headerStatus: String { orbReason?.text ?? shownStatus }
     public var headerTone: StatusTone { orbReason?.tone ?? shownTone }
     public var selectedJob: Job? { selectedJobID.flatMap { id in jobs.first { $0.id == id } } }
-    /// The board replaces the task list once there's more than one task, or anything needs you.
+    /// The board replaces the task list once there's more than one task, anything needs you, or a
+    /// task brought back a card. Cards never pile up under the board: each lives in its job's view.
     public var showsBoard: Bool {
         guard !showsSlim, !state.workOnly, !state.tasks.isEmpty else { return false }
-        return showsTaskList || jobs.contains { $0.stage.needsYou || $0.stage == .failed }
+        return showsTaskList || hasTaskCards || jobs.contains { $0.stage.needsYou || $0.stage == .failed }
+    }
+    /// Some task has a card, draft or review to show (they open from the board, never pinned under it).
+    public var hasTaskCards: Bool {
+        pinnedViews != nil || !pinnedDrafts.isEmpty || !pinnedReviews.isEmpty
+    }
+
+    // MARK: Cards inside a job view: one open, the rest one-line rows
+
+    /// Cards the user opened or closed in a job view, by "job id|card key". Unset = the default
+    /// (the most relevant card open, the others folded).
+    @Published public var cardOpen: [String: Bool] = [:]
+    public func isCardOpen(job: String, key: String, index: Int) -> Bool {
+        cardOpen["\(job)|\(key)"] ?? (index == 0)
+    }
+    public func toggleCard(job: String, key: String, index: Int) {
+        cardOpen["\(job)|\(key)"] = !isCardOpen(job: job, key: key, index: index)
     }
     /// The mic is open and hearing the user right now.
     public var userTalking: Bool { presentation.mark == .listening && orbLevel > 0.08 }

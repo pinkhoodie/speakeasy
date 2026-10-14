@@ -1220,6 +1220,10 @@ public final class NativeVoiceClient: VoiceCallClient {
         if model.showsSlim { model.slim = false }
         if show.opensDetail {
             if model.state.tasks.contains(where: { $0.id == show.taskID }) { selectTask(show.taskID) }
+        } else if let job = model.jobs.first(where: { j in j.tasks.contains { $0.id == show.taskID } }) {
+            // Asked to see it: the review lives in its job's view.
+            if let run = show.runID { model.focusedReviewID = run }
+            openJob(job.id)
         } else {
             model.workExpanded = false
             model.selectedTaskID = nil
@@ -1255,6 +1259,8 @@ public final class NativeVoiceClient: VoiceCallClient {
 
     private func closeJob() {
         let open = model.selectedJobID != nil
+        // Anything that arrived in the job while it was open has been seen.
+        if let job = model.selectedJob { model.markAnswerSeen(job) }
         model.selectedJobID = nil
         model.tellingJobID = nil
         model.workExpanded = false

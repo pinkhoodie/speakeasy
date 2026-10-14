@@ -70,6 +70,13 @@ final class VoicePanel: NSPanel {
            onKey?(event.keyCode, event.charactersIgnoringModifiers ?? "") == true {
             return
         }
+        // Page Up/Down, Space (Shift+Space up), Home/End scroll the board or job view.
+        if event.type == .keyDown, !(firstResponder is NSText),
+           event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
+           let key = Self.pageKey(event.keyCode, shift: event.modifierFlags.contains(.shift)),
+           let target = mainScrollView(), target.page(key) {
+            return
+        }
         if event.type == .keyDown, !(firstResponder is NSText),
            let delta = ImageReviewLayout.arrowStep(keyCode: event.keyCode,
                                                    commandOptionControl: !event.modifierFlags.intersection([.command, .option, .control]).isEmpty),
@@ -132,6 +139,25 @@ final class VoicePanel: NSPanel {
             break
         }
         super.sendEvent(event)
+    }
+
+    static func pageKey(_ code: UInt16, shift: Bool) -> PanelNSScrollView.PageKey? {
+        switch code {
+        case 116: return .up            // Page Up
+        case 121: return .down          // Page Down
+        case 115: return .top           // Home
+        case 119: return .bottom        // End
+        case 49: return shift ? .up : .down   // Space
+        default: return nil
+        }
+    }
+
+    /// The scroll area that holds the board or the open job: the tallest one that can scroll.
+    func mainScrollView() -> PanelNSScrollView? {
+        guard let root = contentView else { return nil }
+        func walk(_ v: NSView) -> [PanelNSScrollView] { ((v as? PanelNSScrollView).map { [$0] } ?? []) + v.subviews.flatMap(walk) }
+        return walk(root).filter { !$0.isHiddenOrHasHiddenAncestor && $0.scrollMaxY > 0.5 }
+            .max { $0.frame.height < $1.frame.height }
     }
 
     private func hitView(_ point: NSPoint) -> NSView? {

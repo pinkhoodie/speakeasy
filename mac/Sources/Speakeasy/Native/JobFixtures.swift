@@ -8,7 +8,8 @@ extension PreviewFixtures {
     static let jobNames = ["jobs-board", "job-release", "job-release-after", "job-nightly", "job-nightly-after",
                            "job-rollout", "job-rollout-after",
                            "orb-idle", "orb-talking", "orb-working", "orb-needs", "orb-failed", "orb-answers",
-                           "jobs-answers", "answer-weather", "answer-nightly", "answer-laptops"]
+                           "jobs-answers", "answer-weather", "answer-nightly", "answer-laptops",
+                           "declutter-board", "declutter-weather", "declutter-events", "declutter-three", "declutter-many"]
 
     /// Answers the fixtures treat as already read (run ids), so only the new ones show as new.
     static let readAnswers = ["run_weather", "run_notes"]
@@ -41,6 +42,12 @@ extension PreviewFixtures {
         case "answer-nightly": return JobSetup(open: "job:week")
         case "answer-laptops": return JobSetup(open: "job:laptops")
         case "orb-talking": return JobSetup(orb: true, level: 0.6)
+        // A review that needs you and a full weather answer, both with big cards (the crowded panel).
+        case "declutter-board": return JobSetup(seen: [])
+        case "declutter-weather": return JobSetup(open: "job:dwx", seen: [])
+        case "declutter-events": return JobSetup(open: "job:devents", seen: [])
+        case "declutter-three": return JobSetup(open: "job:dplan", seen: [])
+        case "declutter-many": return JobSetup(seen: [])
         default: return nil
         }
     }
@@ -243,7 +250,50 @@ extension PreviewFixtures {
             "full": "Laptop A is the better fit for carrying around: 1.2 kg against 1.6 kg and about 18 hours of battery against 12. Laptop B costs $200 less and has a slightly bigger screen.\n\nSpecs from [Laptop A's spec page](https://laptops.example.com/a) and [Laptop B's spec page](https://laptops.example.com/b).",
             "label": "Laptop A fits you better", "views": [compare]])
 
+        // Declutter: the user's crowded call, generic data. A review with one large picture, and a
+        // weather answer with the whole forecast (hours and seven days).
+        let fullWeather: [String: Any] = [
+            "kind": "weather", "place": "Riverside", "temp": 78, "condition": "Clear", "icon": "sun", "high": 81, "low": 66,
+            "hours": (0..<6).map { i in ["label": ["Now", "1p", "2p", "3p", "4p", "5p"][i], "icon": i < 4 ? "sun" : "cloud.sun",
+                                         "temp": [78, 79, 80, 81, 80, 78][i]] as [String: Any] },
+            "days": zip(["Today", "Sat", "Sun", "Mon", "Tue", "Wed", "Thu"], [(81, 66), (83, 68), (79, 65), (74, 61), (72, 60), (76, 62), (78, 64)])
+                .map { ["label": $0.0, "icon": $0.1.0 > 78 ? "sun" : "cloud.sun", "high": $0.1.0, "low": $0.1.1] as [String: Any] }]
+        let declutterWeather = task("d_wx", job: ("dwx", "Weekend weather forecast"), title: "Weekend weather forecast", age: 300, result: [
+            "spoken": "Clear and 78 now. Saturday is the warmest day at 83; it cools off from Monday.",
+            "full": "Clear and 78° now, topping out at 81° this afternoon. Saturday is the warmest day (83°/68°), Sunday a little cooler. From Monday it drops to the low 70s.",
+            "label": "Warm and clear all weekend", "views": [fullWeather],
+            "shape": ["type": "answer", "headline": "Warm and clear all weekend, 83° on Saturday"]])
+        var eventsJSON: [String: Any] = ["task_id": "d_events", "run_id": "run_d_events", "status": "completed",
+                                         "title": "Weekend events in the city", "updated_at": now.timeIntervalSince1970 - 60,
+                                         "status_source": "authored", "job": ["id": "devents", "name": "Cool events this weekend"],
+                                         "review": ["images": [1], "settled_at": now.timeIntervalSince1970 - 60]]
+        eventsJSON["result"] = ["spoken": "I found six events and saved the listings page for you to look at.",
+                                "full": "Six events this weekend: a night market on Friday, two gallery openings and a jazz brunch on Saturday, and a river walk and a film screening on Sunday.",
+                                "label": "Pictures to look at",
+                                "cards": [["kind": "image", "name": "events-listing.png"]]]
+        let declutterEvents = TaskItem(json: eventsJSON)!
+        let planPlaces: [String: Any] = ["kind": "list", "title": "Saturday plan", "items": [
+            ["text": "Jazz brunch", "detail": "11:00 · Corner Café"], ["text": "Gallery opening", "detail": "15:00 · North Hall"],
+            ["text": "Night market", "detail": "19:00 · Pier 4"]]]
+        let planAgenda: [String: Any] = ["kind": "stats", "title": "Saturday at a glance", "items": [
+            ["label": "Stops", "value": "3"], ["label": "Walking", "value": "2.1 km"],
+            ["label": "Warmest", "value": "83°"], ["label": "Cost", "value": "$45"]]]
+        let declutterPlan = task("d_plan", job: ("dplan", "Saturday plan"), title: "Plan Saturday", age: 120, result: [
+            "spoken": "Here's a plan for Saturday: brunch, a gallery, then the night market.",
+            "full": "Brunch at 11, the gallery opening at 3 and the night market from 7. It stays clear all day, 83° at the warmest.",
+            "label": "Saturday planned", "views": [planPlaces, planAgenda, fullWeather]])
+
         switch name {
+        case "declutter-board", "declutter-weather", "declutter-events":
+            s.exchange = Exchange(you: "What's the weather this weekend?", assistant: "Warm and clear; it's on your board.", replyStarted: true)
+            s.tasks = [declutterWeather, declutterEvents]
+        case "declutter-three":
+            s.exchange = Exchange(you: "Plan Saturday for me.", assistant: "Done, it's on your board.", replyStarted: true)
+            s.tasks = [declutterWeather, declutterEvents, declutterPlan]
+        case "declutter-many":
+            // More jobs than the panel can show at once: the board has to scroll.
+            s.tasks = [declutterWeather, declutterEvents, declutterPlan, answerWeek, answerLaptops, routerTask, indexTask, rollRunning]
+                + nightTasks + rollTasks + relTasks
         case "orb-answers":
             s.tasks = [weather, answerWeather]
         case "jobs-answers", "answer-weather", "answer-nightly", "answer-laptops":
