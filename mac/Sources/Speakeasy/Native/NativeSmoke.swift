@@ -102,9 +102,10 @@ enum PreviewFixtures {
         return rep.representation(using: .png, properties: [:])
     }
 
-    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "looking", "email-draft", "ended", "home", "failed", "busy"]
+    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "looking", "email-draft", "ended", "home", "failed", "busy"] + jobNames
 
     static func state(_ name: String) -> (VoiceState, workExpanded: Bool)? {
+        if let job = jobState(name) { return job }
         let now = Date()
         var s = VoiceState()
         s.now = now

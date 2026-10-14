@@ -98,7 +98,7 @@ private struct GeneralSettings: View {
             }
             Section("Panel") {
                 Toggle("Show the panel when a call starts", isOn: $showPanelOnStart)
-                Toggle("Start calls in slim mode", isOn: $startSlim)
+                Toggle("Start calls folded into the orb", isOn: $startSlim)
                     .help("Just the controls and a one-line task summary; expand any time")
                 Toggle("Show live captions", isOn: $showCaptions)
                     .help("What you and the assistant say, as text in the panel")

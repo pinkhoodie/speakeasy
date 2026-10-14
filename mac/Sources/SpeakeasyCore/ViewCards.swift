@@ -56,7 +56,7 @@ public struct ViewCard: Equatable, Sendable, Identifiable {
         "reminder", "place", "places", "route", "transit", "flight", "package", "contact", "message_draft",
         "message", "inbox", "media", "now_playing", "fact", "entity", "definition", "conversion", "math",
         "translation", "recipe", "nutrition", "comparison", "list", "steps", "stats", "chart", "progress", "news",
-        "home", "thermostat", "camera", "question",
+        "home", "thermostat", "camera", "question", "lanes", "before_after", "flow", "devices",
     ]
 
     public init?(json: Any?, number: Int) {
