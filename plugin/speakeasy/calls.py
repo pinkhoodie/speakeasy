@@ -469,6 +469,10 @@ class Notices:
 # -- the sideband worker ------------------------------------------------------------------------
 
 class SidebandWorker:
+    # Codex's voice protocol delivers every appended note as something to say, so a "don't say
+    # this" note still gets a spoken reply: "Mm-hmm." Quiet notes are held and ride along with the
+    # next message the voice is meant to answer.
+    HOLD_QUIET_NOTES = False
     """Base worker. Subclasses read provider events in ``run()`` and write in ``_send()``."""
 
     def __init__(self, rt: Runtime, interaction: Interaction):
@@ -477,6 +481,7 @@ class SidebandWorker:
         self.fragments: deque[dict[str, Any]] = deque(maxlen=512)
         self.absorbed: list[tuple[str, float]] = []  # words folded into an earlier task by settle()
         self.handoff_at: dict[str, float] = {}   # delegation id -> when the handoff arrived (monotonic)
+        self.quiet_notes: dict[str, str] = {}    # held background notes, newest per kind
         self.show_pending: set[str] = set()      # task keys asked for a screenshot by "show me"
         # Home control: the question just asked (original request, question, when) and answers given
         # on this call, so "the thermostat" means the den until hang-up once they've said so.
@@ -747,6 +752,24 @@ class SidebandWorker:
             text = f"Earlier in this call, before it was paused:\n{before}\n\nAfter resuming:\n{text}"
         return text[-MAX_TRANSCRIPT:]
 
+    async def quiet(self, key: str, delegation_id: str | None, content: str) -> None:
+        """Background the voice should know but never answer out loud (work started, where a task
+        went, status, what's on screen). Held when the transport would make the voice reply to it."""
+        if not self.HOLD_QUIET_NOTES:
+            await self.append("session.thinking.append", delegation_id, content)
+            return
+        self.quiet_notes.pop(key, None)
+        self.quiet_notes[key] = content
+        while len(self.quiet_notes) > 8:
+            self.quiet_notes.pop(next(iter(self.quiet_notes)))
+
+    def take_quiet_notes(self) -> str:
+        notes, self.quiet_notes = list(self.quiet_notes.values()), {}
+        if not notes:
+            return ""
+        return ("Background since you last spoke (context only, never read it out): "
+                + " | ".join(notes))[:1400] + "\n\n"
+
     async def append(self, kind: str, delegation_id: str | None, content: str) -> None:
         """Send context to the live call. After Pause/Resume, results of runs started in an earlier
         call go to the resumed call as session-wide context."""
@@ -756,6 +779,12 @@ class SidebandWorker:
             return
         if delegation_id and delegation_id.startswith(EARLY_PREFIX):
             delegation_id = None  # the provider never issued this handoff: say it session-wide
+        if kind == "session.thinking.append" and self.quiet_notes:
+            held = self.take_quiet_notes()
+            if len(held) + len(content) <= 2000:
+                content = held + content
+            else:
+                await self.append(kind, None, held.strip())
         if target is not self:
             content = "(Update on a task from before the pause.) " + content
             await target.send_on_own_loop(kind, None, content)
@@ -801,10 +830,10 @@ class SidebandWorker:
         if not self.call_connected():
             return
         if task_id is None:
-            await self.append("session.thinking.append", None, P.focus_cleared_note(self.names))
+            await self.quiet("focus", None, P.focus_cleared_note(self.names))
             return
         name = next((t.request for t in self.open_tasks() if t.task_id == task_id), "")
-        await self.append("session.thinking.append", None, P.focus_note(self.names, name, detail))
+        await self.quiet("focus", None, P.focus_note(self.names, name, detail))
 
     def in_room_call(self) -> bool:
         """This call was started by turning listening mode off and still has the room text."""
@@ -896,7 +925,7 @@ class SidebandWorker:
         if line and named:
             await self.append("session.commentary.append", delegation_id, line)
         elif place:
-            await self.append("session.thinking.append", delegation_id, P.where_note(place))
+            await self.quiet("where:" + delegation_id, delegation_id, P.where_note(place))
 
     def record_timing(self, task_id: str, idem: str) -> None:
         ms = self.route_timings.pop(task_id, None)
@@ -911,7 +940,7 @@ class SidebandWorker:
             if last and now - last < STATUS_NOTE_EVERY_S:
                 return
             backend.noted_at = now
-        await self.append("session.thinking.append", backend.say_id, P.status_note(detail))
+        await self.quiet("status:" + str(backend.say_id), backend.say_id, P.status_note(detail))
 
     def record_activity(self, backend: BackendRun, detail: str | None) -> None:
         """Remember what the task is concretely doing, so spoken updates can say it."""
@@ -1646,7 +1675,7 @@ class SidebandWorker:
                       if r.delegation_id != task_id and r.status in ACTIVE_RUN_STATES]
         parallel = [r for r in (notice_text(self.store.request_text(k), 80) for k in others[-4:]) if r]
         if voice_id is None:
-            await self.append("session.thinking.append", delegation_id, P.work_started_note(parallel))
+            await self.quiet("started", delegation_id, P.work_started_note(parallel))
             if deliver_to and not replaces:
                 await self.say_where(delegation_id, ack, place=ack_place, named=named)
             else:
@@ -1729,7 +1758,7 @@ class SidebandWorker:
             self.store.hide_key(idem)
         self.publish()
         if joins is None:
-            await self.append("session.thinking.append", delegation_id, P.continuing_in_note(where))
+            await self.quiet("continuing:" + delegation_id, delegation_id, P.continuing_in_note(where))
             self.handoff_at.pop(delegation_id, None)
         waited = 0
         while joins is not None:  # hold until the first turn is done, then take over its row
@@ -2088,17 +2117,28 @@ class SidebandWorker:
                     self.notices.draft_waiting(draft["draft_id"], draft.get("subject"))
             if status == "completed":
                 spoken = result["spoken"] if result else "Done."
-                for note in P.result_notes(self.store.title(idem) or self.store.request_text(idem),
-                                           result.get("full") if result else None, spoken):
-                    await self.append("session.thinking.append", delegation_id, note)
+                notes = list(P.result_notes(self.store.title(idem) or self.store.request_text(idem),
+                                            result.get("full") if result else None, spoken))
                 # The answer text says "here's the building" either way; tell the voice what the user
                 # can actually see, so it never claims a picture is up when none reached the app.
                 pictures = len(((self.store.work(idem_key=idem) or {}).get("review") or {}).get("images") or [])
-                await self.append("session.thinking.append", delegation_id, P.pictures_note(pictures))
+                notes.append(P.pictures_note(pictures))
                 if stored_drafts:
                     d = stored_drafts[-1]
-                    await self.append("session.thinking.append", delegation_id,
-                                      P.draft_waiting_note(self.names, d.get("subject"), d.get("to") or []))
+                    notes.append(P.draft_waiting_note(self.names, d.get("subject"), d.get("to") or []))
+                if self.HOLD_QUIET_NOTES:
+                    # One message, not several: each appended note can draw its own spoken reply.
+                    packed: list[str] = []
+                    for note in notes:
+                        if packed and len(packed[-1]) + 2 + len(note) <= 1900:
+                            packed[-1] += "\n\n" + note
+                        else:
+                            packed.append(note)
+                    for message in packed:
+                        await self.append("session.thinking.append", delegation_id, message)
+                else:
+                    for note in notes:
+                        await self.append("session.thinking.append", delegation_id, note)
                 self.replied_task = backend.delegation_id
                 asked = notice_text(self.store.request_text(idem), 140) or "an earlier request"
                 moved_on = self.user_spoke_since(time.monotonic() - LATE_RESULT_S) and \

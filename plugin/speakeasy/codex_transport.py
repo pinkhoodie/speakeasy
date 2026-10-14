@@ -281,6 +281,7 @@ class CodexTransport:
 
 class CodexSidebandWorker(SidebandWorker):
     """Reads app-server notifications; only a provider-owned `handoff_request` starts Hermes work."""
+    HOLD_QUIET_NOTES = True
 
     def __init__(self, rt, interaction, transport: CodexTransport):
         super().__init__(rt, interaction)

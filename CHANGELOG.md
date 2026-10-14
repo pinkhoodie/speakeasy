@@ -2,6 +2,10 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.3.1 — Really no more "mm-hmm"
+
+- **No more "mm-hmm" after handing work off, or out of nowhere while something runs.** With ChatGPT voice, the background notes Speakeasy gives the voice (work started, how a task is going, where it went, what's on your screen) were delivered as things to answer, so the voice replied to each one with "Mm-hmm", even when nobody was talking. Those notes now wait and go along with the next thing the voice actually says.
+
 ## Mac 0.3.0 and Plugin 0.3.0 — Your work as jobs, with the facts to decide
 
 - **The orb.** Click the orb (or press Esc) and the panel folds into a small orb; the call keeps going. Its color tells you what's up at a glance: grey when idle, blue while you talk, violet while something runs, a blue dot for a new answer, amber with a count when something needs you, red when something failed. The panel header uses the same orb, and the line next to it says why ("2 need you", "1 new answer").
