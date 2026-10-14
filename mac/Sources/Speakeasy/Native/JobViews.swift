@@ -585,48 +585,66 @@ struct JobDetailView: View {
         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 12)
     }
 
-    /// An answer: its cards first and large, then the sorted report or the text, then sources.
-    /// Nothing to decide here.
+    /// An answer: its cards first and large, then the sorted report or the text, then pictures that
+    /// came along (folded to a one-line row), then sources. Nothing to decide here.
     @ViewBuilder private func answerSections(_ task: TaskItem) -> some View {
         let cards = JobCards.items(job, model: model)
-        if !cards.isEmpty { JobCardStack(job: job, items: cards, model: model) }
+        let pictures = JobCards.pictures(job, model: model)
+        ForEach(JobCards.answerBlocks(job, model: model), id: \.self) { block in
+            switch block {
+            case .cards: JobCardStack(job: job, items: cards, model: model)
+            case .report: answerReport(task, hasCards: !cards.isEmpty).layoutProbe("answer.report")
+            case .pictures:
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(pictures) { PictureRow(job: job, review: $0, model: model) }
+                }
+                .layoutProbe("answer.pictures")
+            case .sources: answerSources(task)
+            case .tasks: answerTasks
+            }
+        }
+    }
+
+    @ViewBuilder private func answerReport(_ task: TaskItem, hasCards: Bool) -> some View {
         if let shape = task.info.result?.shape {
             ReportBoard(shape: shape, full: task.info.result?.full ?? task.info.result?.spoken, showHeadline: false,
                         expanded: model.expandedReports.contains(task.id),
                         toggle: { if model.expandedReports.contains(task.id) { model.expandedReports.remove(task.id) } else { model.expandedReports.insert(task.id) } })
         } else if let text = task.info.result?.full ?? task.info.result?.spoken {
             VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: cards.isEmpty ? "Answer" : "In words")
+                SectionLabel(text: hasCards ? "In words" : "Answer")
                 // Links read as their names here; the addresses are listed under Sources.
                 Text(Self.readable(text)).font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    @ViewBuilder private func answerSources(_ task: TaskItem) -> some View {
         let links = task.info.cards
-        if !links.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: links.count == 1 ? "Source" : "Sources")
-                ForEach(links) { link in
-                    Link(destination: link.url) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "link").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.tertiary)
-                            Text(link.title).font(.system(size: 11.5)).lineLimit(1)
-                            Spacer(minLength: 4)
-                            Text(link.url.host ?? "").font(.system(size: 10.5)).foregroundStyle(.tertiary).lineLimit(1)
-                        }
-                        .foregroundStyle(JobStyle.blueInk)
+        VStack(alignment: .leading, spacing: 4) {
+            SectionLabel(text: links.count == 1 ? "Source" : "Sources")
+            ForEach(links) { link in
+                Link(destination: link.url) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "link").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.tertiary)
+                        Text(link.title).font(.system(size: 11.5)).lineLimit(1)
+                        Spacer(minLength: 4)
+                        Text(link.url.host ?? "").font(.system(size: 10.5)).foregroundStyle(.tertiary).lineLimit(1)
                     }
-                    .help(link.url.absoluteString)
+                    .foregroundStyle(JobStyle.blueInk)
                 }
+                .help(link.url.absoluteString)
             }
         }
-        if job.tasks.count > 1 {
-            VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "In this job")
-                ForEach(job.tasks.reversed()) { t in
-                    HStack(spacing: 6) {
-                        Circle().fill(dot(t)).frame(width: 6, height: 6)
-                        Text(t.name).font(.system(size: 11.5)).lineLimit(1)
-                    }
+    }
+
+    private var answerTasks: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            SectionLabel(text: "In this job")
+            ForEach(job.tasks.reversed()) { t in
+                HStack(spacing: 6) {
+                    Circle().fill(dot(t)).frame(width: 6, height: 6)
+                    Text(t.name).font(.system(size: 11.5)).lineLimit(1)
                 }
             }
         }
@@ -692,6 +710,8 @@ struct JobDetailView: View {
                 }
             }
         }
+        // Pictures that came along with a report: folded under it.
+        ForEach(JobCards.pictures(job, model: model)) { PictureRow(job: job, review: $0, model: model) }
         if job.tasks.count > 1 {
             VStack(alignment: .leading, spacing: 4) {
                 SectionLabel(text: "In this job")
@@ -1028,7 +1048,7 @@ enum JobCards {
     @MainActor static func items(_ job: Job, model: VoicePanelModel) -> [JobCardItem] {
         var out: [JobCardItem] = []
         let ids = Set(job.tasks.map(\.id))
-        for r in model.pinnedReviews.reversed() where ids.contains(r.taskID) {
+        for r in model.pinnedReviews.reversed() where ids.contains(r.taskID) && !isIncidental(r, in: job) {
             out.append(JobCardItem(key: "review:\(r.runID)", icon: "photo.on.rectangle.angled", title: "Ready to review",
                                    summary: r.countLabel, content: .review(r)))
         }
@@ -1045,6 +1065,31 @@ enum JobCards {
                                        content: .view(taskID: t.id, card: v)))
             }
         }
+        return out
+    }
+
+    /// Pictures that came with a finished report (`WorkInfo.reviewIsIncidental`): they fold to a
+    /// one-line row under the report instead of leading the job as something to review.
+    @MainActor static func pictures(_ job: Job, model: VoicePanelModel) -> [ImageReview] {
+        model.pinnedReviews.reversed().filter { isIncidental($0, in: job) }
+    }
+
+    static func isIncidental(_ r: ImageReview, in job: Job) -> Bool {
+        job.tasks.first { $0.id == r.taskID }?.info.reviewIsIncidental ?? false
+    }
+
+    /// What an answer view draws, top to bottom: its cards, the report, pictures that came along,
+    /// sources, the job's other tasks. The report always comes before the pictures.
+    enum AnswerBlock: Hashable { case cards, report, pictures, sources, tasks }
+
+    @MainActor static func answerBlocks(_ job: Job, model: VoicePanelModel) -> [AnswerBlock] {
+        guard let task = job.answerTask else { return [] }
+        var out: [AnswerBlock] = []
+        if !items(job, model: model).isEmpty { out.append(.cards) }
+        if task.info.result?.shape != nil || (task.info.result?.full ?? task.info.result?.spoken) != nil { out.append(.report) }
+        if !pictures(job, model: model).isEmpty { out.append(.pictures) }
+        if !task.info.cards.isEmpty { out.append(.sources) }
+        if job.tasks.count > 1 { out.append(.tasks) }
         return out
     }
 
@@ -1146,5 +1191,46 @@ struct JobCardRow: View {
         .onHover { hover = $0 }
         .help(open ? "Fold this card" : "Open this card")
         .accessibilityLabel("\(item.title)\(item.summary.isEmpty ? "" : ", \(item.summary)"), \(open ? "open" : "folded")")
+    }
+}
+
+/// Pictures that came along with an answer: one folded row ("1 picture ›") under the report; click
+/// to show the capped picture (click that for full size).
+struct PictureRow: View {
+    var job: Job
+    var review: ImageReview
+    @ObservedObject var model: VoicePanelModel
+
+    static func label(_ r: ImageReview) -> String { r.images.count == 1 ? "1 picture" : "\(r.images.count) pictures" }
+
+    var body: some View {
+        let open = model.isPicturesOpen(job: job.id, run: review.runID)
+        VStack(alignment: .leading, spacing: 6) {
+            JobCardRow(item: JobCardItem(key: "pictures:\(review.runID)", icon: "photo", title: Self.label(review),
+                                         summary: review.images.first?.name ?? "", content: .review(review)),
+                       open: open) { model.togglePictures(job: job.id, run: review.runID) }
+            if open {
+                ImageReviewCard(review: review, shownCount: 1, model: model, inJob: true, previewCap: JobCardStack.imageCap,
+                                heading: "Came with the answer")
+            }
+        }
+    }
+}
+
+/// Where a few job-view blocks were last drawn (window coordinates, y down), so the panel smoke can
+/// check the real on-screen order. Written on layout; cheap.
+@MainActor enum LayoutProbe {
+    static var frames: [String: CGRect] = [:]
+}
+
+extension View {
+    func layoutProbe(_ key: String) -> some View {
+        background(GeometryReader { g in
+            let frame = g.frame(in: .global)
+            Color.clear
+                .onAppear { LayoutProbe.frames[key] = frame }
+                .onChange(of: frame) { _, new in LayoutProbe.frames[key] = new }
+                .onDisappear { LayoutProbe.frames[key] = nil }
+        })
     }
 }

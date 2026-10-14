@@ -179,6 +179,47 @@ final class JobBoardTests: XCTestCase {
         XCTAssertNil(JobBoard.jobs([answer("q", result: ["spoken": "Ship?", "views": q])], answered: ["q"]).first?.answerTask)
     }
 
+    func reviewed(_ id: String, result: [String: Any], status: String = "completed") -> TaskItem {
+        var r = result
+        r["cards"] = [["kind": "image", "name": "page.png"]]
+        return TaskItem(json: ["task_id": id, "run_id": "run_\(id)", "status": status, "title": id,
+                               "updated_at": now.timeIntervalSince1970 - 10, "result": r,
+                               "review": ["images": [1], "settled_at": now.timeIntervalSince1970 - 10]])!
+    }
+
+    func testIncidentalPicturesDontMakeAnAnswerNeedYou() {
+        let report = String(repeating: "Saturday: a jazz brunch at eleven and a night market from seven. ", count: 4)
+        let cases: [(TaskItem, Bool)] = [
+            // A finished report brought a picture along: an answer.
+            (reviewed("shape", result: ["spoken": "Six events.", "shape": ["type": "research", "headline": "Six events",
+                                         "sections": [["title": "Saturday", "points": ["Brunch"]]]]]), true),
+            (reviewed("long", result: ["full": report]), true),
+            (reviewed("views", result: ["spoken": "Sunny.", "views": [["kind": "weather", "temp": 22]]]), true),
+            // The picture is the deliverable: still a review.
+            (reviewed("design", result: ["spoken": "The landing page is ready.", "full": "Three takes on the bakery landing page."]), false),
+            (reviewed("bare", result: [:]), false),
+            // A question with a picture still needs you to decide.
+            (reviewed("ask", result: ["full": report, "views": [["kind": "question", "question": "Ship it?", "options": ["Yes", "No"]]]]), false),
+        ]
+        for (t, incidental) in cases {
+            XCTAssertEqual(t.info.reviewImages, [1])
+            XCTAssertEqual(t.info.reviewIsIncidental, incidental, t.id)
+            let job = JobBoard.jobs([t], reviewing: [t.id], now: now).first!
+            XCTAssertEqual(job.stage.needsYou, !incidental, t.id)
+            XCTAssertEqual(job.answerTask != nil, incidental, t.id)
+            if incidental {
+                XCTAssertEqual(JobBoard.sections([job], now: now).newAnswers.map(\.id), [job.id], t.id)
+            } else if t.id != "ask" {
+                XCTAssertEqual(job.stage, .needsYou(.review), t.id)
+            }
+        }
+        // No pictures waiting: nothing incidental (the plain answer path applies).
+        var none = reviewed("none", result: ["full": report])
+        XCTAssertTrue(none.info.reviewIsIncidental)
+        none.info.reviewImages = []
+        XCTAssertFalse(none.info.reviewIsIncidental, "no pictures waiting, nothing incidental")
+    }
+
     func testAnswerHeadlineAndGlance() {
         let shaped = answer("a", result: ["spoken": "One. Two.", "label": "Checked", "shape": ["type": "answer", "headline": "26 of 28 passed"]])
         XCTAssertEqual(JobAnswer.headline(shaped.info), "26 of 28 passed")

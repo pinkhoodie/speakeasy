@@ -286,6 +286,13 @@ public final class VoicePanelModel: ObservableObject {
     public func toggleCard(job: String, key: String, index: Int) {
         cardOpen["\(job)|\(key)"] = !isCardOpen(job: job, key: key, index: index)
     }
+    /// Pictures that came with an answer fold to one row by default ("1 picture ›").
+    public func isPicturesOpen(job: String, run: String) -> Bool {
+        cardOpen["\(job)|pictures:\(run)"] ?? false
+    }
+    public func togglePictures(job: String, run: String) {
+        cardOpen["\(job)|pictures:\(run)"] = !isPicturesOpen(job: job, run: run)
+    }
     /// The mic is open and hearing the user right now.
     public var userTalking: Bool { presentation.mark == .listening && orbLevel > 0.08 }
     public var orbState: OrbState { OrbState.of(jobs: jobs, approvalPending: state.approval != nil, userTalking: userTalking) }

@@ -131,11 +131,12 @@ public struct Job: Equatable, Sendable, Identifiable {
 
     /// The finished task this job answered with: it completed with a result and nothing waits on
     /// the user (no question, approval, draft or review). Information brought back, not a decision.
-    /// Design reviews are pictures the user already looked at in their review card, not answers.
+    /// Design reviews (pictures that are the deliverable) are not answers; pictures that came
+    /// along with a report (`WorkInfo.reviewIsIncidental`) are, and fold under it.
     public var answerTask: TaskItem? {
         let t = newest
         guard stage == .done, t.info.status == "completed", t.info.result != nil, t.info.decision == nil,
-              t.info.pendingDrafts.isEmpty, t.info.reviewImages.isEmpty else { return nil }
+              t.info.pendingDrafts.isEmpty, t.info.reviewImages.isEmpty || t.info.reviewIsIncidental else { return nil }
         return t
     }
 }
@@ -204,7 +205,8 @@ public enum JobBoard {
             var need: Job.Need?
             for t in items.reversed() {
                 if t.info.status == "waiting_for_approval" { need = need ?? .approve; continue }
-                if !t.info.pendingDrafts.isEmpty || reviewing.contains(t.id) { if need != .decide && need != .approve { need = .review }; continue }
+                // Pictures that came with a finished report don't need the user: the job is an answer.
+                if !t.info.pendingDrafts.isEmpty || (reviewing.contains(t.id) && !t.info.reviewIsIncidental) { if need != .decide && need != .approve { need = .review }; continue }
                 if decisionID == nil, isDecisionPending(t, answered: answered, dismissed: dismissed, now: now) {
                     decisionID = t.id
                     if need == nil || need == .review { need = .decide }

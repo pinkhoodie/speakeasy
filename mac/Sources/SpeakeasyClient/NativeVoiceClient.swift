@@ -1222,7 +1222,13 @@ public final class NativeVoiceClient: VoiceCallClient {
             if model.state.tasks.contains(where: { $0.id == show.taskID }) { selectTask(show.taskID) }
         } else if let job = model.jobs.first(where: { j in j.tasks.contains { $0.id == show.taskID } }) {
             // Asked to see it: the review lives in its job's view.
-            if let run = show.runID { model.focusedReviewID = run }
+            if let run = show.runID {
+                model.focusedReviewID = run
+                // Pictures folded under an answer: asked to see them, unfold them.
+                if job.tasks.contains(where: { $0.id == show.taskID && $0.info.reviewIsIncidental }) {
+                    model.cardOpen["\(job.id)|pictures:\(run)"] = true
+                }
+            }
             openJob(job.id)
         } else {
             model.workExpanded = false

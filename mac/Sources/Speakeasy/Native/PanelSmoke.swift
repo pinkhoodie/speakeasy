@@ -354,6 +354,7 @@ enum PanelSmoke {
         await failedTask(c, dir: dir)
         await designReview(c, dir: dir)
         await declutter(c, dir: dir)
+        await incidentalPictures(c, dir: dir)
         await lookingAt(c, dir: dir)
         if let (draft, _) = PreviewFixtures.state("email-draft") {
             c.showPreview(draft, workExpanded: false)
@@ -614,6 +615,68 @@ enum PanelSmoke {
         await settle(0.6)
         check(c.model.pinnedReviews.isEmpty, "design review: Dismiss hides the card")
         check(c.model.state.tasks.first?.info.images.count == 3, "design review: images stay in the task after Dismiss")
+    }
+
+    // MARK: A finished report that brought a picture along is an answer, not a review
+
+    static func incidentalPictures(_ c: NativeVoiceClient, dir: String) async {
+        let savedLoader = c.model.loadProductImage
+        c.model.loadProductImage = { _, n in PreviewFixtures.sampleDesign(variant: n) }
+        let savedSeen = c.model.seenAnswers
+        defer { c.model.loadProductImage = savedLoader; c.model.seenAnswers = savedSeen; c.model.onOpenJob(nil); c.model.cardOpen = [:] }
+        func snap(_ name: String) {
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/\(name).png")); record("snapshot \(dir)/\(name).png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
+        let win = c.panel.window
+        let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+
+        guard PreviewFixtures.showJobFixture("events-board", on: c) else { fail("events: fixture missing"); return }
+        await settle(1.0)
+        let s = c.model.boardSections
+        let job = c.model.jobs.first { $0.id == "job:wevents" }
+        check(c.model.pinnedReviews.contains { $0.taskID == "w_events" }, "events: the server's picture review is there")
+        check(job?.stage == .done && job?.answerTask?.id == "w_events",
+              "events: a finished report with an incidental picture is an answer, not Needs you (got \(String(describing: job?.stage)))")
+        check(!s.needsYou.contains { $0.id == "job:wevents" } && s.newAnswers.map(\.id) == ["job:wevents"],
+              "events: the job sits in New answers, nothing needs you (got \(s.needsYou.map(\.name)) / \(s.newAnswers.map(\.name)))")
+        check(c.model.unreadAnswers == 1 && c.model.orbState.showsAnswerDot(unread: c.model.unreadAnswers)
+              && !c.model.jobs.contains { $0.stage == .needsYou(.review) },
+              "events: blue dot for one new answer, no review waiting")
+        onScreenCheck(win, visible, "events board")
+        snap("events-board")
+
+        guard PreviewFixtures.showJobFixture("answer-events", on: c) else { fail("answer-events: fixture missing"); return }
+        await settle(1.2)
+        guard let open = c.model.selectedJob else { fail("answer-events: no job open"); return }
+        check(open.answerTask != nil && !open.stage.needsYou, "answer-events: the job view is an answer view")
+        let blocks = JobCards.answerBlocks(open, model: c.model)
+        check(blocks.firstIndex(of: .report).map { r in blocks.firstIndex(of: .pictures).map { r < $0 } ?? false } ?? false,
+              "answer-events: the report comes before the pictures (\(blocks))")
+        check(JobCards.items(open, model: c.model).allSatisfy { if case .review = $0.content { return false }; return true },
+              "answer-events: the picture isn't a review card at the top")
+        check(!c.model.isPicturesOpen(job: open.id, run: "run_w_events"), "answer-events: the picture row is folded by default")
+        // On screen: the report's sections are drawn above the folded picture row.
+        // On screen: the report is drawn above the folded picture row (SwiftUI layout, y grows down).
+        let report = LayoutProbe.frames["answer.report"], pictures = LayoutProbe.frames["answer.pictures"]
+        record("answer-events: report at y=\(report.map { Int($0.minY) } ?? -1)–\(report.map { Int($0.maxY) } ?? -1), picture row at y=\(pictures.map { Int($0.minY) } ?? -1), \(pictures.map { Int($0.height) } ?? -1)pt tall")
+        check(report != nil && pictures != nil && report!.maxY <= pictures!.minY + 1,
+              "answer-events: the report renders above the picture row on screen")
+        check((pictures?.height ?? 999) <= 40, "answer-events: the picture row is one folded line, not a big picture")
+        check(JobCards.items(open, model: c.model).isEmpty && !open.stage.needsYou,
+              "answer-events: no 'Waiting for you to look' line or review card (the headline leads)")
+        onScreenCheck(win, visible, "answer-events")
+        snap("answer-events")
+        c.model.togglePictures(job: open.id, run: "run_w_events")
+        await settle(1.0)
+        check(c.model.isPicturesOpen(job: open.id, run: "run_w_events") && (LayoutProbe.frames["answer.pictures"]?.height ?? 0) > 100,
+              "answer-events: unfolding the row shows the capped picture (\(Int(LayoutProbe.frames["answer.pictures"]?.height ?? -1))pt)")
+        onScreenCheck(win, visible, "answer-events open")
+        snap("answer-events-picture")
+    }
+
+    static func onScreenCheck(_ win: NSWindow, _ visible: NSRect, _ label: String) {
+        check(visible.contains(win.frame), "\(label): panel stays on screen")
     }
 
     // MARK: Declutter: cards live in their job, never piled under the board

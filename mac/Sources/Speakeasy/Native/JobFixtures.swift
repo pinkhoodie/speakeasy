@@ -9,7 +9,8 @@ extension PreviewFixtures {
                            "job-rollout", "job-rollout-after",
                            "orb-idle", "orb-talking", "orb-working", "orb-needs", "orb-failed", "orb-answers",
                            "jobs-answers", "answer-weather", "answer-nightly", "answer-laptops",
-                           "declutter-board", "declutter-weather", "declutter-events", "declutter-three", "declutter-many"]
+                           "declutter-board", "declutter-weather", "declutter-events", "declutter-three", "declutter-many",
+                           "events-board", "answer-events"]
 
     /// Answers the fixtures treat as already read (run ids), so only the new ones show as new.
     static let readAnswers = ["run_weather", "run_notes"]
@@ -48,6 +49,9 @@ extension PreviewFixtures {
         case "declutter-events": return JobSetup(open: "job:devents", seen: [])
         case "declutter-three": return JobSetup(open: "job:dplan", seen: [])
         case "declutter-many": return JobSetup(seen: [])
+        // A finished events report that brought one incidental picture along: an answer, not a review.
+        case "events-board": return JobSetup(seen: [])
+        case "answer-events": return JobSetup(open: "job:wevents", seen: [])
         default: return nil
         }
     }
@@ -272,6 +276,24 @@ extension PreviewFixtures {
                                 "label": "Pictures to look at",
                                 "cards": [["kind": "image", "name": "events-listing.png"]]]
         let declutterEvents = TaskItem(json: eventsJSON)!
+        // A finished research report (shape with sections) that also saved one picture of a listings
+        // page: the picture is incidental, the report is the answer.
+        var weekendJSON: [String: Any] = ["task_id": "w_events", "run_id": "run_w_events", "status": "completed",
+                                          "title": "Weekend events", "updated_at": now.timeIntervalSince1970 - 45,
+                                          "status_source": "authored", "job": ["id": "wevents", "name": "Weekend events"],
+                                          "review": ["images": [1], "settled_at": now.timeIntervalSince1970 - 45]]
+        weekendJSON["result"] = [
+            "spoken": "Plenty going on: a night market Friday, a gallery opening and a jazz brunch Saturday, and a river walk Sunday. I'd do the brunch and the night market.",
+            "full": "Here's what's on this weekend.\n\nAll weekend: a riverside art fair, 10:00 to 18:00, free.\n\nSaturday: jazz brunch at the Corner Café at 11:00 ($25); gallery opening at North Hall at 15:00 (free); night market at Pier 4 from 19:00.\n\nSunday: guided river walk at 10:00 (free); outdoor film screening at the park at 20:00.\n\nMy pick: the jazz brunch, then the night market.",
+            "label": "Six events this weekend",
+            "cards": [["kind": "image", "name": "listings-home.png"]],
+            "shape": ["type": "research", "headline": "Six good events this weekend; the jazz brunch and night market stand out",
+                      "sections": [["title": "All weekend", "points": ["Riverside art fair, 10:00–18:00, free"]],
+                                   ["title": "Saturday", "points": ["Jazz brunch, Corner Café, 11:00 ($25)", "Gallery opening, North Hall, 15:00",
+                                                                    "Night market, Pier 4, from 19:00"]],
+                                   ["title": "Sunday", "points": ["Guided river walk, 10:00, free", "Outdoor film screening, 20:00"]]],
+                      "open": ["Brunch tables book up by Friday"]]]
+        let weekendEvents = TaskItem(json: weekendJSON)!
         let planPlaces: [String: Any] = ["kind": "list", "title": "Saturday plan", "items": [
             ["text": "Jazz brunch", "detail": "11:00 · Corner Café"], ["text": "Gallery opening", "detail": "15:00 · North Hall"],
             ["text": "Night market", "detail": "19:00 · Pier 4"]]]
@@ -294,6 +316,9 @@ extension PreviewFixtures {
             // More jobs than the panel can show at once: the board has to scroll.
             s.tasks = [declutterWeather, declutterEvents, declutterPlan, answerWeek, answerLaptops, routerTask, indexTask, rollRunning]
                 + nightTasks + rollTasks + relTasks
+        case "events-board", "answer-events":
+            s.exchange = Exchange(you: "Anything cool going on this weekend?", assistant: "Six good ones; it's on your board.", replyStarted: true)
+            s.tasks = [rollRunning, weekendEvents]
         case "orb-answers":
             s.tasks = [weather, answerWeather]
         case "jobs-answers", "answer-weather", "answer-nightly", "answer-laptops":

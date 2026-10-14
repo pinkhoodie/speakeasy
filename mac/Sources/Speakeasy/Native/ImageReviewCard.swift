@@ -18,6 +18,8 @@ struct ImageReviewCard: View {
     var inJob = false
     /// Tallest the preview gets (job views keep pictures small; click for full size).
     var previewCap: CGFloat? = nil
+    /// The card's heading: pictures that came along with an answer aren't "to review".
+    var heading = "Ready to review"
     @State private var image: NSImage?
     @State private var failed = false
     @Environment(\.colorScheme) private var scheme
@@ -63,7 +65,7 @@ struct ImageReviewCard: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
                 Image(systemName: "photo.on.rectangle.angled").font(.system(size: 11, weight: .semibold)).foregroundStyle(Tokens.blue)
-                Text("Ready to review").font(.system(size: 11.5, weight: .semibold))
+                Text(heading).font(.system(size: 11.5, weight: .semibold))
                 if !inJob {   // in its job's view the job title already says whose it is
                     Text("· \(review.taskName)").font(.system(size: 11.5)).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.tail)
