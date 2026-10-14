@@ -128,6 +128,54 @@ public struct Job: Equatable, Sendable, Identifiable {
     public var decision: Decision? { decisionTask?.info.decision }
     /// The task the job is busy with right now (newest still running).
     public var activeTask: TaskItem? { tasks.last(where: \.isActive) }
+
+    /// The finished task this job answered with: it completed with a result and nothing waits on
+    /// the user (no question, approval, draft or review). Information brought back, not a decision.
+    /// Design reviews are pictures the user already looked at in their review card, not answers.
+    public var answerTask: TaskItem? {
+        let t = newest
+        guard stage == .done, t.info.status == "completed", t.info.result != nil, t.info.decision == nil,
+              t.info.pendingDrafts.isEmpty, t.info.reviewImages.isEmpty else { return nil }
+        return t
+    }
+}
+
+/// How an answer reads on the board: a one-line headline and the card worth a glance.
+public enum JobAnswer {
+    /// The report's headline, else the result's label, else the first sentence of what was said.
+    public static func headline(_ info: WorkInfo) -> String? {
+        if let h = info.result?.shape?.headline.trimmingCharacters(in: .whitespacesAndNewlines), !h.isEmpty { return h }
+        if let l = info.result?.label?.trimmingCharacters(in: .whitespacesAndNewlines), !l.isEmpty { return l }
+        guard let spoken = info.result?.spoken?.trimmingCharacters(in: .whitespacesAndNewlines), !spoken.isEmpty else { return nil }
+        var first = spoken
+        if let r = spoken.range(of: #"[.!?](\s|$)"#, options: .regularExpression) { first = String(spoken[..<r.upperBound]) }
+        first = first.trimmingCharacters(in: .whitespacesAndNewlines)
+        return first.count > 140 ? String(first.prefix(139)) + "…" : first
+    }
+
+    /// Kinds a board tile can draw small, best first.
+    public static let glanceKinds = ["chart", "weather", "quote", "comparison", "stats", "fact", "conversion", "math", "progress"]
+
+    /// The result card the board tile shows small, when one has something to draw.
+    public static func glanceCard(_ info: WorkInfo) -> ViewCard? {
+        let cards = info.views.filter { $0.kind != "question" && hasGlance($0) }
+        return glanceKinds.lazy.compactMap { kind in cards.first { $0.kind == kind } }.first
+    }
+
+    static func hasGlance(_ c: ViewCard) -> Bool {
+        switch c.kind {
+        case "chart": return c["series"].array.first.map { $0["values"].doubles.count >= 2 } ?? false
+        case "weather": return c["temp"].double != nil
+        case "quote": return c["price"].double != nil
+        case "comparison": return c["winner"].string != nil
+        case "stats": return c["items"].array.first?["value"].string != nil
+        case "fact": return c["value"].string != nil
+        case "conversion": return c["to_value"].string != nil
+        case "math": return c["result"].string != nil
+        case "progress": return c["value"].double != nil && (c["total"].double ?? 0) > 0
+        default: return false
+        }
+    }
 }
 
 public enum JobBoard {
@@ -183,14 +231,20 @@ public enum JobBoard {
     public struct Sections: Equatable, Sendable {
         /// Decisions first, then approvals, reviews, and failures.
         public var needsYou: [Job]
+        /// Finished today with information the user hasn't opened yet.
+        public var newAnswers: [Job] = []
         public var running: [Job]
         public var doneToday: [Job]
         /// Board order, for the arrow keys.
-        public var all: [Job] { needsYou + running + doneToday }
+        public var all: [Job] { needsYou + newAnswers + running + doneToday }
         public var isEmpty: Bool { all.isEmpty }
     }
 
-    public static func sections(_ jobs: [Job], now: Date = Date(), calendar: Calendar = .current) -> Sections {
+    /// The id an answer is remembered as seen by (its run, else its task).
+    public static func seenKey(_ task: TaskItem) -> String { task.info.runID ?? task.id }
+
+    /// - seen: run (or task) ids of answers the user opened or whose cards they closed.
+    public static func sections(_ jobs: [Job], seen: Set<String> = [], now: Date = Date(), calendar: Calendar = .current) -> Sections {
         func rank(_ j: Job) -> Int {
             switch j.stage {
             case .needsYou(.decide): return 0
@@ -205,7 +259,12 @@ public enum JobBoard {
         let done = jobs.filter { j in
             j.stage == .done && (j.updated.map { calendar.isDate($0, inSameDayAs: now) } ?? true)
         }
-        return Sections(needsYou: needs, running: running, doneToday: done)
+        let unread = done.filter { j in
+            guard let t = j.answerTask else { return false }
+            return !seen.contains(seenKey(t)) && !seen.contains(t.id)
+        }
+        let unreadIDs = Set(unread.map(\.id))
+        return Sections(needsYou: needs, newAnswers: unread, running: running, doneToday: done.filter { !unreadIDs.contains($0.id) })
     }
 
     /// Plan progress for a running job: (steps done, total), or nil without a plan.
@@ -233,6 +292,12 @@ public enum OrbState: Equatable, Sendable {
         if userTalking { return .talking }
         if jobs.contains(where: { $0.stage == .running }) { return .working }
         return .idle
+    }
+
+    /// The small blue dot for answers waiting to be read. Something that needs the user (amber) or a
+    /// failure (red) wins.
+    public func showsAnswerDot(unread: Int) -> Bool {
+        switch self { case .needsYou, .failed: return false; default: return unread > 0 }
     }
 
     public var badge: Int? {

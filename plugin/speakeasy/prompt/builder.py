@@ -381,6 +381,9 @@ VIEWS_RULE = (
     "items[{name, value, detail, tone, history[]}]}; tone is good, warn, bad, info or neutral. "
     "Use https URLs only (before_after images may be an absolute path of a screenshot you took), never invent images "
     "or numbers, and skip the block when nothing is worth showing. "
+    "Answers count too: when you bring back information with data in it (numbers, a comparison, options to pick from, "
+    "a timeline, a place, the weather, how things are doing), include at least one fitting card built from what you "
+    "found, and make the DONE label the answer itself in 1-5 words (e.g. Saturday is the drier day). "
 )
 
 QUESTION_RULE = (

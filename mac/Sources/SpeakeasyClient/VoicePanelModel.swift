@@ -221,7 +221,48 @@ public final class VoicePanelModel: ObservableObject {
         JobBoard.jobs(state.tasks, answered: Set(answers.keys), dismissed: dismissedViewTasks,
                       reviewing: Set(pinnedReviews.map(\.taskID)), now: state.now)
     }
-    public var boardSections: JobBoard.Sections { JobBoard.sections(jobs, now: state.now) }
+    public var boardSections: JobBoard.Sections {
+        JobBoard.sections(jobs, seen: Set(seenAnswers).union(dismissedViewTasks), now: state.now)
+    }
+    /// Answers the user opened (run ids, oldest first). Kept across launches, like closed cards:
+    /// finished tasks come back with every call, and a read answer must stay read.
+    @Published public var seenAnswers: [String] = VoicePanelModel.loadList(VoicePanelModel.seenAnswersKey) {
+        didSet { UserDefaults.standard.set(Array(seenAnswers.suffix(300)), forKey: VoicePanelModel.seenAnswersKey) }
+    }
+    static let seenAnswersKey = "speakeasy.seenAnswers"
+    /// Opening a job reads its answer: it moves from New answers to Done today.
+    public func markAnswerSeen(_ job: Job) {
+        guard let t = job.answerTask else { return }
+        let key = JobBoard.seenKey(t)
+        if !seenAnswers.contains(key) { seenAnswers.append(key) }
+    }
+    /// Answers finished today that the user hasn't opened.
+    public var unreadAnswers: Int { boardSections.newAnswers.count }
+    /// The orb's calm blue dot: answers to read and nothing more pressing.
+    public var orbAnswerDot: Bool { orbState.showsAnswerDot(unread: unreadAnswers) }
+
+    /// Why the orb has its colour, in a few words, for the header's second line: "1 needs you" next
+    /// to amber, "2 new answers" next to the blue dot, "1 failed" next to red, "2 running" next to
+    /// violet. nil when the orb is calm or listening: the live status shows instead.
+    public var orbReason: (text: String, tone: StatusTone)? {
+        let answers = unreadAnswers == 1 ? "1 new answer" : "\(unreadAnswers) new answers"
+        switch orbState {
+        case .failed(let needs):
+            let failed = jobs.filter { $0.stage == .failed }.count
+            return ("\(max(failed, 1)) failed" + (needs > 0 ? " · \(needs) need\(needs == 1 ? "s" : "") you" : ""), .error)
+        case .needsYou(let n):
+            return ("\(n) need\(n == 1 ? "s" : "") you", .attention)
+        case .working:
+            let running = boardSections.running.count
+            let base = running == 1 ? "1 running" : "\(max(running, 1)) running"
+            return (orbAnswerDot ? base + " · " + answers : base, .plain)
+        case .idle, .talking:
+            return orbAnswerDot ? (answers, .plain) : nil
+        }
+    }
+    /// The header's second line: the orb's reason when it has one, else the live status.
+    public var headerStatus: String { orbReason?.text ?? shownStatus }
+    public var headerTone: StatusTone { orbReason?.tone ?? shownTone }
     public var selectedJob: Job? { selectedJobID.flatMap { id in jobs.first { $0.id == id } } }
     /// The board replaces the task list once there's more than one task, or anything needs you.
     public var showsBoard: Bool {

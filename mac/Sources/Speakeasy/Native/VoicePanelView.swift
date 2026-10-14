@@ -15,8 +15,6 @@ enum Tokens {
     /// Brand palette (matches speakeasyvoice.ai): brass on warm near-black.
     static let brass = Color(red: 0.831, green: 0.635, blue: 0.298)      // #d4a24c
     static let brassLight = Color(red: 0.941, green: 0.784, blue: 0.447) // #f0c872
-    static let brassGlow = Color(red: 1.0, green: 0.89, blue: 0.64)      // #ffe3a3
-    static let brassDeep = Color(red: 0.42, green: 0.29, blue: 0.094)    // #6b4a18
     static let brassInk = Color(red: 0.09, green: 0.067, blue: 0.039)    // #17110a
     static let panelDark = Color(red: 0.086, green: 0.075, blue: 0.059)  // #16130f
     static let amber = Color(red: 0.97, green: 0.745, blue: 0.44)
@@ -35,60 +33,6 @@ struct VisualEffectBackground: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: NSVisualEffectView, context: Context) { view.material = material }
-}
-
-// MARK: - the assistant mark
-
-struct AssistantMark: View {
-    var mark: PillPresentation.Mark
-    /// 0...1: the assistant's voice while it speaks, the user's mic while listening.
-    var level: Double = 0
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        let dim = mark == .muted || mark == .idle
-        let reacting = !reduceMotion && (mark == .speaking || mark == .listening)
-        let lift = reacting ? CGFloat(min(max(level, 0), 1)) : 0
-        ZStack {
-            // Glow grows with the voice.
-            Circle()
-                .fill(Tokens.brassLight.opacity(dim ? 0 : 0.28 + 0.4 * lift))
-                .frame(width: 34, height: 34)
-                .blur(radius: 7 + 7 * lift)
-                .scaleEffect(1 + 0.3 * lift)
-            Group {
-                if mark == .connecting && !reduceMotion {
-                    TimelineView(.animation(minimumInterval: 1 / 30)) { context in
-                        let t = context.date.timeIntervalSinceReferenceDate
-                        orb.scaleEffect(0.92 + 0.06 * CGFloat((sin(t * 3.2) + 1) / 2))
-                    }
-                } else {
-                    orb.scaleEffect(1 + 0.16 * lift)
-                }
-            }
-            .saturation(dim ? 0.2 : 1)
-            .opacity(dim ? 0.6 : 1)
-            if mark == .muted {
-                Image(systemName: "mic.slash.fill")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Tokens.amberInk)
-                    .padding(3)
-                    .background(Circle().fill(Tokens.amber))
-                    .offset(x: 13, y: 13)
-            }
-        }
-        .frame(width: 36, height: 36)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: lift)
-        .accessibilityHidden(true)
-    }
-
-    private var orb: some View {
-        Circle()
-            .fill(RadialGradient(colors: [Tokens.brassGlow, Tokens.brass, Tokens.brassDeep],
-                                 center: UnitPoint(x: 0.35, y: 0.35), startRadius: 1, endRadius: 22))
-            .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
-            .frame(width: 32, height: 32)
-    }
 }
 
 // MARK: - Shimmer status text
@@ -590,16 +534,9 @@ struct VoicePanelView: View {
         HStack(spacing: 8) {
             // The orb: clicking it folds the panel into it (the call keeps running).
             Button(action: { if model.state.connection.isOpen && !model.state.workOnly { model.onToggleSlim() } }) {
-                AssistantMark(mark: p.mark, level: model.orbLevel)
-                    .overlay(alignment: .topTrailing) {
-                        if let n = model.orbState.badge {
-                            Text("\(n)").font(.system(size: 9.5, weight: .bold)).monospacedDigit()
-                                .foregroundStyle(Color(red: 0.6, green: 0.36, blue: 0.05))
-                                .padding(.horizontal, 4).frame(minWidth: 15, minHeight: 15)
-                                .background(Capsule().fill(Color.white))
-                                .offset(x: 4, y: -3)
-                        }
-                    }
+                // The same orb as the folded panel: one colour language for the whole call.
+                JobOrb(state: model.orbState, size: 28, level: model.orbLevel, mark: p.mark, unreadAnswers: model.unreadAnswers,
+                       placement: "header")
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
@@ -612,18 +549,30 @@ struct VoicePanelView: View {
                     .help(p.primary)
                     .contentTransition(.opacity)
                 Button(action: { if p.statusClickable || model.showsSlim { model.onToggleWork() } }) {
-                    StatusText(text: model.shownStatus, tone: model.shownTone, clickable: p.statusClickable || model.showsSlim,
-                               maxLines: 2)
-                        .id(model.shownStatus)
+                    Group {
+                        if model.orbAnswerDot && model.orbState != .working, model.orbReason != nil {
+                            // New answers read in the orb dot's calm blue.
+                            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                                Text(model.headerStatus).font(.system(size: 11.5, weight: .medium)).foregroundStyle(JobOrb.answerBlue).lineLimit(1)
+                                if p.statusClickable || model.showsSlim {
+                                    Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(.secondary)
+                                }
+                            }
+                        } else {
+                            StatusText(text: model.headerStatus, tone: model.headerTone, clickable: p.statusClickable || model.showsSlim,
+                                       maxLines: 2)
+                        }
+                    }
+                        .id(model.headerStatus)
                         .transition(.opacity)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!(p.statusClickable || model.showsSlim))
-                .help(p.statusClickable || model.showsSlim ? "\(model.shownStatus)\nShow tasks" : model.shownStatus)
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: model.shownStatus)
-                .accessibilityLabel(model.shownStatus)
+                .help(p.statusClickable || model.showsSlim ? "\(model.headerStatus)\nShow tasks" : model.headerStatus)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: model.headerStatus)
+                .accessibilityLabel(model.headerStatus)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)

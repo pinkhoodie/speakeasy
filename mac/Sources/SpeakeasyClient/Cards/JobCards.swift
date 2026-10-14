@@ -225,3 +225,106 @@ struct DevicesCard: View {
         .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(0.06)))
     }
 }
+
+// MARK: - Answer glance
+
+/// A result card drawn small for a board tile: the weather's temperature, a chart's bars, a
+/// comparison's winner, the first stat. Only values from the card; nothing when there's nothing to draw.
+public struct AnswerGlance: View {
+    let card: ViewCard
+    public init(_ card: ViewCard) { self.card = card }
+
+    public var body: some View {
+        Group {
+            switch card.kind {
+            case "weather":
+                HStack(spacing: 5) {
+                    Image(systemName: weatherSymbol(card["icon"].string)).symbolRenderingMode(.multicolor).font(.system(size: 16))
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(ViewCard.degrees(card["temp"].double)).font(.system(size: 17, weight: .medium).monospacedDigit())
+                        if let c = card["condition"].string { Text(c.capitalized).font(.system(size: 9.5)).foregroundStyle(.secondary).lineLimit(1) }
+                    }
+                }
+            case "chart":
+                MiniBars(values: Array((card["series"].array.first?["values"].doubles ?? []).suffix(14)),
+                         line: card["style"].string == "line")
+                    .frame(width: 76, height: 28)
+            case "quote":
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text(card["price"].double.map { ViewCard.money($0, currency: card["currency"].string) } ?? "")
+                        .font(.system(size: 14, weight: .semibold).monospacedDigit()).lineLimit(1)
+                    if let c = card["change_pct"].double {
+                        Text(ViewCard.signed(c)).font(.system(size: 10, weight: .medium).monospacedDigit())
+                            .foregroundStyle(c >= 0 ? toneColor("good") : toneColor("bad"))
+                    }
+                }
+            case "comparison":
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.seal.fill").font(.system(size: 11)).foregroundStyle(toneColor("good"))
+                    Text(card["winner"].string ?? "").font(.system(size: 11.5, weight: .semibold)).lineLimit(1)
+                        .truncationMode(.tail).frame(maxWidth: 96, alignment: .leading)
+                }
+            case "stats":
+                let item = card["items"].array.first ?? .null
+                value(item["value"].string ?? "", item["label"].string, tone: item["good"].bool.map { $0 ? "good" : "warn" })
+            case "fact":
+                value([card["value"].string, card["unit"].string].compactMap { $0 }.joined(separator: " "), card["title"].string)
+            case "conversion":
+                value([card["to_value"].string, card["to_unit"].string].compactMap { $0 }.joined(separator: " "), nil)
+            case "math":
+                value(card["result"].string ?? "", nil)
+            case "progress":
+                let v = card["value"].double ?? 0, total = max(card["total"].double ?? 1, 1)
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text("\(JSONValue.number(v).string ?? "") of \(JSONValue.number(total).string ?? "")").font(.system(size: 12, weight: .semibold).monospacedDigit())
+                    Capsule().fill(Color.primary.opacity(0.12)).frame(width: 64, height: 4)
+                        .overlay(alignment: .leading) { Capsule().fill(toneColor("info")).frame(width: 64 * min(max(v / total, 0), 1), height: 4) }
+                }
+            default: EmptyView()
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(card.summary)
+    }
+
+    private func value(_ v: String, _ label: String?, tone: String? = nil) -> some View {
+        VStack(alignment: .trailing, spacing: 0) {
+            Text(v).font(.system(size: 16, weight: .semibold).monospacedDigit()).lineLimit(1).minimumScaleFactor(0.6)
+                .frame(maxWidth: 96, alignment: .trailing)
+                .foregroundStyle(tone.map { toneColor($0) } ?? Color.primary)
+            if let label { Text(label).font(.system(size: 9.5)).foregroundStyle(.secondary).lineLimit(1).frame(maxWidth: 96, alignment: .trailing) }
+        }
+    }
+}
+
+/// Tiny bars (or a sparkline) from a chart's first series. Heights are the data, scaled to the tallest.
+struct MiniBars: View {
+    var values: [Double]
+    var line = false
+    var body: some View {
+        let top = max(values.max() ?? 1, 0.0001)
+        GeometryReader { geo in
+            if line {
+                Path { p in
+                    for (i, v) in values.enumerated() {
+                        let pt = CGPoint(x: geo.size.width * CGFloat(i) / CGFloat(max(values.count - 1, 1)),
+                                         y: geo.size.height * (1 - CGFloat(max(v, 0) / top)))
+                        if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+                    }
+                }
+                .stroke(toneColor("info"), style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+            } else {
+                HStack(alignment: .bottom, spacing: 2) {
+                    ForEach(Array(values.enumerated()), id: \.offset) { i, v in
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(toneColor("info").opacity(i == values.count - 1 ? 1 : 0.6))
+                            .frame(height: max(2, geo.size.height * CGFloat(max(v, 0) / top)))
+                    }
+                }
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}

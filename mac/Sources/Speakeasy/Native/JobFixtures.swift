@@ -7,7 +7,11 @@ import SpeakeasyClient
 extension PreviewFixtures {
     static let jobNames = ["jobs-board", "job-release", "job-release-after", "job-nightly", "job-nightly-after",
                            "job-rollout", "job-rollout-after",
-                           "orb-idle", "orb-talking", "orb-working", "orb-needs", "orb-failed"]
+                           "orb-idle", "orb-talking", "orb-working", "orb-needs", "orb-failed", "orb-answers",
+                           "jobs-answers", "answer-weather", "answer-nightly", "answer-laptops"]
+
+    /// Answers the fixtures treat as already read (run ids), so only the new ones show as new.
+    static let readAnswers = ["run_weather", "run_notes"]
 
     /// Task ids whose question the fixtures answer in the "-after" states.
     static let jobQuestionTasks = ["rel_q", "night_q", "roll_q", "router_q"]
@@ -19,6 +23,7 @@ extension PreviewFixtures {
         var answers: [String: String] = [:]
         var orb = false
         var level: Double = 0
+        var seen: [String] = PreviewFixtures.readAnswers
     }
 
     static func jobSetup(_ name: String) -> JobSetup? {
@@ -30,7 +35,11 @@ extension PreviewFixtures {
         case "job-nightly-after": return JobSetup(open: "job:night", answers: ["night_q": "Keep both fixes"])
         case "job-rollout": return JobSetup(open: "job:roll")
         case "job-rollout-after": return JobSetup(open: "job:roll", answers: ["roll_q": "Update the last two now"])
-        case "orb-idle", "orb-working", "orb-needs", "orb-failed": return JobSetup(orb: true)
+        case "orb-idle", "orb-working", "orb-needs", "orb-failed", "orb-answers": return JobSetup(orb: true)
+        case "jobs-answers": return JobSetup()
+        case "answer-weather": return JobSetup(open: "job:wx")
+        case "answer-nightly": return JobSetup(open: "job:week")
+        case "answer-laptops": return JobSetup(open: "job:laptops")
         case "orb-talking": return JobSetup(orb: true, level: 0.6)
         default: return nil
         }
@@ -43,6 +52,7 @@ extension PreviewFixtures {
         for id in jobQuestionTasks { c.model.answers[id] = nil; c.model.dismissedViewTasks.remove(id) }
         for (id, text) in setup.answers { c.model.answers[id] = text }
         c.model.expandedReports = []
+        c.model.seenAnswers = setup.seen
         c.model.slim = setup.orb
         c.showPreview(state, workExpanded: false)
         c.model.orbLevel = setup.level
@@ -199,7 +209,46 @@ extension PreviewFixtures {
                                short: "Running the link checker", plan: ["Pull changes", "Rebuild pages", "Check links", "Publish preview", "Report"],
                                milestones: ["Pulled changes", "Pages rebuilt"])
 
+        // Answers: information brought back, nothing to decide.
+        let wxCard: [String: Any] = ["kind": "weather", "place": "Riverside", "temp": 22, "condition": "Sunny", "icon": "sun",
+                                     "high": 23, "low": 14, "days": [
+                                        ["label": "Sat", "icon": "sun", "high": 23, "low": 14],
+                                        ["label": "Sun", "icon": "rain", "high": 17, "low": 12, "rain": 80]]]
+        let answerWeather = task("ans_wx", job: ("wx", "Weekend weather"), title: "Weekend weather", age: 420, result: [
+            "spoken": "Saturday is the better day: sunny and 22 degrees. Sunday turns to rain after noon.",
+            "full": "Saturday is the better day: sunny, 22° with a light breeze, 14° overnight. Sunday clouds over in the morning and rain is likely after noon (80%), with a high of 17°.\n\nForecast from [the weather service](https://weather.example.com/riverside).",
+            "label": "Saturday is the drier day", "views": [wxCard]])
+        let weekStats: [String: Any] = ["kind": "stats", "title": "This week", "items": [
+            ["label": "Runs", "value": "28"], ["label": "Passed", "value": "26", "good": true],
+            ["label": "Failed", "value": "2", "good": false], ["label": "Avg time", "value": "14 min"]]]
+        let weekChart: [String: Any] = ["kind": "chart", "title": "Runs per night", "style": "bar",
+                                        "labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                                        "series": [["name": "Runs", "values": [4, 4, 4, 3, 4, 5, 4]]]]
+        let answerWeek = task("ans_week", job: ("week", "Nightly jobs this week"), title: "How did the nightly jobs do this week",
+                              age: 900, result: [
+            "spoken": "26 of 28 nightly runs passed this week. The two failures were a timeout and a lock, both rerun fine.",
+            "full": "26 of 28 nightly runs passed this week. Thursday's backup timed out once and Saturday's report job hit a lock; both reran fine the same night. Average run time was 14 minutes.",
+            "label": "Nightly jobs checked", "views": [weekStats, weekChart],
+            "shape": ["type": "answer", "headline": "26 of 28 nightly runs passed this week",
+                      "sections": [["title": "The two failures", "points": ["Thursday: the backup timed out once, rerun passed",
+                                                                            "Saturday: the report job hit a lock, rerun passed"]]]]])
+        let compare: [String: Any] = ["kind": "comparison", "title": "Laptop A vs Laptop B", "columns": ["Laptop A", "Laptop B"],
+                                      "rows": [["label": "Price", "values": ["$1,299", "$1,099"]],
+                                               ["label": "Weight", "values": ["1.2 kg", "1.6 kg"]],
+                                               ["label": "Battery", "values": ["18 h", "12 h"]],
+                                               ["label": "Screen", "values": ["13.6 in", "14.2 in"]]],
+                                      "winner": "Laptop A"]
+        let answerLaptops = task("ans_laptops", job: ("laptops", "Two laptops compared"), title: "Compare the two laptops", age: 200, result: [
+            "spoken": "Laptop A is the better fit: lighter, with six more hours of battery, for 200 dollars more.",
+            "full": "Laptop A is the better fit for carrying around: 1.2 kg against 1.6 kg and about 18 hours of battery against 12. Laptop B costs $200 less and has a slightly bigger screen.\n\nSpecs from [Laptop A's spec page](https://laptops.example.com/a) and [Laptop B's spec page](https://laptops.example.com/b).",
+            "label": "Laptop A fits you better", "views": [compare]])
+
         switch name {
+        case "orb-answers":
+            s.tasks = [weather, answerWeather]
+        case "jobs-answers", "answer-weather", "answer-nightly", "answer-laptops":
+            s.exchange = Exchange(you: "How did the nightly jobs do?", assistant: "26 of 28 passed. It's on your board.", replyStarted: true)
+            s.tasks = [notes, routerTask, answerWeek, indexTask, answerWeather, answerLaptops, rollRunning]
         case "orb-idle":
             s.tasks = [weather]
         case "orb-talking":
@@ -208,7 +257,7 @@ extension PreviewFixtures {
         case "orb-working":
             s.tasks = [weather, rollRunning]
         case "orb-needs":
-            s.tasks = [weather, rollRunning, routerTask] + relTasks
+            s.tasks = [weather, rollRunning, routerTask] + relTasks + [answerWeather]
         case "orb-failed":
             s.tasks = [weather, task("sync_fail", job: ("sync", "Photo sync"), title: "Sync the photos", status: "failed", age: 60,
                                      failure: "The photo library was locked by another app.")]

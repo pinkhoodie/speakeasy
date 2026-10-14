@@ -411,17 +411,41 @@ enum PanelSmoke {
             do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/\(name).png")); record("snapshot \(dir)/\(name).png") }
             catch { fail("snapshot failed: \(error)") }
         }
-        // Orb states.
-        let expected: [(String, OrbState)] = [("orb-idle", .idle), ("orb-talking", .talking), ("orb-working", .working),
-                                              ("orb-needs", .needsYou(2)), ("orb-failed", .failed(needs: 0))]
-        for (name, state) in expected {
+        let savedSeen = c.model.seenAnswers
+        // Orb states. The header orb of the open panel must draw the same state as the folded orb.
+        let expected: [(String, OrbState, Bool)] = [("orb-idle", .idle, false), ("orb-talking", .talking, false),
+                                                    ("orb-working", .working, false), ("orb-needs", .needsYou(2), false),
+                                                    ("orb-failed", .failed(needs: 0), false), ("orb-answers", .idle, true)]
+        for (name, state, dot) in expected {
+            JobOrb.drawn = [:]
             guard PreviewFixtures.showJobFixture(name, on: c) else { fail("\(name): fixture missing"); continue }
             await settle(0.9)
             check(c.model.showsSlim, "\(name): folded into the orb")
             check(c.model.orbState == state, "\(name): orb shows \(state) (got \(c.model.orbState))")
+            check(c.model.orbAnswerDot == dot, "\(name): answer dot \(dot ? "shown" : "hidden") (unread \(c.model.unreadAnswers))")
             check(c.panel.window.frame.width <= VoicePanelModel.orbWidth + 1, "\(name): the orb panel is small (\(Int(c.panel.window.frame.width))pt)")
+            let folded = JobOrb.drawn["folded"]
+            check(folded == JobOrb.Drawn(state: state, answerDot: dot), "\(name): the folded orb draws \(state) (got \(String(describing: folded)))")
             onScreen(name)
             snap(name)
+            // Unfold: the header orb is the same orb, same state.
+            JobOrb.drawn["header"] = nil
+            c.model.slim = false
+            await settle(0.7)
+            check(!c.model.showsSlim, "\(name): unfolded")
+            check(c.model.orbState == state, "\(name): header orb state equals the folded orb (got \(c.model.orbState))")
+            let header = JobOrb.drawn["header"]
+            check(header == folded, "\(name): the header orb draws what the folded orb drew (got \(String(describing: header)))")
+            let reason = c.model.orbReason?.text
+            let want: String? = ["orb-needs": "2 need you", "orb-failed": "1 failed", "orb-working": "1 running",
+                                 "orb-answers": "1 new answer"][name]
+            check(reason == want, "\(name): the header says why the orb looks like that (got \(reason ?? "the live status"))")
+            snap("header-" + name)
+        }
+        if PreviewFixtures.showJobFixture("orb-needs", on: c) {
+            await settle(0.4)
+            check(c.model.unreadAnswers > 0 && !c.model.orbAnswerDot && c.model.orbState.badge == 2,
+                  "orb-needs: amber wins over an unread answer")
         }
         // Board.
         guard PreviewFixtures.showJobFixture("jobs-board", on: c) else { fail("board: fixture missing"); return }
@@ -477,6 +501,40 @@ enum PanelSmoke {
             onScreen(name)
             snap(name)
         }
+        // New answers: their own section between Needs you and Running; opening one reads it.
+        if PreviewFixtures.showJobFixture("jobs-answers", on: c) {
+            await settle(1.0)
+            let s = c.model.boardSections
+            check(s.newAnswers.map(\.name) == ["Two laptops compared", "Weekend weather", "Nightly jobs this week"],
+                  "answers: the section lists the unread answers (got \(s.newAnswers.map(\.name)))")
+            check(s.needsYou.map(\.name) == ["Router setting"] && s.running.count == 2, "answers: needs you and running stay put")
+            check(s.all.map(\.id).firstIndex(of: s.newAnswers[0].id) == 1, "answers: between Needs you and Running")
+            check(s.doneToday.map(\.name) == ["Meeting notes"], "answers: read work stays in Done today")
+            check(c.model.orbState == .needsYou(1) && !c.model.orbAnswerDot, "answers: amber still wins on the orb")
+            onScreen("jobs-answers")
+            snap("jobs-answers")
+            let wx = s.newAnswers.first { $0.name == "Weekend weather" }!
+            c.model.onOpenJob(wx.id)
+            await settle(0.6)
+            check(c.model.seenAnswers.contains("run_ans_wx"), "answers: opening marks it seen")
+            c.model.onOpenJob(nil)
+            await settle(0.5)
+            let after = c.model.boardSections
+            check(!after.newAnswers.contains { $0.id == wx.id } && after.doneToday.contains { $0.id == wx.id },
+                  "answers: a read answer drops to Done today")
+            check(UserDefaults.standard.stringArray(forKey: "speakeasy.seenAnswers")?.contains("run_ans_wx") == true,
+                  "answers: seen answers are remembered")
+        } else { fail("jobs-answers: fixture missing") }
+        for name in ["answer-weather", "answer-nightly", "answer-laptops"] {
+            guard PreviewFixtures.showJobFixture(name, on: c) else { fail("\(name): fixture missing"); continue }
+            await settle(1.0)
+            guard let job = c.model.selectedJob else { fail("\(name): no job open"); continue }
+            check(job.answerTask != nil && job.decision == nil, "\(name): an answer, nothing to decide")
+            check(c.focusedTaskID == job.newest.id, "\(name): talking to the answer's job")
+            onScreen(name)
+            snap(name)
+        }
+        c.model.seenAnswers = savedSeen
         c.model.slim = false
         c.model.onOpenJob(nil)
         for id in PreviewFixtures.jobQuestionTasks { c.model.answers[id] = nil }

@@ -154,4 +154,48 @@ final class JobBoardTests: XCTestCase {
         XCTAssertEqual(OrbState.of(jobs: JobBoard.jobs([task("f", "failed"), task("q", views: q)]), userTalking: false), .failed(needs: 1))
         XCTAssertNil(OrbState.failed(needs: 0).badge)
     }
+
+    // MARK: Answers
+
+    func answer(_ id: String, result: [String: Any], age: TimeInterval = 10) -> TaskItem {
+        TaskItem(json: ["task_id": id, "run_id": "run_\(id)", "status": "completed", "title": id,
+                        "updated_at": now.timeIntervalSince1970 - age, "result": result])!
+    }
+
+    func testUnreadAnswersGetTheirOwnSectionUntilSeen() {
+        let q: [[String: Any]] = [["kind": "question", "question": "Ship it?", "options": ["Yes", "No"]]]
+        let wx = answer("wx", result: ["spoken": "Sunny.", "views": [["kind": "weather", "temp": 22, "condition": "Sunny"]]])
+        let tasks = [task("ask", views: q), wx, task("run", "working"), answer("old", result: ["spoken": "Hi."], age: 3 * 86400)]
+        let jobs = JobBoard.jobs(tasks)
+        var s = JobBoard.sections(jobs, now: now)
+        XCTAssertEqual(s.needsYou.map(\.newest.id), ["ask"])
+        XCTAssertEqual(s.newAnswers.map(\.newest.id), ["wx"])
+        XCTAssertEqual(s.all.map(\.newest.id), ["ask", "wx", "run"], "answers sit between Needs you and Running; yesterday's drop off")
+        XCTAssertTrue(s.doneToday.isEmpty)
+        s = JobBoard.sections(jobs, seen: ["run_wx"], now: now)
+        XCTAssertTrue(s.newAnswers.isEmpty)
+        XCTAssertEqual(s.doneToday.map(\.newest.id), ["wx"], "a read answer is a Done today chip")
+        // A question is a decision, not an answer.
+        XCTAssertNil(JobBoard.jobs([answer("q", result: ["spoken": "Ship?", "views": q])], answered: ["q"]).first?.answerTask)
+    }
+
+    func testAnswerHeadlineAndGlance() {
+        let shaped = answer("a", result: ["spoken": "One. Two.", "label": "Checked", "shape": ["type": "answer", "headline": "26 of 28 passed"]])
+        XCTAssertEqual(JobAnswer.headline(shaped.info), "26 of 28 passed")
+        XCTAssertEqual(JobAnswer.headline(answer("b", result: ["spoken": "One. Two.", "label": "Saturday is drier"]).info), "Saturday is drier")
+        XCTAssertEqual(JobAnswer.headline(answer("c", result: ["spoken": "Sunny all day. Rain later."]).info), "Sunny all day.")
+        let views: [[String: Any]] = [["kind": "stats", "items": [["label": "Runs", "value": "28"]]],
+                                      ["kind": "chart", "series": [["name": "Runs", "values": [4, 3, 5]]]],
+                                      ["kind": "list", "items": [["text": "x"]]]]
+        XCTAssertEqual(JobAnswer.glanceCard(answer("d", result: ["spoken": "x", "views": views]).info)?.kind, "chart")
+        XCTAssertNil(JobAnswer.glanceCard(answer("e", result: ["spoken": "x", "views": [views[2]]]).info), "no glance without a drawable value")
+    }
+
+    func testAnswerDotYieldsToNeedsYou() {
+        XCTAssertTrue(OrbState.idle.showsAnswerDot(unread: 1))
+        XCTAssertTrue(OrbState.working.showsAnswerDot(unread: 2))
+        XCTAssertFalse(OrbState.idle.showsAnswerDot(unread: 0))
+        XCTAssertFalse(OrbState.needsYou(1).showsAnswerDot(unread: 3))
+        XCTAssertFalse(OrbState.failed(needs: 0).showsAnswerDot(unread: 3))
+    }
 }

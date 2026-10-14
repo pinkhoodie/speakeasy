@@ -102,14 +102,23 @@ struct WrapLayout: Layout {
 
 // MARK: - The orb
 
+/// The one orb of a call: the folded panel, the panel header, the board and the job view all draw
+/// this, so a colour means the same everywhere. Grey idle, blue the user talking, violet working,
+/// amber something needs you (with a count), red a failure; a calm blue dot marks unread answers.
 struct JobOrb: View {
     var state: OrbState
     var size: CGFloat = 40
-    /// 0...1 mic level while the user talks.
+    /// 0...1: the user's mic while they talk, the assistant's voice while it speaks.
     var level: Double = 0
+    /// What the call is doing (speaking moves the orb a little, muted dims it). nil = no call detail.
+    var mark: PillPresentation.Mark? = nil
+    /// Answers finished and not opened yet: a small blue dot when nothing more pressing shows.
+    var unreadAnswers: Int = 0
+    /// Where this orb sits ("folded", "header"); the smoke test reads what each one drew.
+    var placement = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var colors: [Color] {
+    static func colors(_ state: OrbState) -> [Color] {
         switch state {
         case .idle: return [Color(red: 0.86, green: 0.87, blue: 0.91), Color(red: 0.52, green: 0.55, blue: 0.64), Color(red: 0.28, green: 0.30, blue: 0.37)]
         case .talking: return [Color(red: 0.86, green: 0.94, blue: 1.0), Color(red: 0.36, green: 0.62, blue: 1.0), Color(red: 0.12, green: 0.31, blue: 0.70)]
@@ -118,6 +127,11 @@ struct JobOrb: View {
         case .failed: return [Color(red: 1.0, green: 0.74, blue: 0.68), Color(red: 0.90, green: 0.34, blue: 0.29), Color(red: 0.54, green: 0.12, blue: 0.09)]
         }
     }
+    static let answerBlue = Color(red: 0.37, green: 0.61, blue: 0.94)
+
+    private var dim: Bool { mark == .muted || mark == .idle }
+    private var answerDot: Bool { state.showsAnswerDot(unread: unreadAnswers) }
+    private var voice: CGFloat { CGFloat(min(max(level, 0), 1)) }
 
     var body: some View {
         Group {
@@ -129,36 +143,73 @@ struct JobOrb: View {
                     TimelineView(.animation(minimumInterval: 1 / 30)) { ctx in
                         let t = ctx.date.timeIntervalSinceReferenceDate
                         let breath = (sin(t * 2.4) + 1) / 2
-                        orb(scale: 1 + 0.05 * breath + 0.08 * min(max(level, 0), 1), glow: 0.45 + 0.35 * breath)
+                        orb(scale: 1 + 0.05 * breath + 0.08 * voice, glow: 0.45 + 0.35 * breath)
+                    }
+                case _ where mark == .connecting:
+                    TimelineView(.animation(minimumInterval: 1 / 30)) { ctx in
+                        let t = ctx.date.timeIntervalSinceReferenceDate
+                        orb(scale: 0.92 + 0.06 * CGFloat((sin(t * 3.2) + 1) / 2), glow: 0.3)
                     }
                 case .working:
-                    // Soft pulse of the glow only; the orb keeps its size.
+                    // Soft pulse of the glow only; the orb keeps its size (it still lifts a little with the voice).
                     TimelineView(.animation(minimumInterval: 1 / 20)) { ctx in
                         let t = ctx.date.timeIntervalSinceReferenceDate
-                        orb(scale: 1, glow: 0.25 + 0.4 * (sin(t * 1.6) + 1) / 2)
+                        orb(scale: 1 + speakingLift, glow: 0.25 + 0.4 * (sin(t * 1.6) + 1) / 2)
                     }
                 default:
-                    orb(scale: 1, glow: state == .idle ? 0.1 : 0.55)
+                    // The assistant speaking moves the orb a little, in whatever colour it is.
+                    orb(scale: 1 + speakingLift, glow: (state == .idle ? 0.1 : 0.55) + 0.4 * Double(speakingLift * 8))
+                        .animation(.easeOut(duration: 0.12), value: speakingLift)
                 }
             }
         }
+        .saturation(dim ? 0.25 : 1)
+        .opacity(dim ? 0.7 : 1)
         .frame(width: size + 8, height: size + 8)
         .overlay(alignment: .topTrailing) {
-            if let n = state.badge {
-                Text("\(n)").font(.system(size: 10, weight: .bold)).monospacedDigit()
+            if case .needsYou(let n) = state {
+                // The count shows only when something needs you.
+                Text("\(n)").font(.system(size: size < 34 ? 9.5 : 10, weight: .bold)).monospacedDigit()
                     .foregroundStyle(Color(red: 0.6, green: 0.36, blue: 0.05))
-                    .padding(.horizontal, 5).frame(minWidth: 16, minHeight: 16)
+                    .padding(.horizontal, 4).frame(minWidth: 15, minHeight: 15)
                     .background(Capsule().fill(Color.white))
                     .offset(x: 1, y: -1)
+            } else if answerDot {
+                Circle().fill(Self.answerBlue).frame(width: 9, height: 9)
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.85), lineWidth: 1.2))
+                    .offset(x: -2, y: 2)
+                    .accessibilityHidden(true)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if mark == .muted {
+                Image(systemName: "mic.slash.fill").font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Tokens.amberInk).padding(3)
+                    .background(Circle().fill(Tokens.amber))
+                    .offset(x: -1, y: -1)
             }
         }
         .accessibilityElement()
-        .accessibilityLabel(state.label)
+        .accessibilityLabel(accessibilityText)
+        .onAppear { Self.drawn[placement] = Drawn(state: state, answerDot: answerDot) }
+        .onChange(of: Drawn(state: state, answerDot: answerDot)) { _, now in Self.drawn[placement] = now }
+    }
+
+    struct Drawn: Equatable { var state: OrbState; var answerDot: Bool }
+    /// What each placed orb last drew (panel smoke checks the header and the folded orb agree).
+    @MainActor static var drawn: [String: Drawn] = [:]
+
+    private var speakingLift: CGFloat { !reduceMotion && mark == .speaking ? 0.1 * voice : 0 }
+
+    private var accessibilityText: String {
+        guard answerDot else { return state.label }
+        return state.label + (unreadAnswers == 1 ? ", 1 new answer" : ", \(unreadAnswers) new answers")
     }
 
     private func orb(scale: CGFloat, glow: Double) -> some View {
-        ZStack {
-            Circle().fill(colors[1].opacity(glow)).frame(width: size, height: size).blur(radius: size * 0.22)
+        let colors = Self.colors(state)
+        return ZStack {
+            Circle().fill(colors[1].opacity(min(glow, 0.95))).frame(width: size, height: size).blur(radius: size * 0.22)
             Circle()
                 .fill(RadialGradient(colors: colors, center: UnitPoint(x: 0.35, y: 0.3), startRadius: 1, endRadius: size * 0.62))
                 .overlay(Circle().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
@@ -175,7 +226,8 @@ struct OrbBar: View {
         let p = model.presentation
         HStack(spacing: 6) {
             Button(action: model.onToggleSlim) {
-                JobOrb(state: model.orbState, size: 36, level: model.orbLevel).contentShape(Circle())
+                JobOrb(state: model.orbState, size: 36, level: model.orbLevel, mark: model.presentation.mark,
+                       unreadAnswers: model.unreadAnswers, placement: "folded").contentShape(Circle())
             }
             .buttonStyle(.plain)
             .help("\(model.orbState.label). Open your jobs")
@@ -209,12 +261,18 @@ struct JobBoardView: View {
                     SectionLabel(text: "Needs you")
                     ForEach(sections.needsYou) { job in tile(job) }
                 }
+                if !sections.newAnswers.isEmpty {
+                    SectionLabel(text: "New answers").padding(.top, sections.needsYou.isEmpty ? 0 : 4)
+                    ForEach(sections.newAnswers) { job in
+                        AnswerTile(job: job, focused: model.boardFocusID == job.id) { model.onOpenJob(job.id) }
+                    }
+                }
                 if !sections.running.isEmpty {
-                    SectionLabel(text: "Running").padding(.top, sections.needsYou.isEmpty ? 0 : 4)
+                    SectionLabel(text: "Running").padding(.top, sections.needsYou.isEmpty && sections.newAnswers.isEmpty ? 0 : 4)
                     ForEach(sections.running) { job in tile(job) }
                 }
                 if !sections.doneToday.isEmpty {
-                    SectionLabel(text: "Done today").padding(.top, sections.needsYou.isEmpty && sections.running.isEmpty ? 0 : 4)
+                    SectionLabel(text: "Done today").padding(.top, sections.needsYou.isEmpty && sections.newAnswers.isEmpty && sections.running.isEmpty ? 0 : 4)
                     WrapLayout(spacing: 5) {
                         ForEach(sections.doneToday) { job in
                             DoneChip(job: job, focused: model.boardFocusID == job.id) { model.onOpenJob(job.id) }
@@ -231,6 +289,7 @@ struct JobBoardView: View {
     private func summary(_ s: JobBoard.Sections) -> String {
         var parts: [String] = []
         if !s.needsYou.isEmpty { parts.append("\(s.needsYou.count) need\(s.needsYou.count == 1 ? "s" : "") you") }
+        if !s.newAnswers.isEmpty { parts.append(s.newAnswers.count == 1 ? "1 new answer" : "\(s.newAnswers.count) new answers") }
         if !s.running.isEmpty { parts.append("\(s.running.count) running") }
         if !s.doneToday.isEmpty { parts.append("\(s.doneToday.count) done today") }
         return parts.joined(separator: " · ")
@@ -243,6 +302,53 @@ struct JobBoardView: View {
 
     @ViewBuilder private func tile(_ job: Job) -> some View {
         JobTile(job: job, model: model, focused: model.boardFocusID == job.id)
+    }
+}
+
+/// A finished answer the user hasn't opened: what it was about, the answer in one line, and a
+/// small picture of it when the result has a card worth a glance.
+struct AnswerTile: View {
+    var job: Job
+    var focused: Bool
+    var action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        let info = (job.answerTask ?? job.newest).info
+        let glance = JobAnswer.glanceCard(info)
+        Button(action: action) {
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Circle().fill(JobOrb.answerBlue).frame(width: 6, height: 6)
+                        Text(job.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    }
+                    if let headline = JobAnswer.headline(info) {
+                        Text(headline).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text("Read ›").font(.system(size: 11, weight: .semibold)).foregroundStyle(JobStyle.blueInk)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if let glance {
+                    AnswerGlance(glance)
+                        .fixedSize()
+                        .padding(.horizontal, 8).padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(0.06)))
+                }
+            }
+            .padding(.horizontal, 11).padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(JobStyle.blueInk.opacity(hover ? 0.12 : 0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(focused ? JobStyle.blueInk : JobStyle.blueInk.opacity(0.28), lineWidth: focused ? 1.5 : 0.75))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help("Read \(job.name)")
+        .accessibilityLabel("New answer: \(job.name). \(JobAnswer.headline(info) ?? "")")
     }
 }
 
@@ -408,13 +514,20 @@ struct JobDetailView: View {
             .background(Capsule().fill(JobStyle.blue.opacity(0.35)))
             .foregroundStyle(JobStyle.blueInk)
             .help("What you say now goes to this job unless it's clearly about something else")
-            VStack(alignment: .leading, spacing: 2) {
-                Text(job.name).font(.system(size: 15, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
-                let line = taskStatusLine(job.activeTask?.info ?? job.newest.info, now: model.state.now, assistantName: model.state.assistantName)
-                Text(job.stage.needsYou ? stageLine : line.0).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2)
+            if let answer = job.answerTask, let headline = JobAnswer.headline(answer.info) {
+                // An answer: the chip above names what was asked about; the answer itself leads, big.
+                Text(headline).font(.system(size: 16, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(job.name).font(.system(size: 15, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+                    let line = taskStatusLine(job.activeTask?.info ?? job.newest.info, now: model.state.now, assistantName: model.state.assistantName)
+                    Text(job.stage.needsYou ? stageLine : line.0).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2)
+                }
             }
             PanelScrollView(maxHeight: min(JobStyle.scrollCap, 560 + model.extraHeight)) {
-                VStack(alignment: .leading, spacing: 12) { sections }
+                VStack(alignment: .leading, spacing: 12) {
+                    if let answer = job.answerTask { answerSections(answer) } else { sections }
+                }
                     .padding(.trailing, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -433,6 +546,61 @@ struct JobDetailView: View {
             }
         }
         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 12)
+    }
+
+    /// An answer: its cards first and large, then the sorted report or the text, then sources.
+    /// Nothing to decide here.
+    @ViewBuilder private func answerSections(_ task: TaskItem) -> some View {
+        let visuals = task.info.views.filter { $0.kind != "question" }
+        if !visuals.isEmpty {
+            VStack(spacing: 8) { ForEach(visuals) { ViewCardView($0) } }
+        }
+        if let shape = task.info.result?.shape {
+            ReportBoard(shape: shape, full: task.info.result?.full ?? task.info.result?.spoken, showHeadline: false,
+                        expanded: model.expandedReports.contains(task.id),
+                        toggle: { if model.expandedReports.contains(task.id) { model.expandedReports.remove(task.id) } else { model.expandedReports.insert(task.id) } })
+        } else if let text = task.info.result?.full ?? task.info.result?.spoken {
+            VStack(alignment: .leading, spacing: 4) {
+                SectionLabel(text: visuals.isEmpty ? "Answer" : "In words")
+                // Links read as their names here; the addresses are listed under Sources.
+                Text(Self.readable(text)).font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        let links = task.info.cards
+        if !links.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                SectionLabel(text: links.count == 1 ? "Source" : "Sources")
+                ForEach(links) { link in
+                    Link(destination: link.url) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "link").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.tertiary)
+                            Text(link.title).font(.system(size: 11.5)).lineLimit(1)
+                            Spacer(minLength: 4)
+                            Text(link.url.host ?? "").font(.system(size: 10.5)).foregroundStyle(.tertiary).lineLimit(1)
+                        }
+                        .foregroundStyle(JobStyle.blueInk)
+                    }
+                    .help(link.url.absoluteString)
+                }
+            }
+        }
+        if job.tasks.count > 1 {
+            VStack(alignment: .leading, spacing: 4) {
+                SectionLabel(text: "In this job")
+                ForEach(job.tasks.reversed()) { t in
+                    HStack(spacing: 6) {
+                        Circle().fill(dot(t)).frame(width: 6, height: 6)
+                        Text(t.name).font(.system(size: 11.5)).lineLimit(1)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Markdown links `[name](url)` as just their names; bold markers dropped.
+    static func readable(_ text: String) -> String {
+        text.replacingOccurrences(of: #"\[([^\]\n]{1,100})\]\((https?://[^\s)]+)\)"#, with: "$1", options: .regularExpression)
+            .replacingOccurrences(of: "**", with: "")
     }
 
     private var stageLine: String {
@@ -726,12 +894,14 @@ struct StepRow: View {
 struct ReportBoard: View {
     var shape: ResultShape
     var full: String?
+    /// False when the view above already leads with the headline (an answer).
+    var showHeadline = true
     var expanded: Bool
     var toggle: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !shape.headline.isEmpty {
+            if showHeadline && !shape.headline.isEmpty {
                 Text(shape.headline).font(.system(size: 13, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
             }
             if !shape.checks.isEmpty {

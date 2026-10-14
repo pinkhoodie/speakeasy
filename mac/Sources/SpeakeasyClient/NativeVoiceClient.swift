@@ -1245,6 +1245,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         model.selectedTaskID = nil
         model.selectedJobID = id
         model.boardFocusID = id
+        model.markAnswerSeen(job)
         if model.tellingJobID != id { model.tellingJobID = nil }
         model.workExpanded = true
         setFocus(taskID: job.newest.id, detail: job.name)
