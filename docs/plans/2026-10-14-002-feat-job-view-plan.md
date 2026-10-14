@@ -35,7 +35,7 @@ Status: building (2026-10-14). Mac 0.3.0 + plugin 0.3.0. Mac only; iOS/visionOS 
 ### Question view (`kind: "question"`): new optional fields
 ```json
 {"kind": "question", "question": "When should the router stop sending work to a Studio?",
- "context": "Your Mac mini splits local-model work between zeus and apollo...",
+ "context": "Your router splits local-model work between two machines...",
  "why": "Keeps the swap protection and halves a both-down window.",
  "options": [
    {"text": "1 error, 30s bench", "detail": "Keeps the swap protection.", "tags": [{"text": "Low risk", "tone": "good"}],
