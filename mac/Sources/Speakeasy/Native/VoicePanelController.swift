@@ -10,6 +10,10 @@ final class VoicePanel: NSPanel {
     var onEscape: (() -> Void)?
     /// Left/right arrow: returns true when it stepped through images (then the key is consumed).
     var onArrow: ((Int) -> Bool)?
+    /// Board and job-view keys (key code, characters); true = handled.
+    var onKey: ((UInt16, String) -> Bool)?
+    /// False while the panel is folded into the orb: no edge resizing.
+    var allowsResize: (() -> Bool)?
     /// True while arrow keys would do something: a click then makes the panel key so they reach it.
     /// Otherwise the panel stays non-key on click and never takes typing away from other apps.
     var wantsKeysOnClick: (() -> Bool)?
@@ -62,6 +66,11 @@ final class VoicePanel: NSPanel {
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, !(firstResponder is NSText),
+           event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
+           onKey?(event.keyCode, event.charactersIgnoringModifiers ?? "") == true {
+            return
+        }
+        if event.type == .keyDown, !(firstResponder is NSText),
            let delta = ImageReviewLayout.arrowStep(keyCode: event.keyCode,
                                                    commandOptionControl: !event.modifierFlags.intersection([.command, .option, .control]).isEmpty),
            onArrow?(delta) == true {
@@ -72,7 +81,7 @@ final class VoicePanel: NSPanel {
             if !isKeyWindow, wantsKeysOnClick?() == true { makeKey() }
             isDraggingPanel = false
             isResizingPanel = false
-            var edges = resizeEdges(at: event.locationInWindow)
+            var edges = allowsResize?() == false ? [] : resizeEdges(at: event.locationInWindow)
             if edges.isEmpty && startsOnTranscriptGrip(event.locationInWindow) { edges = [.bottom, .transcript] }
             press = Press(pointer: convertPoint(toScreen: event.locationInWindow), origin: frame.origin,
                           eligible: !startsInScrollableContent(event.locationInWindow), edges: edges)
@@ -306,7 +315,12 @@ final class VoicePanelController {
         }
         panel.onMoved = { [weak self] in self?.panelDidMove() }
         panel.onArrow = { [weak model] delta in model?.stepOpenReview(by: delta) ?? false }
-        panel.wantsKeysOnClick = { [weak model] in model?.steppableReview != nil }
+        panel.wantsKeysOnClick = { [weak model] in
+            guard let model else { return false }
+            return model.steppableReview != nil || model.showsBoard || model.selectedJobID != nil
+        }
+        panel.onKey = { [weak model] code, chars in model?.handleKey(code: code, characters: chars) ?? false }
+        panel.allowsResize = { [weak model] in !(model?.showsSlim ?? false) }
         if let saved = UserDefaults.standard.string(forKey: Self.sizeKey) {
             let s = NSSizeFromString(saved)
             model.panelWidth = Self.clampWidth(s.width == 0 ? Tokens.width : s.width)
@@ -475,7 +489,7 @@ final class VoicePanelController {
     }
 
     private func resize(animated: Bool) {
-        let width = model.panelWidth
+        let width = model.displayWidth
         let fitting = measurer.sizeThatFits(in: NSSize(width: width, height: 2000))
         let height = max(56, ceil(fitting.height))
         let frame = Self.placement(height: height, width: width, userTopLeft: userTopLeft,

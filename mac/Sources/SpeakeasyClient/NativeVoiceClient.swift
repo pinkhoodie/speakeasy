@@ -58,7 +58,7 @@ public final class NativeVoiceClient: VoiceCallClient {
     public var startMuted = false
     /// Client preferences (Settings › General).
     public var showPanelOnStart = true
-    /// Settings › General "Start calls in slim mode".
+    /// Settings › General "Start calls folded into the orb" (was "slim mode").
     public var startSlim = false
     public var followSystemAudio = true
     public var panelOnAllSpaces = true { didSet { surface.onAllSpaces = panelOnAllSpaces } }
@@ -161,7 +161,12 @@ public final class NativeVoiceClient: VoiceCallClient {
         model.onToggleSlim = { [weak self] in
             guard let self else { return }
             self.model.slim.toggle()
-            if self.model.slim { self.model.workExpanded = false; self.model.selectedTaskID = nil }
+            if self.model.slim {
+                self.model.workExpanded = false; self.model.selectedTaskID = nil
+                if self.model.selectedJobID != nil { self.model.selectedJobID = nil; self.setFocus(taskID: nil) }
+            } else {
+                self.surface.focus()   // the board takes the arrow keys
+            }
             self.surface.setNeedsResize()
         }
         model.onApproval = { [weak self] choice in self?.resolveApproval(choice) }
@@ -176,6 +181,8 @@ public final class NativeVoiceClient: VoiceCallClient {
             return try? await api.image(runID: runID, index: number)
         }
         model.onSelectTask = { [weak self] id in self?.selectTask(id) }
+        model.onOpenJob = { [weak self] id in self?.openJob(id) }
+        model.onTellJob = { [weak self] id in self?.tellJob(id) }
         model.onDismissTasks = { [weak self] runIDs in self?.dismissTasks(runIDs) }
         model.onDismissReview = { [weak self] runID in self?.dismissReview(runID) }
         model.loadProductImage = { [weak self] runID, index in
@@ -345,13 +352,16 @@ public final class NativeVoiceClient: VoiceCallClient {
     private var focusSent: (task: String?, detail: String)?
     private var focusPosted: (interaction: String, task: String?, detail: String)?
 
+    /// The task the call was last told is on screen (nil = none).
+    public var focusedTaskID: String? { focusSent?.task }
+
     public func setFocus(taskID: String?, detail: String = "") {
         focusSent = (taskID, String(detail.prefix(200)))
         postFocus()
     }
 
     private func postFocus() {
-        guard let focus = focusSent, let api, let id = model.state.interactionID else { return }
+        guard !previewMode, let focus = focusSent, let api, let id = model.state.interactionID else { return }
         if let p = focusPosted, p.interaction == id, p.task == focus.task, p.detail == focus.detail { return }
         focusPosted = (id, focus.task, focus.detail)
         let body: [String: Any] = ["task_id": focus.task ?? NSNull(), "detail": focus.detail]
@@ -1115,9 +1125,12 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func handleEscape() {
-        if model.selectedTaskID != nil && model.workExpanded { model.selectedTaskID = nil; surface.setNeedsResize() }
+        if model.selectedJobID != nil { closeJob() }
+        else if model.selectedTaskID != nil && model.workExpanded { model.selectedTaskID = nil; surface.setNeedsResize() }
         else if model.workExpanded && !model.state.workOnly { model.workExpanded = false; surface.setNeedsResize() }
         else if model.state.workOnly { closeWorkView() }
+        // Escape folds an open call into the orb; from the orb it ends the call, as before.
+        else if model.state.connection.isOpen && !model.showsSlim { model.onToggleSlim() }
         else if model.state.connection.isOpen { end() }
         else { hideNow() }
     }
@@ -1224,6 +1237,39 @@ public final class NativeVoiceClient: VoiceCallClient {
         surface.focus()
     }
 
+    /// Open a job from the board (nil = back to the board). The call is told which job is on screen,
+    /// so "do the first one" goes there; leaving the job clears it.
+    private func openJob(_ id: String?) {
+        guard let id, let job = model.jobs.first(where: { $0.id == id }) else { closeJob(); return }
+        if model.showsSlim { model.slim = false }
+        model.selectedTaskID = nil
+        model.selectedJobID = id
+        model.boardFocusID = id
+        if model.tellingJobID != id { model.tellingJobID = nil }
+        model.workExpanded = true
+        setFocus(taskID: job.newest.id, detail: job.name)
+        surface.setNeedsResize()
+        surface.focus()
+    }
+
+    private func closeJob() {
+        let open = model.selectedJobID != nil
+        model.selectedJobID = nil
+        model.tellingJobID = nil
+        model.workExpanded = false
+        if open { setFocus(taskID: nil) }
+        surface.setNeedsResize()
+    }
+
+    /// "Tell it something": the job is already in focus; open the mic so the next words go to it.
+    private func tellJob(_ id: String) {
+        guard let job = model.jobs.first(where: { $0.id == id }) else { return }
+        model.tellingJobID = id
+        setFocus(taskID: job.newest.id, detail: job.name)
+        if model.state.mic == .muted && model.state.connection.isOpen { dispatch(.toggleMic) }
+        surface.setNeedsResize()
+    }
+
     private func toggleWorkView() {
         if model.showsSlim { model.slim = false; model.workExpanded = true }
         else { model.workExpanded.toggle() }
@@ -1232,6 +1278,7 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func closeWorkView() {
+        if model.selectedJobID != nil { closeJob(); return }
         if model.selectedTaskID != nil && model.state.tasks.count > 1 {
             model.selectedTaskID = nil   // Back goes from one task to the task list
             surface.setNeedsResize()

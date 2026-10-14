@@ -6,8 +6,8 @@ import SpeakeasyClient
 // MARK: - Tokens
 
 enum Tokens {
-    static let width: CGFloat = 400
-    static let minWidth: CGFloat = 340
+    static let width: CGFloat = 360
+    static let minWidth: CGFloat = 320
     static let maxWidth: CGFloat = 760
     static let maxExtraHeight: CGFloat = 700
     static let radius: CGFloat = 18
@@ -415,7 +415,29 @@ struct VoicePanelView: View {
 
     var body: some View {
         let p = model.presentation
-        VStack(alignment: .leading, spacing: 0) {
+        if model.showsSlim { orbPanel } else { fullPanel(p) }
+    }
+
+    /// Folded into the orb: the orb and the call buttons, nothing else.
+    private var orbPanel: some View {
+        OrbBar(model: model)
+            .onHover { model.hovering = $0 }
+            .fixedSize(horizontal: false, vertical: true)
+            .background(
+                ZStack {
+                    VisualEffectBackground(material: scheme == .dark ? .hudWindow : .popover)
+                    (scheme == .dark ? Tokens.panelDark : Color.white).opacity(scheme == .dark ? 0.78 : 0.35)
+                }
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Tokens.radius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Tokens.radius, style: .continuous)
+                .strokeBorder(Color.primary.opacity(scheme == .dark ? 0.16 : 0.12), lineWidth: 0.5))
+    }
+
+    private func fullPanel(_ p: PillPresentation) -> some View {
+        let board = model.showsBoard
+        let job = model.workExpanded ? model.selectedJob : nil
+        return VStack(alignment: .leading, spacing: 0) {
             if !model.state.workOnly { header(p) }
             if model.tourActive && model.state.connection.isOpen && !model.state.workOnly {
                 TourStrip(action: model.onSkipTour)
@@ -449,6 +471,9 @@ struct VoicePanelView: View {
                     .accessibilityLabel("\(summary). Show the full panel")
                     .padding(.horizontal, 8).padding(.bottom, 6)
                 }
+            } else if let job {
+                if !model.state.workOnly { Divider().opacity(0.5).padding(.horizontal, 14) }
+                JobDetailView(job: job, model: model)
             } else if model.workExpanded || model.state.workOnly {
                 if !model.state.workOnly { Divider().opacity(0.5).padding(.horizontal, 14) }
                 WorkDetailView(model: model)
@@ -463,7 +488,11 @@ struct VoicePanelView: View {
                     .padding(.horizontal, 14).padding(.bottom, 4)
                     .transition(.opacity)
                 }
-                if model.showsTaskList {
+                if board {
+                    JobBoardView(model: model)
+                        .padding(.leading, 12).padding(.trailing, 6).padding(.bottom, 10)
+                        .transition(.opacity)
+                } else if model.showsTaskList {
                     // Something below needs you (a question, an approval, a draft, a review):
                     // finished tasks shrink to one row so it stays in view.
                     let crowded = model.state.approval != nil || model.pinnedViews != nil
@@ -475,7 +504,7 @@ struct VoicePanelView: View {
                 let reviewing = Set(model.pinnedReviews.map(\.taskID))
                 // Not when the same task's cards are already pinned below: the bar would repeat them.
                 let pinnedTask = model.pinnedViews?.taskID
-                if let task = model.state.tasks.last(where: { !reviewing.contains($0.id) && $0.id != pinnedTask &&
+                if !board, let task = model.state.tasks.last(where: { !reviewing.contains($0.id) && $0.id != pinnedTask &&
                     (!$0.info.products.isEmpty || !$0.info.cards.isEmpty || !$0.info.images.isEmpty || !$0.info.views.isEmpty) }) {
                     Button {
                         model.onSelectTask(task.id)
@@ -498,11 +527,14 @@ struct VoicePanelView: View {
                     .padding(.horizontal, 14).padding(.bottom, 8)
                 }
             }
-            if let approval = model.state.approval, !(model.workExpanded || model.state.workOnly) {
+            if let approval = model.state.approval, !(model.workExpanded || model.state.workOnly),
+               !(board && model.jobs.contains { j in j.tasks.contains { $0.info.runID == approval.runID } }) {
                 ApprovalRow(approval: approval, busy: model.busy, onChoice: model.onApproval)
                     .padding(.horizontal, 12).padding(.bottom, 12)
             }
-            if !(model.workExpanded || model.state.workOnly), let pinned = model.pinnedViews {
+            // On the board a waiting decision sits in its job's tile; other cards still pin here.
+            if !(model.workExpanded || model.state.workOnly), let pinned = model.pinnedViews,
+               !(board && pinned.views.contains { $0.kind == "question" }) {
                 VStack(spacing: 8) {
                     ForEach(pinned.views.prefix(2)) { card in ViewCardView(card) }
                         .environment(\.questionActions, model.questionActions(for: pinned.taskID))
@@ -556,8 +588,24 @@ struct VoicePanelView: View {
 
     private func header(_ p: PillPresentation) -> some View {
         HStack(spacing: 8) {
-            AssistantMark(mark: p.mark, level: model.orbLevel)
-                .padding(.trailing, 2)
+            // The orb: clicking it folds the panel into it (the call keeps running).
+            Button(action: { if model.state.connection.isOpen && !model.state.workOnly { model.onToggleSlim() } }) {
+                AssistantMark(mark: p.mark, level: model.orbLevel)
+                    .overlay(alignment: .topTrailing) {
+                        if let n = model.orbState.badge {
+                            Text("\(n)").font(.system(size: 9.5, weight: .bold)).monospacedDigit()
+                                .foregroundStyle(Color(red: 0.6, green: 0.36, blue: 0.05))
+                                .padding(.horizontal, 4).frame(minWidth: 15, minHeight: 15)
+                                .background(Capsule().fill(Color.white))
+                                .offset(x: 4, y: -3)
+                        }
+                    }
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!(model.state.connection.isOpen && !model.state.workOnly))
+            .help(model.state.connection.isOpen ? "Fold into the orb (the call keeps running)" : "")
+            .padding(.trailing, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(p.primary).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
                     .minimumScaleFactor(0.85)
@@ -597,7 +645,7 @@ struct VoicePanelView: View {
             }
             if !model.state.workOnly && model.state.connection.isOpen {
                 IconButton(symbol: model.slim ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left",
-                           help: model.slim ? "Full panel" : "Slim — just the controls",
+                           help: model.slim ? "Open the panel" : "Fold into the orb (the call keeps running)",
                            action: model.onToggleSlim)
                     .fixedSize()
             }

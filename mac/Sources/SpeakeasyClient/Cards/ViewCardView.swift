@@ -46,6 +46,10 @@ public struct ViewCardView: View {
             case "home", "thermostat": HomeCard(card: card)
             case "camera": CameraCard(card: card)
             case "question": QuestionCard(card: card)
+            case "lanes": LanesCard(card: card)
+            case "before_after": BeforeAfterCard(card: card)
+            case "flow": FlowCard(card: card)
+            case "devices": DevicesCard(card: card)
             default: EmptyView()
             }
         }

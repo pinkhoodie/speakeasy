@@ -29,8 +29,10 @@ struct QuestionCard: View {
     @State private var picked: String?
 
     var body: some View {
-        let options = card["options"].array.compactMap(\.string)
-        let recommended = card["recommended"].double.map { Int($0) }
+        // Options are strings (older plugins) or objects with a detail line, tags and a picture.
+        let decision = Decision(card: card)
+        let options = decision?.options.map(\.text) ?? []
+        let recommended = decision?.recommended
         let answer = picked ?? actions.answered
         CardBox(tint: answer == nil ? .orange : nil) {
             HStack(spacing: 6) {
@@ -41,7 +43,8 @@ struct QuestionCard: View {
             }
             Text(card["question"].string ?? "").font(.system(size: 14, weight: .semibold))
                 .fixedSize(horizontal: false, vertical: true)
-            let pictures = card["images"].doubles.map { Int($0) }
+            let pictures = card["images"].doubles.isEmpty ? (decision?.options.map { $0.image ?? 0 } ?? [])
+                : card["images"].doubles.map { Int($0) }
             if pictures.contains(where: { $0 > 0 }), let load = actions.image {
                 HStack(alignment: .top, spacing: 8) {
                     ForEach(Array(options.prefix(4).enumerated()), id: \.offset) { i, option in

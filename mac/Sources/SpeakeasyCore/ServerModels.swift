@@ -158,6 +158,8 @@ public struct WorkInfo: Equatable, Sendable {
     public var failure: WorkFailure?
     /// The steps the task will go through, for the progress line; empty until the api plans it.
     public var plan: [String] = []
+    /// The job this task belongs to (nil from older plugins: the task is its own job).
+    public var job: JobRef?
 
     public init(runID: String?, status: String, stale: Bool = false, updated: Date? = nil,
                 shortStatus: String? = nil, detail: String? = nil, updatedAt: Date? = nil,
@@ -213,6 +215,7 @@ public struct WorkInfo: Equatable, Sendable {
         title = nonEmpty(object["title"])
         summary = nonEmpty(object["summary"])
         emailDrafts = EmailDraft.list(json: object["email_drafts"])
+        job = JobRef(json: object["job"])
         plan = (object["plan"] as? [Any] ?? []).compactMap { $0 as? String }.filter { !$0.isEmpty }
         liveImage = LiveImage(json: object["live_image"])
         failure = status == "failed" ? WorkFailure(json: object["failure"]) : nil

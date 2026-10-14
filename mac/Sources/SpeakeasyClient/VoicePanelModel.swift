@@ -5,7 +5,7 @@ import SpeakeasyCore
 @MainActor
 public final class VoicePanelModel: ObservableObject {
     public init() {}
-    public static let defaultWidth: CGFloat = 400
+    public static let defaultWidth: CGFloat = 360
     @Published public var state = VoiceState()
     @Published public var workExpanded = false
     @Published public var captionExpanded = false
@@ -27,8 +27,9 @@ public final class VoicePanelModel: ObservableObject {
     @Published public var panelWidth: CGFloat = VoicePanelModel.defaultWidth
     @Published public var extraHeight: CGFloat = 0
 
-    /// Slim mode: just the header row (status, pause, mic, end) plus a one-line task
-    /// summary. Approvals and pending email drafts still show. Remembered across calls.
+    /// Orb mode (was "slim"): the panel folds into a small orb with the mic and hang-up buttons. The orb's
+    /// colour says what's going on (talking, working, something needs you, a failure). Remembered across
+    /// calls under the old key, so an existing "slim" preference opens as the orb.
     @Published public var slim: Bool = UserDefaults.standard.bool(forKey: VoicePanelModel.slimKey) {
         didSet { UserDefaults.standard.set(slim, forKey: VoicePanelModel.slimKey) }
     }
@@ -195,4 +196,87 @@ public final class VoicePanelModel: ObservableObject {
     /// Two or more tasks in this call: show the list.
     public var showsTaskList: Bool { state.tasks.count >= 2 }
     public var selectedTask: TaskItem? { selectedTaskID.flatMap { id in state.tasks.first { $0.id == id } } }
+
+    // MARK: Jobs: the board, the job view and the orb
+
+    /// Width of the folded orb panel.
+    public static let orbWidth: CGFloat = 132
+    /// The panel's width right now: the orb when folded, else the user's width.
+    public var displayWidth: CGFloat { showsSlim ? Self.orbWidth : panelWidth }
+    /// The job open in the job view (a `Job.id`); nil shows the board.
+    @Published public var selectedJobID: String?
+    /// The board tile the arrow keys are on.
+    @Published public var boardFocusID: String?
+    /// Open a job (nil = back to the board). The client also tells the call which job is on screen.
+    public var onOpenJob: (String?) -> Void = { _ in }
+    /// "Tell it something": turn the mic on; what's said next goes to this job (job id).
+    public var onTellJob: (String) -> Void = { _ in }
+    /// The job waiting to hear from the user after "Tell it something".
+    @Published public var tellingJobID: String?
+    /// Jobs whose report text is expanded ("Full report").
+    @Published public var expandedReports: Set<String> = []
+
+    /// Every task grouped into jobs, newest first.
+    public var jobs: [Job] {
+        JobBoard.jobs(state.tasks, answered: Set(answers.keys), dismissed: dismissedViewTasks,
+                      reviewing: Set(pinnedReviews.map(\.taskID)), now: state.now)
+    }
+    public var boardSections: JobBoard.Sections { JobBoard.sections(jobs, now: state.now) }
+    public var selectedJob: Job? { selectedJobID.flatMap { id in jobs.first { $0.id == id } } }
+    /// The board replaces the task list once there's more than one task, or anything needs you.
+    public var showsBoard: Bool {
+        guard !showsSlim, !state.workOnly, !state.tasks.isEmpty else { return false }
+        return showsTaskList || jobs.contains { $0.stage.needsYou || $0.stage == .failed }
+    }
+    /// The mic is open and hearing the user right now.
+    public var userTalking: Bool { presentation.mark == .listening && orbLevel > 0.08 }
+    public var orbState: OrbState { OrbState.of(jobs: jobs, approvalPending: state.approval != nil, userTalking: userTalking) }
+
+    /// The next job that needs you, other than `id` (the "Next:" link).
+    public func nextJobNeedingYou(after id: String?) -> Job? {
+        boardSections.needsYou.first { $0.id != id && $0.stage.needsYou }
+    }
+
+    /// Answer the job's waiting decision with option `number` (1-based). False when there's nothing to pick.
+    @discardableResult
+    public func pick(_ number: Int, in job: Job) -> Bool {
+        guard let task = job.decisionTask, let decision = task.info.decision, answers[task.id] == nil,
+              (1...decision.options.count).contains(number) else { return false }
+        questionActions(for: task.id).onAnswer?(decision.options[number - 1].text)
+        return true
+    }
+
+    /// Approve: answer with the recommended option, only when the plugin allowed it.
+    public func approve(_ job: Job) {
+        guard let d = job.decision, d.approvable, let r = d.recommended else { return }
+        pick(r + 1, in: job)
+    }
+
+    /// Board and job-view keys: up/down move between tiles, Return opens, 1-4 picks an option on the
+    /// focused decision (or the open job's). False lets the key go elsewhere.
+    public func handleKey(code: UInt16, characters: String) -> Bool {
+        if showsSlim { return false }
+        // Escape: out of a job, back to the board.
+        if code == 53 && selectedJobID != nil { onOpenJob(nil); return true }
+        let digit = Int(characters).flatMap { (1...4).contains($0) ? $0 : nil }
+        if workExpanded || state.workOnly {
+            guard let job = selectedJob, let digit else { return false }
+            return pick(digit, in: job)
+        }
+        guard showsBoard else { return false }
+        let all = boardSections.all
+        guard !all.isEmpty else { return false }
+        let at = all.firstIndex { $0.id == boardFocusID }
+        switch code {
+        case 125: boardFocusID = all[min((at ?? -1) + 1, all.count - 1)].id; return true
+        case 126: boardFocusID = all[max((at ?? all.count) - 1, 0)].id; return true
+        case 36, 76:
+            guard let at else { return false }
+            onOpenJob(all[at].id); return true
+        default:
+            guard let digit else { return false }
+            let target = at.map { all[$0] } ?? all.first { $0.stage == .needsYou(.decide) }
+            return target.map { pick(digit, in: $0) } ?? false
+        }
+    }
 }
