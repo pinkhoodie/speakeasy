@@ -27,7 +27,7 @@ FAKE_CODEX = textwrap.dedent('''\
         sys.stdout.write(json.dumps(obj) + "\\n"); sys.stdout.flush()
     for line in sys.stdin:
         msg = json.loads(line)
-        log.write(json.dumps({{"method": msg.get("method"), "env": sorted(os.environ)}}) + "\\n"); log.flush()
+        log.write(json.dumps({{"method": msg.get("method"), "params": msg.get("params"), "env": sorted(os.environ)}}) + "\\n"); log.flush()
         method, mid = msg.get("method"), msg.get("id")
         if mid is None:
             continue
@@ -88,6 +88,8 @@ def test_transport_start_returns_answer_sdp_and_seeds_history(fake_codex, tmp_pa
     log = [json.loads(line) for line in (tmp_path / "fake-codex-log.jsonl").read_text().splitlines()]
     assert [e["method"] for e in log][:4] == ["initialize", "initialized", "thread/start", "thread/realtime/start"]
     assert all("API_SERVER_KEY" not in e["env"] and "OPENAI_API_KEY" not in e["env"] for e in log)
+    start = next(e for e in log if e["method"] == "thread/realtime/start")
+    assert start["params"]["delegationAckFiller"] is False  # no "mm-hm" filler on handoffs
 
 
 def test_handoff_starts_hermes_task_and_result_is_appended(fake_codex, tmp_path, service, hermes):

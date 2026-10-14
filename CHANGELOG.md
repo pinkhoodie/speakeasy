@@ -2,6 +2,12 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Mac 0.2.19 and Plugin 0.2.56 — A calmer panel, and no more "mm-hm"
+
+- **The panel stays readable on long calls.** Finished tasks take one short line instead of two, and only the newest two show; the rest fold into "+N earlier", which opens the full list. When something needs you (a question, an approval, a draft, a review), finished tasks shrink to one row so it stays in view. Running tasks always show.
+- **No repeated cards bar.** The "N cards" bar no longer appears when that task's cards are already showing below it.
+- **No more "mm-hm" while work starts (plugin).** With ChatGPT voice, the voice played a canned "mm-hm" each time it handed work off, so you'd hear "On it. Mm-hm. Mm-hm." That filler is now turned off; its own short acknowledgement is enough.
+
 ## Plugin 0.2.55 — Long answers come sorted
 
 - **Long reports are sorted into parts.** When a task finishes with a long answer, Speakeasy sorts it into what kind of work it was (a build, a setup, research, options, or a plain answer) and pulls out its parts: the checks it ran, what's now done, what's still open, and its main sections. The answer itself arrives exactly as before; the sorting happens right after and never delays it. Apps use it to lay a report out as panels instead of a wall of text.

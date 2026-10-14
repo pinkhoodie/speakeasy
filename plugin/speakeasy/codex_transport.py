@@ -226,6 +226,9 @@ class CodexTransport:
             "threadId": self.thread_id, "version": "v3", "model": CODEX_MODEL, "voice": voice,
             "outputModality": "audio", "transport": {"type": "webrtc", "sdp": sdp},
             "includeStartupContext": False, "clientManagedHandoffs": True,
+            # No canned "mm-hm" filler while a handoff starts: the voice's own short acknowledgement
+            # is enough, and the filler repeats ("On it. Mm-hm. Mm-hm.").
+            "delegationAckFiller": False,
             "prompt": instructions + "\nOnly the Speakeasy server may execute tasks via Hermes. "
                                      "Do not claim a task was completed until the server supplies its result."}
         if initial:

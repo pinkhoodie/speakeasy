@@ -345,6 +345,7 @@ enum PanelSmoke {
             do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/site-\(name).png")); record("snapshot \(dir)/site-\(name).png") }
             catch { fail("snapshot failed: \(error)") }
         }
+        await busyPanel(c, dir: dir)
         await failedTask(c, dir: dir)
         await designReview(c, dir: dir)
         await lookingAt(c, dir: dir)
@@ -370,6 +371,27 @@ enum PanelSmoke {
                 do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/email-draft-expanded.png")) } catch { fail("snapshot failed: \(error)") }
             }
         }
+    }
+
+    // MARK: A busy call: finished tasks fold away so a question stays in view
+
+    static func busyPanel(_ c: NativeVoiceClient, dir: String) async {
+        guard let (state, _) = PreviewFixtures.state("busy") else { fail("busy panel: fixture missing"); return }
+        c.showPreview(state, workExpanded: false)
+        await settle()
+        check(c.model.pinnedViews?.taskID == "b3", "busy panel: the question card is pinned")
+        let shown = TaskListView.compactShown(state.tasks, maxSettled: 1)
+        check(shown.map(\.id) == ["b3"], "busy panel: with a question up, one finished task shows (got \(shown.map(\.id)))")
+        let calm = TaskListView.compactShown(state.tasks, maxSettled: 2)
+        check(calm.map(\.id) == ["b2", "b3"], "busy panel: otherwise the newest two finished tasks show")
+        var mixed = state.tasks
+        for i in 0..<2 { mixed[i].info.status = "working" }
+        let withOpen = TaskListView.compactShown(mixed, maxSettled: 1)
+        check(Set(withOpen.map(\.id)) == ["b0", "b1", "b3"], "busy panel: running tasks always show (got \(withOpen.map(\.id)))")
+        let win = c.panel.window; let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        record("busy panel: \(Int(win.frame.height))pt tall, screen \(Int(visible.height))pt")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/busy.png")); record("snapshot \(dir)/busy.png") }
+        catch { fail("snapshot failed: \(error)") }
     }
 
     // MARK: A finished design pops up for review, pages through, and dismisses

@@ -464,12 +464,18 @@ struct VoicePanelView: View {
                     .transition(.opacity)
                 }
                 if model.showsTaskList {
-                    TaskListView(model: model, compact: true)
+                    // Something below needs you (a question, an approval, a draft, a review):
+                    // finished tasks shrink to one row so it stays in view.
+                    let crowded = model.state.approval != nil || model.pinnedViews != nil
+                        || !model.pinnedDrafts.isEmpty || !model.pinnedReviews.isEmpty
+                    TaskListView(model: model, compact: true, maxSettled: crowded ? 1 : 2)
                         .padding(.horizontal, 12).padding(.bottom, 10)
                         .transition(.opacity)
                 }
                 let reviewing = Set(model.pinnedReviews.map(\.taskID))
-                if let task = model.state.tasks.last(where: { !reviewing.contains($0.id) &&
+                // Not when the same task's cards are already pinned below: the bar would repeat them.
+                let pinnedTask = model.pinnedViews?.taskID
+                if let task = model.state.tasks.last(where: { !reviewing.contains($0.id) && $0.id != pinnedTask &&
                     (!$0.info.products.isEmpty || !$0.info.cards.isEmpty || !$0.info.images.isEmpty || !$0.info.views.isEmpty) }) {
                     Button {
                         model.onSelectTask(task.id)
@@ -793,11 +799,23 @@ struct TaskListView: View {
     @ObservedObject var model: VoicePanelModel
     /// Main panel: the last few rows, one line each.
     var compact: Bool
+    /// Main panel: how many finished tasks to show. Running or waiting tasks always show (up to
+    /// `compactRows`); older finished ones fold into "+N earlier", which opens the full list.
+    var maxSettled: Int = 2
     static let compactRows = 4
+
+    /// Newest-last, like `tasks`: every unfinished task (newest `compactRows`), plus the newest
+    /// `maxSettled` finished ones, within `compactRows` rows in all.
+    static func compactShown(_ tasks: [TaskItem], maxSettled: Int) -> [TaskItem] {
+        let open = Set(tasks.filter { !$0.isSettled }.suffix(compactRows).map(\.id))
+        let room = max(0, min(maxSettled, compactRows - open.count))
+        let done = Set(tasks.filter(\.isSettled).suffix(room).map(\.id))
+        return tasks.filter { open.contains($0.id) || done.contains($0.id) }
+    }
 
     var body: some View {
         let tasks = model.state.tasks
-        let shown = compact ? Array(tasks.suffix(Self.compactRows)) : tasks
+        let shown = compact ? Self.compactShown(tasks, maxSettled: maxSettled) : tasks
         VStack(alignment: .leading, spacing: compact ? 2 : 4) {
             if compact {
                 HStack(spacing: 6) {
@@ -805,7 +823,12 @@ struct TaskListView: View {
                         .foregroundStyle(.tertiary)
                     Spacer()
                     if tasks.count > shown.count {
-                        Text("+\(tasks.count - shown.count) earlier").font(.system(size: 10)).foregroundStyle(.tertiary)
+                        Button(action: { model.onSelectTask(nil) }) {
+                            Text("+\(tasks.count - shown.count) earlier").font(.system(size: 10)).foregroundStyle(.tertiary)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show every task")
                     }
                     ClearDoneButton(model: model)
                 }
@@ -864,8 +887,17 @@ struct TaskRow: View {
 
     var body: some View {
         let (status, tone) = taskStatusLine(task.info, now: now, assistantName: assistantName)
+        // A task that finished fine is one quiet line in the main panel; failures keep their reason.
+        let oneLine = compact && task.isSettled && task.info.status == "completed"
         HStack(alignment: .center, spacing: 8) {
             icon
+            if oneLine {
+                Text(task.name).font(.system(size: 11.5, weight: .medium))
+                    .lineLimit(1).truncationMode(.tail)
+                    .foregroundStyle(.primary.opacity(0.75))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help(status)
+            } else {
             VStack(alignment: .leading, spacing: 1) {
                 Text(task.name).font(.system(size: 11.5, weight: .medium))
                     .lineLimit(compact ? 1 : 2).truncationMode(.tail)
@@ -874,6 +906,7 @@ struct TaskRow: View {
                     .help(status)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if task.isActive, let live = task.info.liveImage, let run = task.info.runID, let loadLive {
                 LiveImageView(runID: run, live: live, height: compact ? 26 : 34, load: loadLive)
             }
@@ -903,9 +936,9 @@ struct TaskRow: View {
             }
             Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 8).padding(.vertical, compact ? 4 : 6)
+        .padding(.horizontal, 8).padding(.vertical, oneLine ? 2 : compact ? 4 : 6)
         .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
-            .fill(Color.primary.opacity(hover ? 0.09 : 0.05)))
+            .fill(Color.primary.opacity(hover ? 0.09 : oneLine ? 0.03 : 0.05)))
         .contentShape(Rectangle())
         .onTapGesture(perform: onOpen)
         .onHover { hover = $0 }
