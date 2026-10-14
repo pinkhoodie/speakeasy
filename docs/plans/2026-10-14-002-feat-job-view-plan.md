@@ -74,7 +74,7 @@ Every routed request records where it went (existing events).
 
 ## Bugs folded in
 - Result `full` text sometimes stored twice (seen in 3 runs on 10-12). Find and fix.
-- Spoken summary splices sentences out of context ("Its one repeat error is hearing Qwen as Quan"). Fix the picker.
+- Spoken summary splices sentences out of context (a sentence about something never introduced). Fix the picker.
 
 ## Not in this build
 Card clusters around the orb, drag-to-pin, iOS/visionOS UI, merging jobs across threads.
