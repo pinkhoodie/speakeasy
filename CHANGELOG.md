@@ -2,9 +2,13 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
-## Plugin 0.3.1 — Really no more "mm-hmm"
+## Mac 0.3.1 and Plugin 0.3.1 — A calmer panel you can scroll, and really no more "mm-hmm"
 
-- **No more "mm-hmm" after handing work off, or out of nowhere while something runs.** With ChatGPT voice, the background notes Speakeasy gives the voice (work started, how a task is going, where it went, what's on your screen) were delivered as things to answer, so the voice replied to each one with "Mm-hmm", even when nobody was talking. Those notes now wait and go along with the next thing the voice actually says.
+- **The panel scrolls.** With several cards open you could get stuck in the middle with no way to reach the rest. The board and every job now scroll all the way with the trackpad or mouse wheel, and the panel never grows past your screen. Page Up/Down, Space and Home/End scroll too, and the arrow keys keep the selected job in view.
+- **The board stays a board.** Cards no longer pile up underneath it. Each card lives in its job: open "Weekend weather" to see the forecast, or "Weekend events" to see the pictures.
+- **One card open at a time.** Inside a job, the most relevant card is open and the rest fold into one-line rows; click a row to open or fold it. Big pictures are capped in size; click to see them full size.
+- **An obvious way back.** Every job has "‹ All jobs" at the top left, and Esc still steps back.
+- **No more "mm-hmm" (plugin, already live).** Not after handing work off, and not out of nowhere while something runs. With ChatGPT voice, the background notes Speakeasy gives the voice (work started, how a task is going, where it went, what's on your screen) were delivered as things to answer, so the voice replied to each one with "Mm-hmm", even when nobody was talking. Those notes now wait and go along with the next thing the voice actually says.
 
 ## Mac 0.3.0 and Plugin 0.3.0 — Your work as jobs, with the facts to decide
 
