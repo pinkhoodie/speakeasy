@@ -648,10 +648,24 @@ _SHAPE_PROMPT = (
     "open: what is still unfinished, blocked, or waiting on the user, each under 12 words; at most 4. "
     "sections: the report's main parts in order, each {\"title\": 1-4 words, \"points\": [up to 4 points, each "
     "under 16 words]}; at most 5. For research and ideas, each option or finding is a section. "
-    "undo: true only if the report says the change can be rolled back. Leave a field empty when the report "
-    "has nothing for it. Reply with JSON only: {\"type\": ..., \"headline\": ..., \"checks\": [], "
-    "\"shipped\": [], \"open\": [], \"sections\": [], \"undo\": false}"
+    "undo: true only if the report says the change can be rolled back. "
+    "visual: the one picture that best shows the report's key data at a glance on a small screen, drawn only from "
+    "numbers and names in the report, or null when nothing is worth drawing (plain prose, advice, a single fact). "
+    "Pick the kind that fits what the report contains, never a format tied to a topic: "
+    "two sides with scores or points (any matchup, game, race, projection) -> {\"kind\": \"game\", \"league\": short "
+    "context, \"status\": \"live\"|\"final\"|\"projected\", \"detail\": one short line, \"teams\": [{\"name\", "
+    "\"score\": as text, \"winner\": true/false, \"record\": optional}]}; "
+    "two to four things compared on the same attributes -> {\"kind\": \"comparison\", \"title\", \"columns\": [names], "
+    "\"rows\": [{\"label\", \"values\": [...]}], \"winner\": name}; "
+    "a few headline numbers -> {\"kind\": \"stats\", \"title\", \"items\": [{\"label\", \"value\", \"delta\", "
+    "\"good\": true/false}]} (at most 6); "
+    "a trend over time or a ranking with numbers -> {\"kind\": \"chart\", \"title\", \"style\": \"bar\"|\"line\", "
+    "\"unit\", \"labels\": [...], \"series\": [{\"name\", \"values\": [numbers]}]}; "
+    "a short set of picks or to-dos -> {\"kind\": \"list\", \"title\", \"items\": [{\"text\", \"detail\"}]} (at most 8). "
+    "Leave a field empty when the report has nothing for it. Reply with JSON only: {\"type\": ..., \"headline\": ..., "
+    "\"checks\": [], \"shipped\": [], \"open\": [], \"sections\": [], \"undo\": false, \"visual\": null}"
 )
+VISUAL_KINDS = ("game", "comparison", "stats", "chart", "list")
 
 
 def _short(value: Any, words: int, chars: int = 140) -> str | None:
@@ -690,7 +704,24 @@ def clean_shape(raw: str | None) -> dict[str, Any] | None:
     shape = {"type": data["type"], "headline": _short(data.get("headline"), 14, 120) or "",
              "checks": checks[:4], "shipped": strings("shipped", 12, 5), "open": strings("open", 14, 4),
              "sections": sections[:5], "undo": bool(data.get("undo"))}
-    return shape if any(shape[k] for k in ("checks", "shipped", "open", "sections")) else None
+    visual = clean_visual(data.get("visual"))
+    if visual:
+        shape["_visual"] = visual  # moved into the result's views by the caller, never stored on the shape
+    return shape if any(shape[k] for k in ("checks", "shipped", "open", "sections")) or visual else None
+
+
+def clean_visual(raw: Any) -> dict[str, Any] | None:
+    """The shaper's one picture of the report, validated like any view card; only data kinds."""
+    from . import views
+    if not isinstance(raw, dict) or raw.get("kind") not in VISUAL_KINDS:
+        return None
+    if raw.get("kind") == "game":
+        status = str(raw.get("status") or "").lower()
+        raw = {**raw, "status": status if status in ("live", "final") else "projected"}
+        if len([t for t in raw.get("teams") or [] if isinstance(t, dict) and t.get("name")]) != 2:
+            return None
+    view = views.clean(raw)
+    return view if view and len(view) > 1 else None
 
 
 def result_shape(request: str, report: str, timeout: float = 12.0) -> dict[str, Any] | None:

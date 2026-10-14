@@ -272,6 +272,20 @@ class StateStore:
             self._db.execute("UPDATE runs SET result_json=? WHERE idem_key=?", (json.dumps(result), key))
             return True
 
+    def add_view(self, key: str, view: dict[str, Any]) -> bool:
+        """Add a derived view card to a stored result that has none of its own."""
+        with self._lock, self._db:
+            row = self._db.execute("SELECT result_json FROM runs WHERE idem_key=?", (key,)).fetchone()
+            try:
+                result = json.loads(row[0]) if row and row[0] else None
+            except ValueError:
+                result = None
+            if not isinstance(result, dict) or result.get("views"):
+                return False
+            result["views"] = [view]
+            self._db.execute("UPDATE runs SET result_json=? WHERE idem_key=?", (json.dumps(result), key))
+            return True
+
     def set_plan(self, key: str, steps: list[str]) -> None:
         with self._lock, self._db:
             self._db.execute("UPDATE runs SET plan=? WHERE idem_key=?", (json.dumps(steps[:5]), key))

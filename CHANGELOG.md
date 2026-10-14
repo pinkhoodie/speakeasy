@@ -2,6 +2,10 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.3.3 — A picture of the answer, even when the agent didn't draw one
+
+- **Answers with numbers get a picture.** When a finished answer has data but the agent didn't draw a card (tasks continued in a chat thread never could), Speakeasy now draws one from the answer itself: a matchup or projection as a scoreboard, a few numbers as tiles, things compared side by side, a trend as a chart, or a short list of picks. It picks whatever fits what the answer says, never a format tied to a topic, and uses only names and numbers that are in the answer.
+
 ## Plugin 0.3.2 — Quick "on it", and answers you can use at a glance
 
 - **"On it" comes right away again.** After 0.3.1 the voice could take 6–7 seconds to acknowledge a request, and sometimes handed the same request off twice. It's now cued to acknowledge the moment work is handed off, and a repeat of the same words within a few seconds is ignored.

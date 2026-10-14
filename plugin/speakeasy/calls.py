@@ -559,7 +559,15 @@ class SidebandWorker:
 
         async def run() -> None:
             shape = await asyncio.to_thread(shaper, request, report)
-            if shape and self.store.add_shape(idem, shape):
+            if not shape:
+                return
+            visual = shape.pop("_visual", None)
+            changed = self.store.add_shape(idem, shape) if any(
+                shape.get(k) for k in ("checks", "shipped", "open", "sections")) else False
+            # A picture of the answer's data for agents that didn't draw one (thread tasks never can).
+            if visual and self.store.add_view(idem, visual):
+                changed = True
+            if changed:
                 self.publish()
 
         task = asyncio.get_running_loop().create_task(run())
@@ -2088,7 +2096,9 @@ class SidebandWorker:
             with self.interaction.lock:
                 backend.status, backend.approval = status, None
             stored_drafts = [self.store.add_draft(idem, self.store.session_for(idem), d) for d in drafts]
-            if status == "completed" and result and len(result.get("full") or "") >= 400:
+            # Long reports get sorted into parts; any answer with numbers in it may also get a picture.
+            if status == "completed" and result and (len(result.get("full") or "") >= 400 or (
+                    not result.get("views") and len(re.findall(r"\d", result.get("full") or "")) >= 4)):
                 self.shape_result(idem, result["full"])
             with self.interaction.lock:
                 wanted = idem in self.show_pending
