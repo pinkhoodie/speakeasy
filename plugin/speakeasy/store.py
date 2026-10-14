@@ -19,10 +19,33 @@ from typing import Any
 from .emails import canonical_json, draft_sha256
 from .failures import public_failure
 from .text import (MAX_CARDS, AUTHORED_PRECEDENCE_S, SETTLED, TERMINAL, notice_text, public_result, safe_user_text,
-                   valid_short_status)
+                   short_title, valid_short_status)
 
 STALE_AFTER_S = 90
 MAX_REVIEWS = 3  # finished-image review cards carried onto the call panel
+
+
+JOB_NAME_TAIL = {"a", "an", "and", "the", "of", "for", "to", "in", "on", "with", "from", "by", "at", "or", "my", "your"}
+
+
+def job_name(title: str | None) -> str | None:
+    """A job's short name: the first two to four words of a task title, without a dangling
+    "and"/"for" at the end. None when there's nothing to name it from."""
+    words = re.findall(r"[^\s]+", re.sub(r"[\"“”]", "", title or ""))[:4]
+    while len(words) > 2 and words[-1].lower().strip(",.:;") in JOB_NAME_TAIL:
+        words.pop()
+    name = " ".join(words).strip(" ,.:;-")
+    return name[:40] or None
+
+
+def _placed_session(continued: str | None) -> str | None:
+    """The session id a task's placement names (the conversation it continued), if any."""
+    try:
+        placed = json.loads(continued) if continued else {}
+    except ValueError:
+        return None
+    sid = placed.get("session_id") if isinstance(placed, dict) else None
+    return sid if isinstance(sid, str) and sid else None
 
 
 def local_run_id(idem_key: str) -> str:
@@ -69,7 +92,14 @@ class StateStore:
             self._db.execute("""CREATE TABLE IF NOT EXISTS live_images (
                 idem_key TEXT PRIMARY KEY, kind TEXT NOT NULL, ref TEXT NOT NULL, name TEXT NOT NULL,
                 source TEXT NOT NULL, seq INTEGER NOT NULL, updated REAL NOT NULL)""")
+            # A job is the Hermes session its tasks live in (across calls and days); its short name is
+            # kept here once, from the first task's own title (never a chat thread's name).
+            self._db.execute("""CREATE TABLE IF NOT EXISTS jobs (
+                job_id TEXT PRIMARY KEY, name TEXT NOT NULL, from_key TEXT, updated REAL NOT NULL)""")
             columns = {row[1] for row in self._db.execute("PRAGMA table_info(runs)")}
+            if "own_title" not in columns:  # the task's name from its words or the titler, never a thread title
+                self._db.execute("ALTER TABLE runs ADD COLUMN own_title TEXT")
+            self._db.execute("CREATE INDEX IF NOT EXISTS runs_session ON runs(session_id)")
             if "timings" not in columns:  # added after the first release
                 self._db.execute("ALTER TABLE runs ADD COLUMN timings TEXT")
             if "failure" not in columns:  # why a run failed: a failures.py kind, never provider text
@@ -182,12 +212,51 @@ class StateStore:
             row = self._db.execute("SELECT title FROM runs WHERE idem_key=?", (key,)).fetchone()
         return row[0] if row and row[0] else None
 
-    def set_title(self, key: str, title: str | None, summary: str | None = None) -> None:
+    def set_title(self, key: str, title: str | None, summary: str | None = None, thread: bool = False) -> None:
+        """A task's display title. ``thread`` marks a chat thread's own name: shown on the task, but
+        never used to name its job. A task's own new title refines the job it first named."""
         with self._lock, self._db:
             if title:
                 self._db.execute("UPDATE runs SET title=? WHERE idem_key=?", (title, key))
+                name = None if thread else job_name(title)
+                if name:
+                    self._db.execute("UPDATE runs SET own_title=? WHERE idem_key=?", (title, key))
+                    self._db.execute("UPDATE jobs SET name=?, updated=? WHERE from_key=?", (name, time.time(), key))
             if summary:
                 self._db.execute("UPDATE runs SET summary=? WHERE idem_key=?", (summary, key))
+
+    def _older_title(self, job_id: str, key: str) -> tuple[str, str] | None:
+        """A task saved before tasks kept their own title: its shown title, unless it ran in a new
+        chat thread (then the title may be the thread's name). Call with the lock held."""
+        for idem, title, continued in self._db.execute(
+                "SELECT idem_key, title, continued FROM runs WHERE (session_id=? OR idem_key=?) AND title IS NOT NULL "
+                "ORDER BY rowid", (job_id, key)):
+            if '"thread_id"' not in (continued or ""):
+                return idem, title
+        return None
+
+    def job(self, key: str, session_id: str | None, continued: str | None) -> dict[str, str]:
+        """The job a task belongs to: {id, name}. The id is its Hermes session (else the session it
+        continued, else the task itself); the name is set once, from the job's first task."""
+        job_id = session_id or _placed_session(continued) or key
+        with self._lock, self._db:
+            row = self._db.execute("SELECT name FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            if row:
+                return {"id": job_id, "name": row[0]}
+            first = self._db.execute(
+                "SELECT idem_key, own_title FROM runs WHERE (session_id=? OR idem_key=?) AND own_title IS NOT NULL "
+                "ORDER BY rowid LIMIT 1", (job_id, key)).fetchone()
+            if first is None:
+                first = self._older_title(job_id, key)
+            name = job_name(first[1]) if first else None
+            if not name:
+                # Not named yet (the titler is still working): a stand-in from the request, not stored.
+                request = self._db.execute("SELECT text FROM work_events WHERE idem_key=? AND kind='request' "
+                                           "ORDER BY seq LIMIT 1", (key,)).fetchone()
+                return {"id": job_id, "name": job_name(short_title(request[0]) if request else None) or "Voice task"}
+            self._db.execute("INSERT OR IGNORE INTO jobs (job_id,name,from_key,updated) VALUES (?,?,?,?)",
+                             (job_id, name, first[0], time.time()))
+        return {"id": job_id, "name": name}
 
     def add_shape(self, key: str, shape: dict[str, Any]) -> bool:
         """Attach a result's structure to its stored result (kept beside spoken/full)."""
@@ -629,7 +698,7 @@ class StateStore:
              assistant_name: str = "Hermes") -> dict[str, Any] | None:
         """The latest admitted job or one exact server-owned run, including past calls."""
         cols = """idem_key,run_id,status,updated,short_status,detail,progress_updated,
-                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure"""
+                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,session_id"""
         with self._lock:
             if idem_key:
                 row = self._db.execute(f"SELECT {cols} FROM runs WHERE idem_key=?", (idem_key,)).fetchone()
@@ -640,7 +709,7 @@ class StateStore:
             if row is None:
                 return None
             (key, actual_run_id, status, updated, short_status, detail, progress_updated,
-             status_source, result_json, title, dismissed, summary, continued, settled_at, failure) = row
+             status_source, result_json, title, dismissed, summary, continued, settled_at, failure, session_id) = row
             events = self._db.execute(
                 "SELECT kind,text,created FROM work_events WHERE idem_key=? ORDER BY seq DESC LIMIT 30", (key,)).fetchall()
         stale = status not in TERMINAL | {"waiting_for_approval"} and time.time() - updated > STALE_AFTER_S
@@ -669,6 +738,7 @@ class StateStore:
             "title": title, "summary": summary, "dismissed": bool(dismissed),
             "email_drafts": self.drafts_for(key),
             "plan": self.plan(key),
+            "job": self.job(key, session_id, continued),
         }
         why = public_failure(failure, self.hermes_home) if status == "failed" else None
         if why:
