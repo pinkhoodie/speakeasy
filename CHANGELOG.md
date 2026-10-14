@@ -2,6 +2,12 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.3.2 — Quick "on it", and answers you can use at a glance
+
+- **"On it" comes right away again.** After 0.3.1 the voice could take 6–7 seconds to acknowledge a request, and sometimes handed the same request off twice. It's now cued to acknowledge the moment work is handed off, and a repeat of the same words within a few seconds is ignored.
+- **Data gets drawn, not screenshotted.** When an answer has data, the agent now draws the part that matters with the app's cards (a matchup with both scores, key numbers, a short list, a chart) instead of a screenshot of the page, which got cut off in the panel. Pictures are for when the look itself matters, they never replace the answer, and a website's home page never counts as one.
+- **Recommendations fit you.** For things to do, places or shows, the agent checks what it knows about your taste first, leads with what fits, says why, and drops generic picks. If it doesn't know your taste yet, it asks.
+
 ## Mac 0.3.1 and Plugin 0.3.1 — A calmer panel you can scroll, and really no more "mm-hmm"
 
 - **The panel scrolls.** With several cards open you could get stuck in the middle with no way to reach the rest. The board and every job now scroll all the way with the trackpad or mouse wheel, and the panel never grows past your screen. Page Up/Down, Space and Home/End scroll too, and the arrow keys keep the selected job in view.

@@ -119,6 +119,28 @@ def test_handoff_starts_hermes_task_and_result_is_appended(fake_codex, tmp_path,
     wait_for(lambda: any("You have two meetings today." in a for a in appended), 10)
     transport.stop()
     assert done.wait(10)
+    from speakeasy.prompt import builder as P
+    assert appended[0] == P.ACK_NOW_NOTE  # the voice is cued to say "on it" right away
+    assert not any("Work has started" == a[:16] for a in appended)  # quiet notes never go alone
+
+
+def test_a_repeated_handoff_is_ignored(service):
+    from speakeasy.calls import Interaction
+    worker = C.CodexSidebandWorker.__new__(C.CodexSidebandWorker)
+    from speakeasy.calls import SidebandWorker
+    SidebandWorker.__init__(worker, service.rt, Interaction("vi_" + "e" * 32, "live_e"))
+    sent, dispatched = [], []
+
+    async def fake_append(kind, delegation_id, content):
+        sent.append(content)
+    worker.append = fake_append  # type: ignore[method-assign]
+    worker.schedule_dispatch = lambda *a: dispatched.append(a)  # type: ignore[method-assign]
+    item = {"type": "handoff_request", "input_transcript": "How's my fantasy team looking?"}
+    asyncio.run(worker._handoff({**item, "handoff_id": "h_1"}))
+    asyncio.run(worker._handoff({**item, "handoff_id": "h_2"}))
+    assert len(dispatched) == 1 and len(sent) == 1
+    asyncio.run(worker._handoff({**item, "handoff_id": "h_3", "input_transcript": "And the weather?"}))
+    assert len(dispatched) == 2
 
 
 def test_transcripts_never_start_work(fake_codex, service):

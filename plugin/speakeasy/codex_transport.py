@@ -20,7 +20,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .calls import SidebandWorker
+from .prompt import builder as P
 from .text import ID_RE, clean_transcript
+
+REPEAT_HANDOFF_S = 8.0  # the same words handed off again this soon are a repeat, not a new request
 
 CODEX_MODEL = "gpt-live-1-codex"
 _ENV_KEEP = ("HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "CODEX_HOME")
@@ -369,6 +372,15 @@ class CodexSidebandWorker(SidebandWorker):
                            handoff_id in self.delegations)
             return
         logger.info("speakeasy: Codex handoff received (%s chars)", len(request))
+        # The voice sometimes hands off the same words again when nothing came back quickly;
+        # that repeat would reach the running task as a duplicate follow-up.
+        said, now = clean_transcript(request).strip().lower(), time.monotonic()
+        last = getattr(self, "last_handoff", None)
+        self.last_handoff = (said, now)
+        if last and last[0] == said and now - last[1] < REPEAT_HANDOFF_S:
+            logger.info("speakeasy: ignored a repeated Codex handoff")
+            self.delegations.add(handoff_id)
+            return
         history = item.get("active_transcript")
         lines = []
         if isinstance(history, list):
@@ -386,6 +398,9 @@ class CodexSidebandWorker(SidebandWorker):
         context = "\n".join(lines)[-10000:]
         self.delegations.add(handoff_id)
         self.touch()
+        # Acknowledge right away: background notes are held on this voice (they'd draw "mm-hmm"),
+        # so without this cue the voice waits several seconds and may hand the words off again.
+        await self.append("session.thinking.append", None, P.ACK_NOW_NOTE)
         self.schedule_dispatch(handoff_id, context, item.get("task_id") or item.get("follow_up_task_id"))
 
     async def _send(self, kind: str, delegation_id: str | None, content: str) -> None:

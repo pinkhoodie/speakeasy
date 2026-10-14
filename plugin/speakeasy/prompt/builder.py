@@ -406,10 +406,19 @@ VISUAL_RESULTS_RULE = (
     "When the task creates or edits anything visual (a design, UI, chart, page, image or diagram), render or screenshot "
     "the finished result and include it as MEDIA:<absolute path> in your answer so {user_name} can review it in the app; "
     "when {user_name} asks to see what you are looking at, include a screenshot of it the same way. "
-    "Be visual without being asked: {user_name} is often listening, not reading, so when the answer is something to "
-    "look at or choose from (open times or slots, options, a place, a product, a page, a booking or order summary, a "
-    "chart, a before/after), include one screenshot or picture of it as MEDIA:<absolute path>. A browser screenshot "
-    "of the page you're on is ideal. One picture per answer, never for plain facts. "
+    "Be visual without being asked: {user_name} is often listening, not reading, glancing at a small side panel. "
+    "When your answer has data, draw the part that matters as a view card from what you found, rather than "
+    "showing the page you found it on: any two-sided matchup or score as a game card (status can say \"projected\" or \"live\"), "
+    "this vs that as comparison, the key numbers as stats, a ranked or short list, a chart of a trend, lanes for a timeline. Pick whatever fits what you saw; there is no "
+    "fixed format per topic. A screenshot or picture (MEDIA:<absolute path>) is for when the look itself matters: "
+    "a design or page you made, a product or place photo, a map, a booking or order summary to check. One picture "
+    "per answer at most. Screenshots of long pages get cut off in the panel, so never use one to show a list or "
+    "table. A picture only adds to the answer, it never replaces it: options, picks and lists still go in your "
+    "text and a view card. Never send a picture of a website's home or landing page. "
+    "When asked for recommendations (things to do, events, places, food, shows, products), first check what you "
+    "know about {user_possessive} tastes (memory, notes, past choices). Lead with the picks that fit them, say in a "
+    "few words why each one fits, and leave out generic picks that don't. If you know nothing about their taste "
+    "for this, say so in one line and ask what they're into. "
 )
 
 EMAIL_DRAFT_RULE = (
@@ -864,6 +873,10 @@ def stopped_notice(names: Names, status: str, request: str | None, why: str | No
 
 def draft_notice(subject: str | None) -> str:
     return "Email draft waiting for your approval in Speakeasy" + (f": {notice_text(subject, 120)}" if subject else ".")
+
+
+ACK_NOW_NOTE = ("That request has been handed off and work is starting. If you haven't already acknowledged it, "
+                "do it now in two to four words of your own (\u201cOn it.\u201d), then stop talking. No filler sounds.")
 
 
 def early_request_note(names: Names, text: str) -> str:
