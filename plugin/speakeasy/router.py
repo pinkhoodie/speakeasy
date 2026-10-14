@@ -329,6 +329,24 @@ class Decision:
     show: bool = False             # the user wants to SEE something (what it looks like), not just hear it
 
 
+@dataclasses.dataclass(frozen=True)
+class Focus:
+    """The task (and job) on the user's screen or in their hands: a strong hint, not an order."""
+    task_id: str
+    job: str = ""        # the job's short name, as the user sees it
+    detail: str = ""     # what part of it they are looking at, when the app says
+
+
+def focus_line(focus: Focus | None, tasks: list[OpenTask]) -> str:
+    """The routing model's hint about what the user is looking at, or "" when there's nothing open."""
+    if focus is None or not any(t.task_id == focus.task_id for t in tasks):
+        return ""
+    name = f" ({focus.job})" if focus.job else ""
+    seen = f", looking at: {focus.detail[:200]}" if focus.detail else ""
+    return (f"The user is looking at task {focus.task_id}{name}{seen}. Send the request there "
+            f"(follow_up_task_id) unless it is clearly unrelated to that task.\n\n")
+
+
 def _ago(seconds: float | None) -> str:
     if seconds is None:
         return ""
@@ -352,7 +370,7 @@ def chat_lines(chats: list[Chat]) -> str:
 
 def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
                    chats: list[Chat] | None = None, call_so_far: str = "",
-                   replied_task_id: str | None = None) -> list[dict[str, str]]:
+                   replied_task_id: str | None = None, focus: Focus | None = None) -> list[dict[str, str]]:
     open_lines = "\n".join(f"- {t.task_id}: {t.request[:200]} ({t.status}"
                            + (f", started {int(t.age_s)}s ago" if t.age_s is not None else "") + ")"
                            + (f"\n    the assistant's last spoken answer came from this task: \"{t.result[:300]}\""
@@ -398,6 +416,7 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
                                     f"Existing conversations:\n{chat_lines(chats or [])}\n\n"
                                     + (f"The call so far (for what 'that', 'it', 'the X one' refer to):\n"
                                        f"{call_so_far[-1200:]}\n\n" if call_so_far and (chats or tasks) else "")
+                                    + focus_line(focus, tasks[-MAX_OPEN_TASKS:])
                                     + f"Request: {request[:1500]}"},
     ]
 
@@ -806,8 +825,11 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
            call: Callable[[list[dict[str, str]]], str | None] | None = None,
            timeout: float = ROUTE_TIMEOUT_S, chats: list[Chat] | None = None,
            call_so_far: str = "", replied_task_id: str | None = None,
-           jev_place: Callable[..., dict[str, Any] | None] | None = None) -> Decision:
-    """Route one handoff. A task id the voice model marked wins outright (no model call)."""
+           jev_place: Callable[..., dict[str, Any] | None] | None = None,
+           focus: Focus | None = None) -> Decision:
+    """Route one handoff. A task id the voice model marked wins outright (no model call). A focused
+    task is a strong prior: the model is told the user is looking at it and sends the request there
+    unless it is clearly unrelated; without a model answer the request goes to the focused task."""
     request = (request or "").strip()
     topics = topics or []
     open_tasks = tasks[-MAX_OPEN_TASKS:]
@@ -816,6 +838,10 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
         return Decision([quick], None, "quick")
     if isinstance(marked_task_id, str) and any(t.task_id == marked_task_id for t in open_tasks):
         return Decision([Part("follow_up", request, marked_task_id)], None, "marked")
+    if focus is not None and any(t.task_id == focus.task_id for t in open_tasks):
+        budget = max(timeout, CHAT_ROUTE_TIMEOUT_S) if chats else timeout
+        return _decide_with_focus(request, open_tasks, topics, call, budget, chats, call_so_far, replied_task_id,
+                                  focus)
     if quick is not None:
         return Decision([quick], None, "quick")
     tail = continues_newest(request, open_tasks)
@@ -852,6 +878,27 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
     logger.debug("speakeasy: routing took %d ms (%s)", latency, "model" if decision else "fallback")
     if decision is None:
         return Decision(route(request, tasks, marked_task_id), None, "fallback", latency)
+    return dataclasses.replace(decision, latency_ms=latency)
+
+
+def _decide_with_focus(request: str, open_tasks: list[OpenTask], topics: list[Topic],
+                       call: Callable[[list[dict[str, str]]], str | None] | None, timeout: float,
+                       chats: list[Chat] | None, call_so_far: str, replied_task_id: str | None,
+                       focus: Focus) -> Decision:
+    """Ask the routing model with the focused task highlighted; it may still send an unrelated
+    request elsewhere. No answer (no model, a timeout, bad JSON) keeps the old rule: the focus."""
+    started = time.monotonic()
+    decision = None
+    model_call = call or functools.partial(aux_call, timeout=timeout)
+    future = _EXECUTOR.submit(model_call, route_messages(request, open_tasks, topics, chats, call_so_far,
+                                                         replied_task_id, focus))
+    try:
+        decision = parse_decision(future.result(timeout=timeout), request, open_tasks, topics, chats)
+    except Exception as exc:
+        logger.info("speakeasy: routing model unavailable, request goes to the focused task (%s)", type(exc).__name__)
+    latency = int((time.monotonic() - started) * 1000)
+    if decision is None:
+        return Decision([Part("follow_up", request, focus.task_id)], None, "focus", latency)
     return dataclasses.replace(decision, latency_ms=latency)
 
 

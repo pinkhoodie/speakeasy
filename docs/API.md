@@ -278,6 +278,25 @@ dismissal) and the recap of results that finished while no call was open (`away`
 Product and image cards appear as `result.cards`; image cards are fetched through
 `/voice/card-image/...`, never by path.
 
+Each task also has `job`: `{"id": "...", "name": "Night shift"}`. The id is the Hermes session
+the task runs in (else the session it continued, else the task's own key); tasks with the same id
+are one job, across calls and days. The name is 2-4 words from the job's first task (never a chat
+thread's title), set once and possibly refined by the titler; never empty.
+
+A question card (`result.question`, also the first of `result.views`) may carry `context`, `why`
+and `affects` strings, and each of its `options` is either a string or an object
+`{text, detail, tags[{text, tone}], risk (low|medium|high), reversible}` (tag tone: good, warn,
+bad, neutral). `approvable: true` is set by the plugin only, never taken from the model: the
+recommended option is low risk and reversible, and nothing in the question or that option spends
+money, speaks as the user, publishes or deletes. Answer with the option's `text`.
+
+View kinds for explaining a job (tone: good, warn, bad, info, neutral; an unknown tone is dropped):
+`lanes {title, start_label, end_label, ticks[≤6], lanes[≤6]{label, segments[≤8]{from, to, tone,
+label}}, note}` (from/to clamped to 0..1, a segment with to ≤ from is dropped);
+`before_after {title, before{label, text, image}, after{label, text, image}}` (image: an https URL
+or a card number for `/voice/card-image`); `flow {title, nodes[≤5]{label, detail, tone}}`;
+`devices {title, items[≤8]{name, value, detail, tone, history[≤6]}}`.
+
 A `failed` task also has `failure`: why it failed, in Speakeasy's own words (the provider's error
 text is never passed through). `kind` is `billing`, `auth`, `rate_limit`, `model_not_found`,
 `hermes_key`, `hermes_unreachable` or `unknown`; `label` is a short tag for the status line

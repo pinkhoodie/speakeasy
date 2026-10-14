@@ -174,7 +174,7 @@ class Runtime:
 
     def route(self, request: str, tasks: list[router.OpenTask], marked: Any,
               chats: list[router.Chat] | None = None, call_so_far: str = "",
-              replied_task_id: str | None = None) -> router.Decision:
+              replied_task_id: str | None = None, focus: router.Focus | None = None) -> router.Decision:
         settings = self.routable()
         topics = ([router.Topic(c.label, c.topic) for c in channels.opted_in(settings)]
                   if channels.mode(settings) == "topic" else [])
@@ -184,7 +184,7 @@ class Runtime:
             from . import jev
             place = functools.partial(jev.placement, self.hermes_home, provider)
         return router.decide(request, tasks, marked, topics, self.route_call, chats=chats, call_so_far=call_so_far,
-                             replied_task_id=replied_task_id, jev_place=place)
+                             replied_task_id=replied_task_id, jev_place=place, focus=focus)
 
     def explicit_channel(self, request: str) -> channels.Choice | None:
         return channels.explicit(request, self.routable(), P.clarify_channel)
@@ -779,6 +779,14 @@ class SidebandWorker:
         await self.follow_up(delegation_id, 0, f"User: {text}", router.Part("follow_up", text, task_id))
         return delegation_id
 
+    def focus_job(self, task_id: str) -> str:
+        """The name of the job a focused task belongs to (what the user sees on the job view)."""
+        with self.interaction.lock:
+            run = self.interaction.runs.get(task_id)
+            key = run.idem_key if run else None
+        work = self.store.work(idem_key=key) if key else None
+        return ((work or {}).get("job") or {}).get("name") or ""
+
     def focus(self) -> tuple[str | None, str]:
         """The task the user is facing in the headset, if it's one of this call's open tasks."""
         with self.interaction.lock:
@@ -1143,14 +1151,13 @@ class SidebandWorker:
             last_request = await self.settle(last_request)
         if not marked and await self.quick_answer(delegation_id, revision, last_request):
             return
+        focus = None
         if not marked:
             focused, detail = self.focus()
             if focused and not router.wants_new(last_request):
-                # Facing or holding a task in the headset: unnamed requests go to that task.
-                marked = focused
-                if detail:
-                    last_request = f"{last_request}\n\n({self.names.user} is looking at: {detail})"
-                logger.info("speakeasy: routed by focus")
+                # The task on screen (or in the headset) is a strong prior for the routing model, not
+                # an order: an unrelated request still goes elsewhere.
+                focus = router.Focus(focused, self.focus_job(focused), detail)
         candidates = await self.conversation_candidates(last_request)
         now = time.time()
         chats = [router.Chat(f"c{i + 1}", c.conv.where, c.snippets, c.voice_request,
@@ -1159,12 +1166,19 @@ class SidebandWorker:
         earlier = "\n".join(line for line in context.splitlines()[:-1] if line.startswith(("User: ", "Assistant: ")))
         try:
             decision = await asyncio.to_thread(self.rt.route, last_request, self.open_tasks(), marked, chats,
-                                               earlier[-1200:], replied_task_id=self.replied_task)
+                                               earlier[-1200:], replied_task_id=self.replied_task,
+                                               **({"focus": focus} if focus else {}))
         except Exception as exc:  # routing is a nicety: without it the request still becomes new work
             logger.warning("speakeasy: routing failed, starting as new work (%s)", type(exc).__name__)
             decision = router.fallback_decision(last_request)
         self.route_timings[delegation_id] = decision.latency_ms
         part = decision.parts[0]
+        if focus is not None:
+            went = "to the focused task" if part.task_id == focus.task_id else "elsewhere"
+            logger.info("speakeasy: focused request routed %s (%s)", went, decision.source)
+            if part.task_id == focus.task_id and focus.detail:
+                part = router.Part(part.kind, f"{part.request}\n\n({self.names.user} is looking at: {focus.detail})",
+                                   part.task_id)
         if part.kind == router.IGNORE:
             self.handoff_at.pop(delegation_id, None)
             if delegation_id.startswith(EARLY_PREFIX):
@@ -1838,8 +1852,9 @@ class SidebandWorker:
             self.store.set_continued(idem, session_id, f"a thread in {channel.label}")
 
         def on_title(title: str) -> None:
-            # Hermes names the thread after its first turn; show the same name in the panel.
-            self.store.set_title(idem, title)
+            # Hermes names the thread after its first turn; show the same name in the panel (the job
+            # keeps the name from the work itself).
+            self.store.set_title(idem, title, thread=True)
             self.publish()
 
         loop = asyncio.get_running_loop()

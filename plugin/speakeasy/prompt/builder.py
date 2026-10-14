@@ -374,8 +374,13 @@ VIEWS_RULE = (
     "steps {title, items[]}; stats {title, items[{label, value, delta, good}]}; "
     "chart {title, style (line|bar), unit, labels[], series[{name, values[]}]}; progress {label, value, total, unit}; "
     "news {items[{headline, source, when, url}]}; quote {symbol, name, price, change_pct, points[]}; "
-    "weather {place, temp, unit, condition, high, low, days[]}; game {league, status, teams[{name, score, winner}]}. "
-    "Use https URLs only, never invent images or numbers, and skip the block when nothing is worth showing. "
+    "weather {place, temp, unit, condition, high, low, days[]}; game {league, status, teams[{name, score, winner}]}; "
+    "lanes (what ran when, where it broke) {title, start_label, end_label, ticks[], lanes[{label, segments[{from, to, "
+    "tone, label}]}], note} with from/to as 0-1 fractions of the span; before_after {title, before{label, text, image}, "
+    "after{label, text, image}}; flow (where something goes) {title, nodes[{label, detail, tone}]}; devices {title, "
+    "items[{name, value, detail, tone, history[]}]}; tone is good, warn, bad, info or neutral. "
+    "Use https URLs only (before_after images may be an absolute path of a screenshot you took), never invent images "
+    "or numbers, and skip the block when nothing is worth showing. "
 )
 
 QUESTION_RULE = (
@@ -385,7 +390,11 @@ QUESTION_RULE = (
     "[\"<2 to 4 short answers, a few words each>\"], \"recommended\": <index of the one you'd pick, or omit>}. "
     "When the options are things to look at (layouts, designs, photos, places, products), make each option "
     "{\"text\": \"<short name>\", \"image\": \"<absolute path of a screenshot or render of it, or an https image URL>\"} "
-    "so {user_name} can see them side by side. After the block, "
+    "so {user_name} can see them side by side. For a real decision (a change, a fix, a plan to pick), also add "
+    "\"context\" (the situation in plain words, one or two sentences), \"why\" (why you recommend that option) and "
+    "\"affects\" (what it touches), and make each option {\"text\": \"<answer>\", \"detail\": \"<what happens>\", "
+    "\"risk\": \"low|medium|high\", \"reversible\": true|false}. Build it only from facts you checked, and prefer "
+    "one visual card (lanes, before_after, flow, devices or chart) that explains the decision. After the block, "
     "stop.  {user_name} answers with one tap or by voice, and the answer comes back to you here. Ask at most "
     "one question, only for a real decision, never to confirm something you were already asked to do. "
 )

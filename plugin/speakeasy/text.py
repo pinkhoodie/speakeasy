@@ -66,26 +66,76 @@ HEADS_UP_RE = re.compile(
     r"may (?:have )?(?:changed|broken)|instead)\b")
 
 
+# A sentence that leans on one before it ("Its one repeat error...", "That ended...") makes no sense
+# read alone, so the spoken summary never lifts it out of its paragraph.
+LEANS_BACK_RE = re.compile(
+    r"(?i)^(?:it|its|it's|this|that|these|those|they|their|them|he|his|she|her|also|but|and|so|then|which|"
+    r"if|or|otherwise|here|there's|both|either|neither|the other|another|same)\b")
+# Soft heads-up words ("instead", "note that") only count in the opening paragraph; further down they
+# are usually side notes, not warnings.
+STRONG_HEADS_UP_RE = re.compile(
+    r"(?i)\b(?:broke|broken|failed|failing|couldn't|could not|unable|didn't work|not working|"
+    r"stopped working|expired|heads up|warning|needs? your|waiting (?:for|on) you|approve|confirm)\b")
+
+
+def _sentences(full: str) -> list[tuple[int, str]]:
+    """Plain sentences with the paragraph each sits in. Bullets and markdown read as plain sentences;
+    a blank line or a heading starts a new paragraph."""
+    text = re.sub(r"https?://\S*[^\s.,;:!?)]|[`*_>]+", "", full)
+    out, para, gap = [], 0, False
+    for raw in text.splitlines():
+        line = re.sub(r"^\s*(?:[-•]|\d+[.)])\s+", "", raw).strip()
+        if not line or line.startswith("#") or line.endswith(":"):
+            gap = True
+            line = line.lstrip("#").strip() if line.startswith("#") else ""
+            if not line:
+                continue
+        if gap and out:
+            para += 1
+        gap = False
+        for x in re.split(r"(?<=[.!?])\s+", line):
+            x = x.strip()
+            if x:
+                out.append((para, x if re.search(r"[.!?]$", x) else x + "."))
+    return out
+
+
 def spoken_from(full: str, limit: int = 3) -> str:
     """What to say aloud when the task gave no SPOKEN line: the opening sentence, then the first
-    sentences that carry a problem or a heads-up, so a warning is never cut off. Bullets and
-    markdown read as separate plain sentences."""
-    text = re.sub(r"https?://\S*[^\s.,;:!?)]|[`*_#>]+", "", full)
-    lines = [re.sub(r"^\s*(?:[-•]|\d+[.)])\s+", "", l).strip() for l in text.splitlines()]
-    sentences = []
-    for line in lines:
-        if line:
-            sentences += [x.strip() for x in re.split(r"(?<=[.!?])\s+", line) if x.strip()]
-    sentences = [x if re.search(r"[.!?]$", x) else x + "." for x in sentences]
+    sentences that carry a problem or a heads-up, so a warning is never cut off. A heads-up further
+    down is only picked when it stands on its own, and no sentence is said twice."""
+    sentences = _sentences(full)
     if not sentences:
         return ""
-    picked = [0]
-    flagged = [i for i, x in enumerate(sentences[1:], 1) if HEADS_UP_RE.search(x)]
-    picked += flagged[: limit - 1]
-    if len(picked) == 1 and len(sentences) > 1:
+    picked, seen = [0], {sentences[0][1].lower()}
+    for i, (para, x) in enumerate(sentences[1:], 1):
+        if len(picked) >= limit:
+            break
+        if x.lower() in seen:
+            continue
+        lead = para == 0
+        if (HEADS_UP_RE.search(x) if lead else STRONG_HEADS_UP_RE.search(x) and not LEANS_BACK_RE.match(x)):
+            picked.append(i)
+            seen.add(x.lower())
+    if len(picked) == 1 and len(sentences) > 1 and sentences[1][1].lower() not in seen:
         picked.append(1)
-    out = " ".join(sentences[i] for i in sorted(picked))
+    out = " ".join(sentences[i][1] for i in sorted(picked))
     return re.sub(r"\s+([.,;:!?])", r"\1", re.sub(r"\s+", " ", out)).strip()
+
+
+def said_once(text: str) -> str:
+    """The reply once, when it arrived as the same text twice in a row (a conversation turn's final
+    message has come back with its body repeated); anything else is returned unchanged."""
+    body = text.strip()
+    if len(body) < 80:
+        return text
+    head = body[:60]
+    at = body.find(head, 1)
+    while at != -1:
+        if body[:at].strip() == body[at:].strip():
+            return body[:at].strip()
+        at = body.find(head, at + 1)
+    return text
 
 
 def safe_user_text(value: Any, limit: int = 500) -> str | None:
@@ -536,6 +586,7 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
 
     if not isinstance(output, str) or not output.strip():
         return None
+    output = said_once(output)
     label = None
     done = list(re.finditer(r"(?im)^[ \t]*DONE:[ \t]*(.+?)[ \t]*$", output))
     if done:
@@ -551,26 +602,28 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
     output, cards = product_cards(output)
     from .views import extract as extract_views
     output, views = extract_views(output)
-    from .views import extract_question, spoken_question
+    from .views import extract_question, number_view_images, option_text, spoken_question, view_images
     output, question = extract_question(output)
     option_images = question.pop("_option_images", []) if question else []
-    for raw in option_images:
+    for raw in option_images + view_images(views):
         if raw and raw not in output:
-            output += f"\nMEDIA:{raw}"   # one picture per option, through the same vetting as any result image
+            output += f"\nMEDIA:{raw}"   # pictures on cards go through the same vetting as any result image
     output, images, media_tags = media_images(output, image_roots)
     cards = (cards + images)[:MAX_CARDS]
-    if question and any(option_images):
-        def number(raw: str) -> int:
-            if not raw:
-                return 0
-            want = raw if raw.startswith("https://") else str(Path(raw).expanduser().resolve())
-            for i, card in enumerate(cards):
-                if card.get("image_url") == want or card.get("path") == want:
-                    return i + 1
+
+    def number(raw: str) -> int:
+        if not raw:
             return 0
+        want = raw if raw.startswith("https://") else str(Path(raw).expanduser().resolve())
+        for i, card in enumerate(cards):
+            if card.get("image_url") == want or card.get("path") == want:
+                return i + 1
+        return 0
+    number_view_images(views, number)   # card numbers, fetched by the app from /voice/card-image
+    if question and any(option_images):
         numbers = [number(r) for r in option_images]
         if any(numbers):
-            question["images"] = numbers   # card numbers, fetched by the app from /voice/card-image
+            question["images"] = numbers
     full = safe_full_text(output)
     spoken = safe_user_text(spoken_raw, 500) if spoken_raw else None
     if not spoken and full:
@@ -590,7 +643,7 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
         views = [question] + [v for v in views if v.get("kind") != "question"]
     if question:
         # The written answer (chat, task details) keeps the question so it can be answered there too.
-        listed = "\n".join(f"{i + 1}. {o}" + (" (recommended)" if question.get("recommended") == i else "")
+        listed = "\n".join(f"{i + 1}. {option_text(o)}" + (" (recommended)" if question.get("recommended") == i else "")
                            for i, o in enumerate(question["options"]))
         full = ((full or "") + f"\n\n**{question['question']}**\n{listed}").strip()
     result: dict[str, Any] = {"spoken": spoken, "full": full or spoken}
