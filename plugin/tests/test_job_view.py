@@ -129,6 +129,7 @@ def test_approve_is_the_plugins_call_never_the_models():
     assert approvable(text="Pay the $40 upgrade") is False                 # money
     assert approvable(detail="Then I send the email from your account") is False  # speaking as the user
     assert approvable(question="Publish the new page now?") is False       # publishing
+    assert approvable(text="Ship the plugin now") is False                 # publishing, said as shipping
     assert approvable(detail="Deletes the old cache folder") is False      # deleting
     plain = _ask({"question": "Which one?", "options": ["A", "B"], "recommended": 0, "approvable": True})
     assert "approvable" not in plain["question"]

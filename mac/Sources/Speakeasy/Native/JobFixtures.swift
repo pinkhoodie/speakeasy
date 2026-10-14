@@ -92,7 +92,7 @@ extension PreviewFixtures {
                  "tags": [["text": "Safest", "tone": "good"]], "risk": "low", "reversible": true],
                 ["text": "Ship both now", "detail": "Everyone gets the new board before you've used it.", "risk": "medium", "reversible": true],
                 ["text": "Hold both", "detail": "Nothing changes until you say so."]],
-            "recommended": 0, "affects": "2 downloads · the public site", "approvable": true]
+            "recommended": 0, "affects": "2 downloads · the public site"]
         let relFlow: [String: Any] = ["kind": "flow", "title": "Where it goes", "nodes": [
             ["label": "Code", "detail": "main", "tone": "good"], ["label": "Checks", "detail": "all passed", "tone": "good"],
             ["label": "Plugin", "detail": "v2.4", "tone": "info"], ["label": "Mac app", "detail": "waits", "tone": "warn"]]]

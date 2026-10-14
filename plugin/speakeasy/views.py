@@ -121,7 +121,7 @@ APPROVE_GUARD = {
                             r"(?:email|e-mail|message|reply|note|invite|text|dm|letter|post|tweet)|"
                             r"\b(?:email|e-mail|reply|replies|message|messages|dm|tweet|rsvp|invite)\b|"
                             r"on your behalf|in your name|as you\b|from your (?:account|address|number)",
-    "publishing": r"\b(?:publish|post|share|public|announce|launch|release|deploy|go live|push|merge)"
+    "publishing": r"\b(?:publish|post|share|public|announce|launch|release|deploy|go live|push|merge|ship)"
                   r"(?:s|es|ed|ing|d)?\b",
     "deleting": r"\b(?:delete|remove|erase|wipe|destroy|purge|uninstall|overwrite|discard|cancel|unsubscribe|"
                 r"revoke|drop)(?:s|es|ed|ing|d|ped|ping)?\b",
