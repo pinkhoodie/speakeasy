@@ -2,11 +2,18 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
-## Mac 0.2.19 and Plugin 0.2.56 — A calmer panel, and no more "mm-hm"
+## Mac 0.3.0 and Plugin 0.3.0 — Your work as jobs, with the facts to decide
 
-- **The panel stays readable on long calls.** Finished tasks take one short line instead of two, and only the newest two show; the rest fold into "+N earlier", which opens the full list. When something needs you (a question, an approval, a draft, a review), finished tasks shrink to one row so it stays in view. Running tasks always show.
-- **No repeated cards bar.** The "N cards" bar no longer appears when that task's cards are already showing below it.
-- **No more "mm-hm" while work starts (plugin).** With ChatGPT voice, the voice played a canned "mm-hm" each time it handed work off, so you'd hear "On it. Mm-hm. Mm-hm." That filler is now turned off; its own short acknowledgement is enough.
+- **The orb.** Click the orb (or press Esc) and the panel folds into a small orb; the call keeps going. Its color tells you what's up at a glance: grey when idle, blue while you talk, violet while something runs, a blue dot for a new answer, amber with a count when something needs you, red when something failed. The panel header uses the same orb, and the line next to it says why ("2 need you", "1 new answer").
+- **A board of jobs, not a pile of tasks.** Open the orb and your work is grouped by job: what needs you first, then new answers, what's running, and what's done today. Follow-ups to the same conversation stay in one job, even across days. Arrow keys move, Return opens, Esc goes back.
+- **Decisions you can actually make.** When Hermes needs a call from you, it now explains what's going on, why it recommends an option, and what each option does: its risk, and whether you can undo it. Simple, low-risk calls get an **Approve** button right on the board; anything that spends money, sends something as you, publishes, or deletes always opens the options first.
+- **Pictures, not walls of text.** Results can come with timelines (what ran when, and where it broke), before and after, where something goes, a grid of your devices, check tiles and charts. Long reports show their checks, what shipped, and what's still open as a board. Everything drawn comes from real data.
+- **Answers get their own place.** A question with nothing to decide shows up under New answers with a small preview (the temperature, a chart, which option won). Open it to see the visuals first, then the details.
+- **Talk to what you're looking at.** With a job open, anything you say goes to that job unless it's clearly about something else. A "Talking to" label shows where your words go.
+- **Watch it work.** A running job shows its steps as they happen, with Stop and "Tell it something".
+- **A calmer panel on long calls.** Finished tasks take one short line, and older ones fold into "+N earlier".
+- **No more "mm-hm" (plugin).** With ChatGPT voice, the voice played a canned "mm-hm" every time it handed work off. That filler is off.
+- **Fixes (plugin).** Some long answers were saved twice; they're now kept once. When a task had no spoken summary, the read-out could pick a sentence out of context or repeat one; it now reads the opening and only clear warnings.
 
 ## Plugin 0.2.55 — Long answers come sorted
 
