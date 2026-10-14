@@ -120,7 +120,9 @@ def test_handoff_starts_hermes_task_and_result_is_appended(fake_codex, tmp_path,
     transport.stop()
     assert done.wait(10)
     from speakeasy.prompt import builder as P
-    assert appended[0] == P.ACK_NOW_NOTE  # the voice is cued to say "on it" right away
+    assert appended[0].startswith("That request has been handed off")  # the voice is cued to ack right away
+    assert "calendar" in appended[0]  # with the request, so the ack can fit the task
+    assert "\u201cOn it.\u201d)" not in appended[0]  # no stock example phrase to parrot
     assert not any("Work has started" == a[:16] for a in appended)  # quiet notes never go alone
 
 

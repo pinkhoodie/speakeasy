@@ -2,6 +2,10 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.3.4 — Acknowledgements that fit the ask
+
+- **No more stock "On it."** When you hand off a task, the voice now acknowledges it in its own words about what you actually asked for, and doesn't repeat the same phrase from one request to the next.
+
 ## Mac 0.3.2 — The answer leads, pictures fold away
 
 - **A picture no longer hides the answer.** When a finished answer also came with a screenshot, the app treated it as something waiting for you to look at: the job said "Needs you", the picture filled the view, and the actual answer sat far below. Now it's a new answer: the headline and any scoreboard, numbers or list come first, then the report, and the picture folds into a one-line "1 picture" row you can open.

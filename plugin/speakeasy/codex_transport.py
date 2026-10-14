@@ -400,7 +400,7 @@ class CodexSidebandWorker(SidebandWorker):
         self.touch()
         # Acknowledge right away: background notes are held on this voice (they'd draw "mm-hmm"),
         # so without this cue the voice waits several seconds and may hand the words off again.
-        await self.append("session.thinking.append", None, P.ACK_NOW_NOTE)
+        await self.append("session.thinking.append", None, P.ack_now_note(cleaned_request))
         self.schedule_dispatch(handoff_id, context, item.get("task_id") or item.get("follow_up_task_id"))
 
     async def _send(self, kind: str, delegation_id: str | None, content: str) -> None:

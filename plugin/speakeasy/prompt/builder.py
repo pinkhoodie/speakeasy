@@ -875,8 +875,22 @@ def draft_notice(subject: str | None) -> str:
     return "Email draft waiting for your approval in Speakeasy" + (f": {notice_text(subject, 120)}" if subject else ".")
 
 
-ACK_NOW_NOTE = ("That request has been handed off and work is starting. If you haven't already acknowledged it, "
-                "do it now in two to four words of your own (\u201cOn it.\u201d), then stop talking. No filler sounds.")
+ACK_STYLE = ("in a few words of your own that show you're looking into this particular thing (name what "
+             "it's about, not a stock phrase). Don't say \u201cOn it\u201d, \u201cChecking\u201d or \u201cOne sec\u201d, "
+             "and never reuse the wording you used for an earlier request")
+
+
+def ack_now_note(request: str = "") -> str:
+    """Cue the voice to acknowledge a handoff now. The request is included so the ack can fit the task;
+    no example phrase is given because the voice repeats examples word for word."""
+    about = notice_text(request, 200) if request else ""
+    return ("That request has been handed off and work is starting"
+            + (f" (they asked: \u201c{about}\u201d)" if about else "")
+            + ". If you haven't already acknowledged it, do it now " + ACK_STYLE
+            + ", then stop talking. No filler sounds.")
+
+
+ACK_NOW_NOTE = ack_now_note()
 
 
 def early_request_note(names: Names, text: str) -> str:
@@ -886,7 +900,7 @@ def early_request_note(names: Names, text: str) -> str:
         "Before this call finished connecting, {user_name_cap} already said: \u201c", names) + text.strip()[:1000] + (
         "\u201d\nThis is their first request. It has already been handed off and work has started, so do NOT "
         "hand it off again and do not ask them to repeat it. Don't greet them or introduce yourself: "
-        "acknowledge it in a few words of your own (\u201cOn it\u201d), then stop talking. If it was only a "
+        "acknowledge it " + ACK_STYLE + ", then stop talking. If it was only a "
         "greeting or small talk, just answer it briefly.")
 
 
