@@ -760,9 +760,10 @@ struct DecisionOptionRow: View {
                         .foregroundStyle(chosen ? Color.white : Color.secondary)
                     Text(option.text).font(.system(size: 12.5 * s, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
-                    if recommended && !dimmed { JobPill(text: "Recommended", style: .blue) }
                     if chosen { Image(systemName: "checkmark").font(.system(size: 11 * s, weight: .bold)).foregroundStyle(JobStyle.blueInk) }
                 }
+                // Its own line: beside the title it squeezed the option onto three hyphenated lines on a phone.
+                if recommended && !dimmed { JobPill(text: "Recommended", style: .blue).padding(.leading, 26) }
                 if let detail = option.detail {
                     Text(detail).font(.system(size: 11.5 * s)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         .padding(.leading, 26)

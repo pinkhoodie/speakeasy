@@ -82,11 +82,16 @@ extension PreviewFixtures {
         s.interactionID = "vi_preview"
         s.exchange = Exchange(you: "What needs me?", assistant: "Three things need you; two are still running.", replyStarted: true)
 
+        // Sample times never fall before today's midnight: just after midnight, "40 min ago" was
+        // yesterday and the Done-today samples dropped off the board.
+        let midnight = Calendar.current.startOfDay(for: now).timeIntervalSince1970
+        func sameDay(_ t: TimeInterval) -> TimeInterval { max(t, midnight + 1) }
+
         func task(_ id: String, job: (String, String)?, title: String, status: String = "completed", age: TimeInterval,
                   short: String? = nil, detail: String? = nil, plan: [String] = [], milestones: [String] = [],
                   result: [String: Any]? = nil, failure: String? = nil) -> TaskItem {
             var json: [String: Any] = ["task_id": id, "run_id": "run_\(id)", "status": status, "title": title,
-                                       "updated_at": now.timeIntervalSince1970 - age, "status_source": "authored"]
+                                       "updated_at": sameDay(now.timeIntervalSince1970 - age), "status_source": "authored"]
             if let job { json["job"] = ["id": job.0, "name": job.1] }
             if let short { json["short_status"] = short }
             if let detail { json["detail"] = detail }
