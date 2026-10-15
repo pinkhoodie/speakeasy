@@ -2,6 +2,12 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.3.5 — Status questions get real answers, and the voice talks like a person
+
+- **"How's that coming along?" gets a real update.** A short status question said right after a request used to get glued onto that request and sent to the task as more work, so the voice just said it had passed it on. Status questions now stand on their own. The routing model also recognizes looser ones ("you seem stuck", "what's it doing?"), and the answer comes from what the task is actually doing right now (reading files, editing code, running commands, what it last wrote), not just "I'm on it."
+- **No more "Status unconfirmed" on queued follow-ups.** A follow-up waiting its turn behind work already running in the same conversation now stays marked as queued instead of going stale after 90 seconds.
+- **Less script, more person.** The voice's instructions no longer contain sample lines it repeated word for word ("On it", "got it, adding that", "Your draft is on the card…", "It will come back as one answer"). It's told how to sound, the way a sharp friend at the next desk would react to that particular ask, and to never reuse the same wording on a call.
+
 ## Plugin 0.3.4 — Acknowledgements that fit the ask
 
 - **No more stock "On it."** When you hand off a task, the voice now acknowledges it in its own words about what you actually asked for, and doesn't repeat the same phrase from one request to the next.

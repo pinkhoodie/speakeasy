@@ -85,8 +85,7 @@ def rules_text(names: Names, delivery_label: str = "", channels: list[dict[str, 
 def truthfulness(names: Names) -> str:
     return render(
         "Speak in the first person as {assistant_name}: the backend work is your own work, not someone you hand off to. "
-        "Say things like \"let me check\" or \"I'm looking into it\"; never \"I'll check with Hermes\", "
-        "\"I'll ask the backend\", or \"I'll let you know what they say\". "
+        "Never talk about checking with Hermes, asking the backend, or relaying what someone else says. "
         "Stay truthful about how it works: Hermes runs any background workers on {machine_description}. "
         "Never invent people, teams, or colleagues, and explain the setup honestly if {user_name} asks.", names)
 
@@ -652,8 +651,29 @@ DIDNT_CATCH = ("I heard only a fragment and did not start anything. Say, in a fe
 _PLUMBING = re.compile(r"(?i)^(?:continuing in|started in|queued|in the thread|the answer will land)")
 
 
-def status_answer(name: str, status: str | None, steps: list[str], age_s: float, result: str | None) -> str:
-    """What the voice says to "what's the status?", built from what the task has actually reported."""
+_TOOL_STEPS = {
+    "terminal": "running commands", "execute_code": "running a script", "read_file": "reading files",
+    "search_files": "searching files", "patch": "editing code", "write_file": "writing a file",
+    "web_search": "searching the web", "web_extract": "reading web pages", "browser_exec": "working in the browser",
+    "delegate_task": "handing part of it to a helper", "skill_view": "pulling up its notes on this",
+    "vision_analyze": "looking at a screenshot", "x_search": "searching X", "ha_call_service": "controlling a device",
+}
+
+
+def tool_step(name: str) -> str:
+    """A tool the task called, as a plain step ("searching the web"); "" for ones not worth saying."""
+    name = str(name or "")
+    if name in _TOOL_STEPS:
+        return _TOOL_STEPS[name]
+    if name.startswith("mcp__") or name == "tool_call":
+        return "using one of its connected tools"
+    return ""
+
+
+def status_answer(name: str, status: str | None, steps: list[str], age_s: float, result: str | None,
+                  live: list[str] | None = None) -> str:
+    """What the voice says to "what's the status?", built from what the task has reported and, when it
+    has said little, from what its session has actually been doing."""
     concrete = [re.sub(r"\s+", " ", s).strip().rstrip(".") for s in steps if s and not _PLUMBING.search(s)]
     minutes = int(age_s // 60)
     running = f"{minutes} min" if minutes else "under a minute"
@@ -667,8 +687,11 @@ def status_answer(name: str, status: str | None, steps: list[str], age_s: float,
         facts = f"Running for {running}. Latest steps, newest last: " + "; ".join(concrete[-3:]) + "."
     else:
         facts = f"Running for {running}; no concrete step reported yet."
+    if live and status not in {"completed", "failed", "interrupted", "cancelled"}:
+        facts += " What it has been doing most recently, oldest first: " + "; ".join(live[-5:]) + "."
     return (f"They asked how the \"{name}\" task is going. Answer now, briefly, in your own words, from these facts "
-            f"only; do not start new work and don't read them out verbatim. {facts}")[:2000]
+            f"only, like a colleague giving a quick update: what it's done and what it's on now; do not start new work, "
+            f"don't read them out verbatim, and never answer with just a stock phrase. {facts}")[:2000]
 
 
 def late_result(asked: str, spoken: str) -> str:
@@ -712,8 +735,8 @@ def approval_note(names: Names) -> str:
 def draft_waiting_note(names: Names, subject: str | None, to: list[str]) -> str:
     about = f" \"{subject}\"" if subject else ""
     who = f" to {', '.join(to[:3])}" if to else ""
-    return (f"An email draft{about}{who} is waiting on the card in the app. Say something like \"Your draft is on the card. Give it "
-            f"a read, then tap Send if you're happy with it.\" It is sent only when {names.user} presses Send on the card; a spoken "
+    return (f"An email draft{about}{who} is waiting on the card in the app. In your own words, tell them it's there to read "
+            f"and that Send is theirs to press. It is sent only when {names.user} presses Send on the card; a spoken "
             "approval does not send it. If they want changes, delegate the change as a follow-up to this task.")[:2000]
 
 
@@ -801,8 +824,8 @@ def lost_track_note(names: Names) -> str:
 
 
 def added_to_task_note(earlier: str) -> str:
-    return (f"Delivered: what they just said reached the task already working on: {earlier}. You may now say you "
-            "passed it on, in a few words. It will come back as one answer.")
+    return (f"Delivered: what they just said reached the task already working on: {earlier}. Acknowledge it "
+            "naturally in a few words that fit what they added; don't describe how it's delivered or answered.")
 
 
 def not_delivered_note(earlier: str) -> str:
@@ -875,9 +898,9 @@ def draft_notice(subject: str | None) -> str:
     return "Email draft waiting for your approval in Speakeasy" + (f": {notice_text(subject, 120)}" if subject else ".")
 
 
-ACK_STYLE = ("in a few words of your own that show you're looking into this particular thing (name what "
-             "it's about, not a stock phrase). Don't say \u201cOn it\u201d, \u201cChecking\u201d or \u201cOne sec\u201d, "
-             "and never reuse the wording you used for an earlier request")
+ACK_STYLE = ("the way a person would: a few words of your own about this particular thing, as if you're "
+             "turning to it now. No catchphrase or stock acknowledgement, and never wording you've already used "
+             "on this call")
 
 
 def ack_now_note(request: str = "") -> str:

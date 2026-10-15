@@ -358,6 +358,36 @@ def session_activity(state_db: Path, session_id: str, after_id: int = 0) -> list
     return out
 
 
+def recent_steps(state_db: Path, session_id: str, limit: int = 30) -> list[tuple[str, str]]:
+    """The session's latest work, oldest first: ("tool", tool name) for each tool it called and
+    ("said", text) for what it wrote along the way. Read-only; [] when anything is off."""
+    try:
+        db = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = db.execute("SELECT coalesce(content,''), coalesce(tool_calls,'') FROM messages WHERE session_id=? "
+                          "AND role='assistant' ORDER BY id DESC LIMIT ?", (session_id, int(limit))).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        db.close()
+    out: list[tuple[str, str]] = []
+    for content, calls in reversed(rows):
+        try:
+            parsed = json.loads(calls) if calls else []
+        except ValueError:
+            parsed = []
+        if content.strip() and parsed and not content.lstrip().startswith("Voice:"):
+            out.append(("said", " ".join(content.split())))  # written while it kept working, not a final reply
+        for call in parsed if isinstance(parsed, list) else []:
+            fn = call.get("function") if isinstance(call, dict) else None
+            name = (fn or {}).get("name") if isinstance(fn, dict) else (call or {}).get("name") if isinstance(call, dict) else None
+            if isinstance(name, str) and name:
+                out.append(("tool", name))
+    return out
+
+
 # -- following the thread's first answer ---------------------------------------------------------
 
 def thread_session(state_db: Path, platform: str, thread_id: str) -> str | None:

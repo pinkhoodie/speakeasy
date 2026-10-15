@@ -21,7 +21,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
-from . import channels, continuity, failures, router
+from . import channels, continuity, failures, router, threads
 from . import home_control as home_control_mod
 from . import instant as instant_mod
 from . import jev as jev_mod
@@ -78,8 +78,8 @@ def whole_request(context: str) -> str:
             break
     if not picked:
         return ""
-    if len(picked[0].split()) > 4:
-        return picked[0]
+    if len(picked[0].split()) > 4 or router.is_status_question(picked[0]):
+        return picked[0]  # "how's that coming along" is its own question, never the end of the last ask
     return " ".join(reversed(picked)).strip()
 
 TASK_SESSION_PREFIX = "speakeasy_task_"
@@ -1267,11 +1267,30 @@ class SidebandWorker:
         if not steps and work:
             steps = [e.get("text", "") for e in (work.get("events") or []) if e.get("kind") in {"milestone", "tool"}][-4:]
         result = notice_text(((work or {}).get("result") or {}).get("spoken"), 300) if status == "completed" else None
+        live: list[str] = []
+        session = (work or {}).get("session_id") or ((work or {}).get("job") or {}).get("id")
+        if status not in TERMINAL and isinstance(session, str) and session:
+            live = await asyncio.to_thread(self.live_steps, session)
         self.handoff_at.pop(delegation_id, None)
         self.replied_task = task_id
         logger.info("speakeasy: status answered from %d steps (%s)", len(steps), status or "unknown")
         await self.append("session.commentary.append", delegation_id,
-                          P.status_answer(name or "that task", status, steps, time.monotonic() - started, result))
+                          P.status_answer(name or "that task", status, steps, time.monotonic() - started, result,
+                                          live))
+
+    def live_steps(self, session_id: str) -> list[str]:
+        """What the task's Hermes session has done lately, in plain words, newest last: the voice's
+        answer to "how's it going?" comes from the work itself, not only what the task chose to report."""
+        try:
+            rows = threads.recent_steps(self.rt.state_db, session_id)
+        except Exception:
+            return []
+        out: list[str] = []
+        for kind, text in rows:
+            line = notice_text(text, 160) if kind == "said" else P.tool_step(text)
+            if line and (not out or out[-1] != line):
+                out.append(line)
+        return out[-5:]
 
     async def home_control(self, delegation_id: str, revision: int, request: str) -> bool:
         """A request that is only device commands, done straight through Home Assistant (opt-in).
@@ -1783,6 +1802,7 @@ class SidebandWorker:
                 self.retitle(idem, request, self.store.request_text(joins.idem_key))
                 joins = None
                 break
+            self.store.touch(joins.idem_key)
             await asyncio.sleep(CONTINUITY_POLL_S)
             waited += CONTINUITY_POLL_S
         waited = 0
@@ -1792,6 +1812,7 @@ class SidebandWorker:
                 self.publish()
             if waited >= CONTINUITY_WAIT_S:
                 break
+            self.store.touch(idem)  # verifiably queued: never "Status unconfirmed" while it waits its turn
             await asyncio.sleep(CONTINUITY_POLL_S)
             waited += CONTINUITY_POLL_S
         try:

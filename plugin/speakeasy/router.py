@@ -381,10 +381,13 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
     return [
         {"role": "system", "content":
             "You route one spoken request for a voice assistant. Reply with strict JSON only, no prose: "
-            '{"follow_up_task_id": string or null, "conversation": string or null, "parts": [strings], '
-            '"channel": string or null, "show": true or false}. '
+            '{"status_task_id": string or null, "follow_up_task_id": string or null, "conversation": string or null, '
+            '"parts": [strings], "channel": string or null, "show": true or false}. '
+            "status_task_id: the id of an open task when the request only asks how that task is going, whether "
+            "it's stuck, done or still working, or what it's doing now, with no new instruction (\"how's that coming "
+            "along\", \"you seem stuck\", \"what's it doing?\"); else null. "
             "follow_up_task_id: the id of an open task ONLY when the request clearly adds to, changes, corrects "
-            "or asks about that task; else null. A reply to what the assistant just said (agreeing, disagreeing, "
+            "or asks about that task (not just how it is going); else null. A reply to what the assistant just said (agreeing, disagreeing, "
             "correcting it, pushing back, answering its question: \"no, Hermes can\", \"you're missing a couple\", "
             "\"that's wrong\") is a follow-up to the task that answer came from, never a new task or conversation. "
             "A request that points back at something a task told the user (\"fix that script you found\", \"do the "
@@ -439,6 +442,9 @@ def parse_decision(text: Any, request: str, tasks: list[OpenTask], topics: list[
         return None
     channel = labels.get((raw_channel or "").lower().lstrip("#")) if raw_channel else None
     show = data.get("show") is True
+    asked = data.get("status_task_id")
+    if isinstance(asked, str) and any(t.task_id == asked for t in tasks[-MAX_OPEN_TASKS:]):
+        return Decision([Part(STATUS, request, asked)], None, "model")
     follow = data.get("follow_up_task_id")
     if follow is not None:
         if not isinstance(follow, str) or not any(t.task_id == follow for t in tasks[-MAX_OPEN_TASKS:]):

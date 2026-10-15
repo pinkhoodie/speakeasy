@@ -774,7 +774,7 @@ def test_thread_email_draft_becomes_an_approvable_card(server, service, hermes):
 def test_voice_rules_never_claim_a_draft_before_it_exists():
     text = P.rules_text(P.Names.from_settings(S.validate({})), "Telegram", [])
     email = text.split("# Email drafts", 1)[1]
-    assert "I drafted it" not in email and "never that it is drafted" in email
+    assert "I drafted it" not in email and "never say it is drafted" in email
 
 
 def test_new_task_shows_what_it_was_handed_instead_of_a_bare_wait(server, service, hermes):
