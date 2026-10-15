@@ -317,6 +317,12 @@ public final class VoicePanelModel: ObservableObject {
         pick(r + 1, in: job)
     }
 
+    /// Undo a finished step of a job: the request goes to the job through the same answer route as
+    /// anything else said to it (no separate undo endpoint), so the agent decides how to roll it back.
+    public func undoStep(_ step: String, in job: Job) {
+        onAnswer(job.newest.id, "Undo this step: \(step)")
+    }
+
     /// Board and job-view keys: up/down move between tiles, Return opens, 1-4 picks an option on the
     /// focused decision (or the open job's). False lets the key go elsewhere.
     public func handleKey(code: UInt16, characters: String) -> Bool {
