@@ -2,6 +2,10 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.3.6 — Voice requests for an existing chat work again
+
+- **Picking up a chat thread from voice works on current Hermes.** Recent Hermes versions no longer let outside apps add a turn to a Discord or Telegram conversation, so a voice request meant for an existing chat failed in about a second and the voice could only say it didn't go through. Speakeasy now runs that request as its own task, gives it the chat's recent messages so it knows what you were talking about, and still posts the answer into that chat. No Hermes changes are needed.
+
 ## Plugin 0.3.5 — Status questions get real answers, and the voice talks like a person
 
 - **"How's that coming along?" gets a real update.** A short status question said right after a request used to get glued onto that request and sent to the task as more work, so the voice just said it had passed it on. Status questions now stand on their own. The routing model also recognizes looser ones ("you seem stuck", "what's it doing?"), and the answer comes from what the task is actually doing right now (reading files, editing code, running commands, what it last wrote), not just "I'm on it."

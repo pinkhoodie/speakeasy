@@ -1854,6 +1854,9 @@ class SidebandWorker:
                     await self.reconcile_stream_end(backend)
                     return
                 raise ServiceError(502, "conversation stream ended without a result")
+            if status == "failed" and continuity.refused(final.get("error")) and not output.strip():
+                await self.run_beside_conversation(backend, revision, context, asked, conv, where)
+                return
             # The turn ran in the conversation's own session (its history), over the local API. Post
             # the answer into that chat ourselves, like any routed answer; Hermes config is untouched.
             if valid_delivery_target(conv.target):
@@ -1866,6 +1869,49 @@ class SidebandWorker:
             said = failures.reason_text(failed_as) and failures.voice_text(failed_as)
             await self.append("session.commentary.append", delegation_id,
                               P.failed_because(said) if said else P.continuing_failed_note(where))
+
+    async def run_beside_conversation(self, backend: "BackendRun", revision: int, context: str, request: str,
+                                      conv: continuity.Conversation, where: str) -> None:
+        """Hermes refused a turn inside the conversation's own session (newer Hermes only admits API
+        turns into sessions the API started). Run the request as its own task, carrying the
+        conversation's recent messages, and still post the answer into that chat."""
+        idem = backend.idem_key
+        logger.info("speakeasy: %s doesn't take outside turns; running the request as its own task", where)
+        excerpt = await asyncio.to_thread(continuity.recent_exchange, self.rt.state_db, conv.session_id)
+        focus = request + (f" (This picks up the conversation in {where}. Its most recent messages, for context:\n"
+                           f"{excerpt}\n)" if excerpt else f" (This picks up the conversation in {where}.)")
+        session_id = TASK_SESSION_PREFIX + hashlib.sha256(idem.encode()).hexdigest()[:24]
+        if valid_delivery_target(conv.target):
+            backend.deliver_to = conv.target
+        prompt = P.build_task_prompt(self.names, revision, context, focus, where)
+        self.store.set_session(idem, session_id)
+        self.store.progress(idem, "milestone", f"Working on it here; the answer goes to {where}")
+        with self.interaction.lock:
+            backend.run_id, backend.status = None, "running"
+        self.publish()
+        try:
+            run_id = await asyncio.to_thread(self.hermes.start_run, prompt, idem, session_id)
+            self.store.update_run(idem, run_id, "running")
+            with self.interaction.lock:
+                backend.run_id = run_id
+            self.publish()
+            loop = asyncio.get_running_loop()
+            terminal_seen = await asyncio.to_thread(
+                self.hermes.events, run_id,
+                lambda event: asyncio.run_coroutine_threadsafe(self.handle_hermes_event(backend, event), loop).result())
+            if not terminal_seen:
+                await self.reconcile_stream_end(backend)
+        except Exception as exc:
+            if backend.run_id:
+                try:
+                    await self.reconcile_stream_end(backend, exc)
+                    return
+                except Exception as reconcile_exc:
+                    exc = reconcile_exc
+            failed_as = self._record_start_failure(backend, exc, "task beside a conversation")
+            said = failures.reason_text(failed_as) and failures.voice_text(failed_as)
+            await self.append("session.commentary.append", backend.say_id,
+                              P.failed_because(said) if said else P.FAILED_SPOKEN)
 
     async def start_thread_task(self, task_id: str, revision: int, context: str, request: str,
                                 channel: channels.Channel, named: bool = False) -> None:

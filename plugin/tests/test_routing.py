@@ -497,6 +497,52 @@ def test_continuing_a_chat_posts_there_and_never_writes_hermes_config(server, se
     assert (config.stat().st_mtime_ns if config.exists() else None) == mtime
 
 
+def test_a_chat_that_refuses_outside_turns_still_gets_the_answer(server, service, hermes, monkeypatch, tmp_path):
+    """Newer Hermes refuses API turns into a Discord session (permission_denied). The request then
+    runs as its own task carrying the chat's recent messages, and the answer still posts there."""
+    conv = continuity.Conversation("s_league", "discord", "777", "thread", "777", "42", "111",
+                                   "Server / #work / League", "League team", time.time())
+    monkeypatch.setattr(continuity, "conversations_with_context", lambda db, request, **kw: [continuity.Candidate(conv, ())])
+    monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
+    monkeypatch.setattr(continuity, "recent_exchange", lambda db, sid, **k: "User: who do I start at flex?")
+    from speakeasy import router
+    monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S:
+                        '{"follow_up_task_id": null, "conversation": "c1", "parts": ["x"], "channel": null}')
+
+    def refusing_stream(base, key, c, message, callback, **k):
+        callback("run.started", {"run_id": "run_refused"})
+        callback("run.failed", {"error": "permission_denied"})
+        return True
+    monkeypatch.setattr(continuity, "stream_session_chat", refusing_stream)
+    prompts = []
+    hermes.responder = lambda prompt, sid: prompts.append(prompt) or "Start the receiver.\nSPOKEN: Start the receiver."
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [
+        {"target": "discord:111", "label": "#work", "topic": "work"}]}})
+    posted = []
+    monkeypatch.setattr(service.rt.notices, "post",
+                        lambda key, text, limit=600, target=None: posted.append((key, target, text)) or True)
+    _, worker = start_call(server, service)
+    worker.delegate("call_r", "In the league team thread, am I going to win this week?")
+    wait_for(lambda: [p for p in posted if p[0].startswith("answer:")])
+    answer = [p for p in posted if p[0].startswith("answer:")]
+    assert answer and answer[0][1] == "discord:777" and "Start the receiver." in answer[0][2]
+    assert prompts and "who do I start at flex?" in prompts[0] and "am I going to win this week?" in prompts[0]
+    assert not any("go through" in c.lower() or "failed" in c.lower() for _, _, c in worker.sent)
+
+
+def test_recent_exchange_reads_both_sides_in_order(tmp_path):
+    import sqlite3
+    db = tmp_path / "state.db"
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT)")
+    c.executemany("INSERT INTO messages (session_id, role, content) VALUES (?,?,?)", [
+        ("s", "user", "Make the options dismissable"), ("s", "tool", "{}"),
+        ("s", "assistant", "Sure, adding a close button."), ("x", "user", "other chat")])
+    c.commit(); c.close()
+    assert continuity.recent_exchange(db, "s") == "User: Make the options dismissable\nAssistant: Sure, adding a close button."
+    assert continuity.refused("RuntimeStoreError: permission_denied") and not continuity.refused(None)
+
+
 def test_conversation_targets_match_hermes_send():
     t = time.time()
     thread = continuity.Conversation("s", "discord", "777", "thread", "777", "", "111", "", "", t)
