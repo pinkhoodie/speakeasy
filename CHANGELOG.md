@@ -2,6 +2,10 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.3.8 — Follow-ups to a chat thread stop failing
+
+- **"Turn it down a little" after a request that ran in a chat thread works again.** On a live Hermes, a refused turn ends without saying it failed; the refusal only shows on the run itself, so 0.3.7's fallback never kicked in and the follow-up failed. Speakeasy now checks the run, then says the request in the thread (or runs it with the chat's context) as intended.
+
 ## Mac 0.3.3 and Plugin 0.3.7 — Set things aside, links you can click, chats picked up in place
 
 - **"Not needed" on anything waiting for you.** A question, option set or approval you've already handled (or don't want to deal with now) can be set aside with one tap, from the board or the job. It leaves Needs you, shows in Done today as Set aside, and the work waiting on it is told to stop asking. You can also just say "that's already handled" or "never mind that one."

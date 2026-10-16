@@ -572,6 +572,42 @@ def test_a_refused_chat_thread_gets_the_request_typed_into_it(server, service, h
     assert ("completed" in [r[0] for r in rows]) and not any(r[1] == "run_refused" for r in rows)
 
 
+def test_a_refusal_seen_only_on_the_run_still_falls_back(server, service, hermes, monkeypatch):
+    """What real Hermes does: the chat stream ends after run.started with no run.failed; the run's
+    own status says failed / permission_denied. The request must still go into the thread."""
+    conv = continuity.Conversation("s_music", "discord", "888", "thread", "888", "42", "111",
+                                   "Server / #home / Music", "Music", time.time())
+    monkeypatch.setattr(continuity, "conversations_with_context", lambda db, request, **kw: [continuity.Candidate(conv, ())])
+    monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
+    from speakeasy import router, threads
+    monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S:
+                        '{"follow_up_task_id": null, "conversation": "c1", "parts": ["x"], "channel": null}')
+
+    def silent_stream(base, key, c, message, callback, **k):
+        callback("run.started", {"run_id": "run_silent"})
+        return True
+    monkeypatch.setattr(continuity, "stream_session_chat", silent_stream)
+    monkeypatch.setattr(threads, "last_message_id", lambda db: 7)
+    said = []
+
+    class Runner:
+        def available(self, target): return True
+        def post(self, platform, thread_id, *, message, delivery_id):
+            said.append(thread_id); return True
+        def wait_turn(self, platform, thread_id, after_id, on_activity=None):
+            return "Turned it down a notch.\nSPOKEN: Turned it down a notch."
+    service.rt.threads = Runner()
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [
+        {"target": "discord:111", "label": "#home", "topic": "home"}]}})
+    _, worker = start_call(server, service)
+    from speakeasy import hermes_api
+    monkeypatch.setattr(hermes_api.HermesAPI, "get_run",
+                        lambda self, run_id: {"status": "failed", "error": "permission_denied"})
+    worker.delegate("call_s", "In the music thread, turn it down just a little bit")
+    wait_for(lambda: any("down a notch" in c for _, _, c in worker.sent))
+    assert said == ["888"]
+
+
 def test_recent_exchange_reads_both_sides_in_order(tmp_path):
     import sqlite3
     db = tmp_path / "state.db"

@@ -1930,6 +1930,15 @@ class SidebandWorker:
                                                conv, message, on_event)
             status = final.get("status") or ("completed" if terminal and final.get("text") else "ambiguous")
             output = P.without_voice_header(final.get("text", ""))
+            if status == "ambiguous" and backend.run_id:
+                # Real Hermes ends a refused turn's stream without a run.* event; the refusal is only
+                # on the run itself. Read it so a refused chat still gets the request another way.
+                try:
+                    run = await asyncio.to_thread(self.hermes.get_run, backend.run_id)
+                except Exception:
+                    run = {}
+                if run.get("status") == "failed" and continuity.refused(run.get("error")) and not str(run.get("output") or "").strip():
+                    status, final["error"] = "failed", run.get("error")
             if status == "ambiguous":
                 if backend.run_id:
                     await self.reconcile_stream_end(backend)
