@@ -45,6 +45,7 @@ GREETING_RE = re.compile(
 SETTLE_S = 1.5         # wait this long after a handoff for the user to keep going
 SETTLE_MAX_S = 6.0     # and never longer than this in total
 ABSORB_WINDOW_S = 15.0 # a handoff of words already folded into an earlier task is dropped
+ECHO_WINDOW_S = 8.0    # a second handoff this soon that only repeats the last request's words is dropped
 
 
 def _same_words(fragment: str, request: str) -> bool:
@@ -480,6 +481,8 @@ class SidebandWorker:
         self.notices = rt.notices
         self.fragments: deque[dict[str, Any]] = deque(maxlen=512)
         self.absorbed: list[tuple[str, float]] = []  # words folded into an earlier task by settle()
+        self.recent_requests: list[tuple[str, float]] = []  # requests started this call, for echo checks
+        self.recent_answers: dict[tuple[str, str], tuple[str, float]] = {}  # tapped answers, for double sends
         self.handoff_at: dict[str, float] = {}   # delegation id -> when the handoff arrived (monotonic)
         self.quiet_notes: dict[str, str] = {}    # held background notes, newest per kind
         self.show_pending: set[str] = set()      # task keys asked for a screenshot by "show me"
@@ -809,7 +812,17 @@ class SidebandWorker:
             known = task_id in self.interaction.runs
         if not text or not known:
             return None
+        # A double tap, or a tap plus the same answer said aloud, must reach the task once.
+        key, now = (task_id, _words(text)), time.monotonic()
+        answers = getattr(self, "recent_answers", None)
+        if answers is None:
+            answers = self.recent_answers = {}
+        previous = answers.get(key)
+        if previous and now - previous[1] < ECHO_WINDOW_S:
+            logger.info("speakeasy: same answer sent again for one task; passed on once")
+            return previous[0]
         delegation_id = "answer_" + secrets.token_hex(8)
+        answers[key] = (delegation_id, now)
         self.delegations.add(delegation_id)
         self.touch()
         self.fragments.append({"speaker": "user", "text": text, "at": time.monotonic(), "start_ms": 0, "end_ms": 0})
@@ -1111,6 +1124,25 @@ class SidebandWorker:
         logger.info("speakeasy: kept listening, added %d more words to the request", len(more.split()))
         return f"{request.rstrip()} {more}"
 
+    def _echoes_recent(self, request: str) -> bool:
+        """The voice sometimes hands off one sentence twice: the whole thing, then a scrap of its tail
+        a second or two later ("...task failing"), which whole_request() joins back onto the sentence.
+        If every word of the new request was already in a request started moments ago, it's an echo."""
+        now = time.monotonic()
+        recent = getattr(self, "recent_requests", None)
+        if recent is None:
+            recent = self.recent_requests = []
+        recent[:] = [(w, at) for w, at in recent if now - at < ECHO_WINDOW_S]
+        want = _words(request).split()
+        if len(want) < 3:
+            return False  # "yes", "the lamp": short replies are real turns, never echoes
+        return any(set(want) <= set(words.split()) for words, _ in recent)
+
+    def _remember_request(self, request: str) -> None:
+        if getattr(self, "recent_requests", None) is None:
+            self.recent_requests = []
+        self.recent_requests.append((_words(request), time.monotonic()))
+
     def _already_absorbed(self, request: str) -> bool:
         norm = _words
         want = norm(request)
@@ -1249,6 +1281,12 @@ class SidebandWorker:
             logger.info("speakeasy: handoff already folded into the task before it; not started twice")
             await self._drop(delegation_id, revision, "Added to the previous request", None)
             return
+        if not marked and self._echoes_recent(last_request):
+            logger.info("speakeasy: handoff repeats a request started seconds ago; not started twice")
+            await self._drop(delegation_id, revision, "Added to the previous request", None)
+            return
+        if not marked:
+            self._remember_request(last_request)
         if router.is_show_me(last_request) and await self.show_me(delegation_id, last_request):
             return
         if router.is_status_question(last_request):

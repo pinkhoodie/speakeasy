@@ -2,6 +2,11 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.3.9 — One sentence, one task
+
+- **A question no longer starts two tasks.** The voice sometimes passes one sentence along twice, the whole thing and then a scrap of its ending a moment later. The second copy used to start its own task (and its own chat thread). Now a repeat of what you just asked is folded into the first request.
+- **Answering a question once means once.** Tapping an answer twice, or tapping it and also saying it, sends it to the task one time.
+
 ## Plugin 0.3.8 — Follow-ups to a chat thread stop failing
 
 - **"Turn it down a little" after a request that ran in a chat thread works again.** On a live Hermes, a refused turn ends without saying it failed; the refusal only shows on the run itself, so 0.3.7's fallback never kicked in and the follow-up failed. Speakeasy now checks the run, then says the request in the thread (or runs it with the chat's context) as intended.
