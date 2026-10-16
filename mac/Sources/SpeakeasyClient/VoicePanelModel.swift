@@ -90,6 +90,10 @@ public final class VoicePanelModel: ObservableObject {
             self?.onAnswer(taskID, text)
         }, answered: answers[taskID], image: runID.map { run in { number in await load(run, number) } })
     }
+    /// "Not needed": set aside a task's question, decision or approval without answering it (run id).
+    public var onSetAside: (String) -> Void = { _ in }
+    /// Tasks the user set aside here, hidden from Needs you right away (the api confirms).
+    @Published public var setAsideTasks: Set<String> = []
     /// nil shows the task list; an id opens that task.
     public var onSelectTask: (String?) -> Void = { _ in }
     /// Clear finished tasks (run ids) from the list.
@@ -148,6 +152,7 @@ public final class VoicePanelModel: ObservableObject {
         // An unanswered question stays up (it's waiting on you); other cards fade after three minutes.
         if let asking = state.tasks.last(where: { t in t.info.views.contains { $0.kind == "question" }
                 && answers[t.id] == nil && !dismissedViewTasks.contains(t.id) && t.info.isTerminal
+                && !t.info.setAside && !setAsideTasks.contains(t.id)
                 && t.info.updatedAt.map { Date().timeIntervalSince($0) < Self.questionPinnedFor } ?? false }) {
             return (asking.id, asking.info.views)
         }
@@ -219,7 +224,7 @@ public final class VoicePanelModel: ObservableObject {
     /// Every task grouped into jobs, newest first.
     public var jobs: [Job] {
         JobBoard.jobs(state.tasks, answered: Set(answers.keys), dismissed: dismissedViewTasks,
-                      reviewing: Set(pinnedReviews.map(\.taskID)), now: state.now)
+                      reviewing: Set(pinnedReviews.map(\.taskID)), setAside: setAsideTasks, now: state.now)
     }
     public var boardSections: JobBoard.Sections {
         JobBoard.sections(jobs, seen: Set(seenAnswers).union(dismissedViewTasks), now: state.now)
@@ -295,7 +300,12 @@ public final class VoicePanelModel: ObservableObject {
     }
     /// The mic is open and hearing the user right now.
     public var userTalking: Bool { presentation.mark == .listening && orbLevel > 0.08 }
-    public var orbState: OrbState { OrbState.of(jobs: jobs, approvalPending: state.approval != nil, userTalking: userTalking) }
+    public var orbState: OrbState { OrbState.of(jobs: jobs, approvalPending: approvalPending, userTalking: userTalking) }
+    /// The call's approval, unless the user set its task aside (amber only while something still needs them).
+    var approvalPending: Bool {
+        guard let approval = state.approval else { return false }
+        return !state.tasks.contains { $0.info.runID == approval.runID && ($0.info.setAside || setAsideTasks.contains($0.id)) }
+    }
 
     /// The next job that needs you, other than `id` (the "Next:" link).
     public func nextJobNeedingYou(after id: String?) -> Job? {
@@ -317,6 +327,25 @@ public final class VoicePanelModel: ObservableObject {
         pick(r + 1, in: job)
     }
 
+    /// The task "Not needed" would set aside: the job's waiting question or decision, else its
+    /// approval. nil when nothing there waits on the user (or it has no run to address).
+    public func setAsideTarget(_ job: Job) -> TaskItem? {
+        guard job.stage == .needsYou(.decide) || job.stage == .needsYou(.approve) else { return nil }
+        let task = job.decisionTask ?? job.tasks.last { $0.info.status == "waiting_for_approval" }
+        return task?.info.runID == nil ? nil : task
+    }
+
+    /// "Not needed": set aside what the job waits on without answering it (already handled, or not
+    /// needed). It leaves Needs you at once and lands in Done today as "Set aside"; the api closes it,
+    /// tells a run still waiting to wrap up, and tells the voice quietly so it never asks again.
+    @discardableResult
+    public func setAside(_ job: Job) -> Bool {
+        guard let task = setAsideTarget(job), let run = task.info.runID else { return false }
+        setAsideTasks.insert(task.id)
+        onSetAside(run)
+        return true
+    }
+
     /// Undo a finished step of a job: the request goes to the job through the same answer route as
     /// anything else said to it (no separate undo endpoint), so the agent decides how to roll it back.
     public func undoStep(_ step: String, in job: Job) {
@@ -324,14 +353,17 @@ public final class VoicePanelModel: ObservableObject {
     }
 
     /// Board and job-view keys: up/down move between tiles, Return opens, 1-4 picks an option on the
-    /// focused decision (or the open job's). False lets the key go elsewhere.
+    /// focused decision (or the open job's), N sets it aside ("Not needed"). False lets the key go elsewhere.
     public func handleKey(code: UInt16, characters: String) -> Bool {
         if showsSlim { return false }
         // Escape: out of a job, back to the board.
         if code == 53 && selectedJobID != nil { onOpenJob(nil); return true }
         let digit = Int(characters).flatMap { (1...4).contains($0) ? $0 : nil }
+        let notNeeded = characters.lowercased() == "n"
         if workExpanded || state.workOnly {
-            guard let job = selectedJob, let digit else { return false }
+            guard let job = selectedJob else { return false }
+            if notNeeded { return setAside(job) }
+            guard let digit else { return false }
             return pick(digit, in: job)
         }
         guard showsBoard else { return false }
@@ -345,6 +377,11 @@ public final class VoicePanelModel: ObservableObject {
             guard let at else { return false }
             onOpenJob(all[at].id); return true
         default:
+            if notNeeded {
+                // The focused tile, else the first thing waiting on the user.
+                let target = at.map { all[$0] } ?? all.first { setAsideTarget($0) != nil }
+                return target.map { setAside($0) } ?? false
+            }
             guard let digit else { return false }
             let target = at.map { all[$0] } ?? all.first { $0.stage == .needsYou(.decide) }
             return target.map { pick(digit, in: $0) } ?? false

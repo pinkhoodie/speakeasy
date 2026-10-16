@@ -160,6 +160,9 @@ public struct WorkInfo: Equatable, Sendable {
     public var plan: [String] = []
     /// The job this task belongs to (nil from older plugins: the task is its own job).
     public var job: JobRef?
+    /// The user set this task's question, decision or approval aside ("Not needed"): it was
+    /// already handled or isn't needed, so nothing waits on them here any more.
+    public var setAside = false
 
     public init(runID: String?, status: String, stale: Bool = false, updated: Date? = nil,
                 shortStatus: String? = nil, detail: String? = nil, updatedAt: Date? = nil,
@@ -216,6 +219,7 @@ public struct WorkInfo: Equatable, Sendable {
         summary = nonEmpty(object["summary"])
         emailDrafts = EmailDraft.list(json: object["email_drafts"])
         job = JobRef(json: object["job"])
+        setAside = object["set_aside"] as? Bool ?? false
         plan = (object["plan"] as? [Any] ?? []).compactMap { $0 as? String }.filter { !$0.isEmpty }
         liveImage = LiveImage(json: object["live_image"])
         failure = status == "failed" ? WorkFailure(json: object["failure"]) : nil

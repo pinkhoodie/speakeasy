@@ -106,6 +106,8 @@ class StateStore:
                 self._db.execute("ALTER TABLE runs ADD COLUMN failure TEXT")
             if "plan" not in columns:  # the steps a handed-off task will go through (JSON list)
                 self._db.execute("ALTER TABLE runs ADD COLUMN plan TEXT")
+            if "set_aside" not in columns:  # when the user set its question aside (handled, or not needed)
+                self._db.execute("ALTER TABLE runs ADD COLUMN set_aside REAL")
             # Finished tasks that never had a Hermes run id (quick answers, home control) could not be
             # cleared: "Clear done" and the x address tasks by run id. Give them their local id.
             settled = sorted(TERMINAL | {"rejected"})
@@ -329,6 +331,23 @@ class StateStore:
                 f"UPDATE runs SET dismissed=1 WHERE idem_key=? AND status IN ({marks})", (key, *settled))
         return bool(cursor.rowcount)
 
+    def set_aside(self, key: str) -> bool:
+        """The user set this task's question (or approval) aside: already handled, or not needed.
+        It settles as no longer needed, never as failed, and stops waiting on them. Only a settled
+        task (finished, or waiting for approval) has anything to set aside."""
+        settled = sorted(SETTLED | {"rejected"})
+        marks = ",".join("?" * len(settled))
+        with self._lock, self._db:
+            cursor = self._db.execute(
+                f"UPDATE runs SET set_aside=COALESCE(set_aside, ?) WHERE idem_key=? AND status IN ({marks})",
+                (time.time(), key, *settled))
+        return bool(cursor.rowcount)
+
+    def is_set_aside(self, key: str) -> bool:
+        with self._lock:
+            row = self._db.execute("SELECT set_aside FROM runs WHERE idem_key=?", (key,)).fetchone()
+        return bool(row and row[0])
+
     def set_timing(self, key: str, name: str, ms: int) -> None:
         """Internal per-task timings (e.g. routing latency), kept for diagnostics, never spoken."""
         with self._lock, self._db:
@@ -349,6 +368,11 @@ class StateStore:
             return json.loads(row[0]) if row and row[0] else {}
         except ValueError:
             return {}
+
+    def forget_run_id(self, key: str) -> None:
+        """Drop a run id Hermes refused at the door, so nothing polls a run that never ran."""
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET run_id=NULL WHERE idem_key=?", (key,))
 
     def update_run(self, key: str, run_id: str | None, status: str) -> None:
         now = time.time()
@@ -455,7 +479,8 @@ class StateStore:
         with self._lock:
             rows = self._db.execute(
                 """SELECT idem_key,run_id,status,settled_at,result_json,failure FROM runs
-                   WHERE settled_at > ? AND run_id IS NOT NULL ORDER BY settled_at DESC LIMIT ?""",
+                   WHERE settled_at > ? AND run_id IS NOT NULL AND set_aside IS NULL
+                   ORDER BY settled_at DESC LIMIT ?""",
                 (float(ended), limit)).fetchall()
         items = []
         for key, run_id, status, settled_at, result_json, failure in rows:
@@ -712,7 +737,7 @@ class StateStore:
              assistant_name: str = "Hermes") -> dict[str, Any] | None:
         """The latest admitted job or one exact server-owned run, including past calls."""
         cols = """idem_key,run_id,status,updated,short_status,detail,progress_updated,
-                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,session_id"""
+                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,session_id,set_aside"""
         with self._lock:
             if idem_key:
                 row = self._db.execute(f"SELECT {cols} FROM runs WHERE idem_key=?", (idem_key,)).fetchone()
@@ -723,7 +748,8 @@ class StateStore:
             if row is None:
                 return None
             (key, actual_run_id, status, updated, short_status, detail, progress_updated,
-             status_source, result_json, title, dismissed, summary, continued, settled_at, failure, session_id) = row
+             status_source, result_json, title, dismissed, summary, continued, settled_at, failure, session_id,
+             set_aside) = row
             events = self._db.execute(
                 "SELECT kind,text,created FROM work_events WHERE idem_key=? ORDER BY seq DESC LIMIT 30", (key,)).fetchall()
         stale = status not in TERMINAL | {"waiting_for_approval"} and time.time() - updated > STALE_AFTER_S
@@ -754,6 +780,9 @@ class StateStore:
             "plan": self.plan(key),
             "job": self.job(key, session_id, continued),
         }
+        if set_aside:
+            # Its question was set aside: nothing waits on the user any more (only sent when true).
+            work["set_aside"] = True
         why = public_failure(failure, self.hermes_home) if status == "failed" else None
         if why:
             # Speakeasy's own words for why it failed: a row label when the reason is known, and a

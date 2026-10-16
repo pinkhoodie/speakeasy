@@ -530,6 +530,48 @@ def test_a_chat_that_refuses_outside_turns_still_gets_the_answer(server, service
     assert not any("go through" in c.lower() or "failed" in c.lower() for _, _, c in worker.sent)
 
 
+def test_a_refused_chat_thread_gets_the_request_typed_into_it(server, service, hermes, monkeypatch):
+    """With Hermes' webhook platform on, the refused request is said in the thread itself (full
+    history, Hermes replies there); the call hears the reply and Speakeasy doesn't post it twice."""
+    conv = continuity.Conversation("s_league", "discord", "777", "thread", "777", "42", "111",
+                                   "Server / #work / League", "League team", time.time())
+    monkeypatch.setattr(continuity, "conversations_with_context", lambda db, request, **kw: [continuity.Candidate(conv, ())])
+    monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
+    from speakeasy import router, threads
+    monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S:
+                        '{"follow_up_task_id": null, "conversation": "c1", "parts": ["x"], "channel": null}')
+
+    def refusing_stream(base, key, c, message, callback, **k):
+        callback("run.started", {"run_id": "run_refused"})
+        callback("run.failed", {"error": "permission_denied"})
+        return True
+    monkeypatch.setattr(continuity, "stream_session_chat", refusing_stream)
+    monkeypatch.setattr(threads, "last_message_id", lambda db: 41)
+    said = []
+
+    class Runner:
+        def available(self, target): return True
+        def post(self, platform, thread_id, *, message, delivery_id):
+            said.append((platform, thread_id, message)); return True
+        def wait_turn(self, platform, thread_id, after_id, on_activity=None):
+            assert after_id == 41
+            return "You're projected to win by 12.\nSPOKEN: Projected to win by 12."
+    service.rt.threads = Runner()
+    hermes.responder = lambda prompt, sid: (_ for _ in ()).throw(AssertionError("no separate run"))
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [
+        {"target": "discord:111", "label": "#work", "topic": "work"}]}})
+    posted = []
+    monkeypatch.setattr(service.rt.notices, "post",
+                        lambda key, text, limit=600, target=None: posted.append((key, target, text)) or True)
+    _, worker = start_call(server, service)
+    worker.delegate("call_t", "In the league team thread, am I going to win this week?")
+    wait_for(lambda: any("Projected to win by 12" in c for _, _, c in worker.sent))
+    assert said and said[0][:2] == ("discord", "777") and "am I going to win this week?" in said[0][2]
+    assert not [p for p in posted if p[0].startswith("answer:")]
+    rows = service.store._db.execute("SELECT status, run_id FROM runs").fetchall()
+    assert ("completed" in [r[0] for r in rows]) and not any(r[1] == "run_refused" for r in rows)
+
+
 def test_recent_exchange_reads_both_sides_in_order(tmp_path):
     import sqlite3
     db = tmp_path / "state.db"

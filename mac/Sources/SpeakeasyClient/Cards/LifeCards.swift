@@ -7,6 +7,10 @@ import SpeakeasyCore
 struct EventRow: View {
     let event: JSONValue
     var body: some View {
+        LinkedRow(url: event["url"].url) { row }
+    }
+
+    private var row: some View {
         HStack(alignment: .top, spacing: 8) {
             RoundedRectangle(cornerRadius: 2).fill(eventColor(event["color"].string)).frame(width: 3)
             VStack(alignment: .leading, spacing: 1) {

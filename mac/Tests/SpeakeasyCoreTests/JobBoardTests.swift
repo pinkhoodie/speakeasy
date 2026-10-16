@@ -121,6 +121,35 @@ final class JobBoardTests: XCTestCase {
         XCTAssertEqual(jobs.first?.stage, .done)
     }
 
+    func testSetAsideLeavesNeedsYouForDoneToday() {
+        let q: [[String: Any]] = [["kind": "question", "question": "Which lamp?", "options": ["Living room", "All of them"]]]
+        var asked = TaskItem(json: ["task_id": "ask", "run_id": "run_ask", "status": "completed", "set_aside": true,
+                                    "updated_at": now.timeIntervalSince1970 - 10, "result": ["views": q]])!
+        XCTAssertTrue(asked.info.setAside, "the api's set_aside decodes")
+        XCTAssertFalse(task("other").info.setAside, "absent means not set aside")
+        let tasks = [asked, task("appr", "waiting_for_approval"), task("run", "working")]
+        var jobs = JobBoard.jobs(tasks)
+        func job(_ id: String) -> Job? { jobs.first { $0.tasks.contains { $0.id == id } } }
+        XCTAssertEqual(job("ask")?.stage, .done)
+        XCTAssertEqual(job("ask")?.setAside, true)
+        XCTAssertNil(job("ask")?.answerTask, "set aside is not a new answer to read")
+        XCTAssertEqual(OrbState.of(jobs: jobs, userTalking: false), .needsYou(1), "only the approval still needs you")
+        // Set aside here before the api confirms (an approval this time): nothing needs you.
+        jobs = JobBoard.jobs(tasks, setAside: ["appr"])
+        XCTAssertEqual(job("appr")?.stage, .done)
+        XCTAssertEqual(job("appr")?.setAside, true)
+        XCTAssertEqual(OrbState.of(jobs: jobs, userTalking: true), .talking, "amber only while something needs you")
+        let sections = JobBoard.sections(jobs, now: now)
+        XCTAssertTrue(sections.needsYou.isEmpty)
+        XCTAssertEqual(Set(sections.doneToday.map(\.id)), ["task:ask", "task:appr"])
+        // A later task in the same job that asks again needs you again.
+        asked.info.job = JobRef(id: "j", name: "Lamp")
+        let again = task("ask2", job: ["id": "j", "name": "Lamp"], age: 5, views: q)
+        jobs = JobBoard.jobs([asked, again])
+        XCTAssertEqual(jobs.first?.stage, .needsYou(.decide))
+        XCTAssertEqual(jobs.first?.setAside, false)
+    }
+
     func testSectionsOrderDecisionsFirst() {
         let q: [[String: Any]] = [["kind": "question", "question": "Ship it?", "options": ["Yes", "No"]]]
         let tasks = [task("ask", views: q), task("appr", "waiting_for_approval"), task("run", "working"), task("done"),

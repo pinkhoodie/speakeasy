@@ -10,7 +10,7 @@ extension PreviewFixtures {
                            "orb-idle", "orb-talking", "orb-working", "orb-needs", "orb-failed", "orb-answers",
                            "jobs-answers", "answer-weather", "answer-nightly", "answer-laptops",
                            "declutter-board", "declutter-weather", "declutter-events", "declutter-three", "declutter-many",
-                           "events-board", "answer-events", "answer-matchup"]
+                           "events-board", "answer-events", "answer-matchup", "jobs-set-aside", "job-set-aside"]
 
     /// Answers the fixtures treat as already read (run ids), so only the new ones show as new.
     static let readAnswers = ["run_weather", "run_notes"]
@@ -26,6 +26,8 @@ extension PreviewFixtures {
         var orb = false
         var level: Double = 0
         var seen: [String] = PreviewFixtures.readAnswers
+        /// Task ids whose question the user set aside ("Not needed").
+        var setAside: [String] = []
     }
 
     static func jobSetup(_ name: String) -> JobSetup? {
@@ -53,6 +55,9 @@ extension PreviewFixtures {
         case "events-board": return JobSetup(seen: [])
         case "answer-events": return JobSetup(open: "job:wevents", seen: [])
         case "answer-matchup": return JobSetup(open: "job:match", seen: [])
+        // The router question set aside ("Not needed"): it leaves Needs you for Done today.
+        case "jobs-set-aside": return JobSetup(setAside: ["router_q"])
+        case "job-set-aside": return JobSetup(open: "job:router", setAside: ["router_q"])
         default: return nil
         }
     }
@@ -63,6 +68,7 @@ extension PreviewFixtures {
         guard let setup = jobSetup(name), let (state, _) = jobState(name) else { return false }
         for id in jobQuestionTasks { c.model.answers[id] = nil; c.model.dismissedViewTasks.remove(id) }
         for (id, text) in setup.answers { c.model.answers[id] = text }
+        c.model.setAsideTasks = Set(setup.setAside)
         c.model.expandedReports = []
         c.model.seenAnswers = setup.seen
         c.model.slim = setup.orb
@@ -290,12 +296,12 @@ extension PreviewFixtures {
                                           "review": ["images": [1], "settled_at": now.timeIntervalSince1970 - 45]]
         weekendJSON["result"] = [
             "spoken": "Plenty going on: a night market Friday, a gallery opening and a jazz brunch Saturday, and a river walk Sunday. I'd do the brunch and the night market.",
-            "full": "Here's what's on this weekend.\n\nAll weekend: a riverside art fair, 10:00 to 18:00, free.\n\nSaturday: jazz brunch at the Corner Café at 11:00 ($25); gallery opening at North Hall at 15:00 (free); night market at Pier 4 from 19:00.\n\nSunday: guided river walk at 10:00 (free); outdoor film screening at the park at 20:00.\n\nMy pick: the jazz brunch, then the night market.",
+            "full": "Here's what's on this weekend.\n\nAll weekend: a riverside art fair, 10:00 to 18:00, free.\n\nSaturday: [jazz brunch at the Corner Café](https://www.example.com/jazz-brunch) at 11:00 ($25); gallery opening at North Hall at 15:00 (free); night market at Pier 4 from 19:00.\n\nSunday: guided river walk at 10:00 (free); outdoor film screening at the park at 20:00.\n\nMy pick: the jazz brunch, then the night market.",
             "label": "Six events this weekend",
             "cards": [["kind": "image", "name": "listings-home.png"]],
             "shape": ["type": "research", "headline": "Six good events this weekend; the jazz brunch and night market stand out",
                       "sections": [["title": "All weekend", "points": ["Riverside art fair, 10:00–18:00, free"]],
-                                   ["title": "Saturday", "points": ["Jazz brunch, Corner Café, 11:00 ($25)", "Gallery opening, North Hall, 15:00",
+                                   ["title": "Saturday", "points": ["[Jazz brunch](https://www.example.com/jazz-brunch), Corner Café, 11:00 ($25)", "Gallery opening, North Hall, 15:00",
                                                                     "Night market, Pier 4, from 19:00"]],
                                    ["title": "Sunday", "points": ["Guided river walk, 10:00, free", "Outdoor film screening, 20:00"]]],
                       "open": ["Brunch tables book up by Friday"]]]
@@ -318,8 +324,8 @@ extension PreviewFixtures {
                       "open": ["Check Friday's injury report for your second receiver"]]]
         let matchup = TaskItem(json: matchJSON)!
         let planPlaces: [String: Any] = ["kind": "list", "title": "Saturday plan", "items": [
-            ["text": "Jazz brunch", "detail": "11:00 · Corner Café"], ["text": "Gallery opening", "detail": "15:00 · North Hall"],
-            ["text": "Night market", "detail": "19:00 · Pier 4"]]]
+            ["text": "Jazz brunch", "detail": "11:00 · Corner Café", "url": "https://www.example.com/jazz-brunch"], ["text": "Gallery opening", "detail": "15:00 · North Hall"],
+            ["text": "Night market", "detail": "19:00 · Pier 4", "url": "https://www.example.com/night-market"]]]
         let planAgenda: [String: Any] = ["kind": "stats", "title": "Saturday at a glance", "items": [
             ["label": "Stops", "value": "3"], ["label": "Walking", "value": "2.1 km"],
             ["label": "Warmest", "value": "83°"], ["label": "Cost", "value": "$45"]]]

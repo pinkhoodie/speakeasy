@@ -145,7 +145,9 @@ def resume_block(tasks: list[dict[str, Any]], names: Names) -> str:
         request_event = next((e for e in task.get("events") or [] if e.get("kind") == "request"), None)
         request = notice_text((request_event or {}).get("text"), 140) or "an earlier request"
         status = task.get("status")
-        if status in {"completed", "failed", "cancelled", "interrupted", "ambiguous"}:
+        if task.get("set_aside"):
+            open_tasks.append(f"- {request}: set aside by {names.user} (closed; don't ask its question again)")
+        elif status in {"completed", "failed", "cancelled", "interrupted", "ambiguous"}:
             spoken = notice_text((task.get("result") or {}).get("spoken"), 300)
             outcome = "finished" + (f": {spoken}" if spoken else "") if status == "completed" else f"stopped ({status})"
             if why := failed_note(task):
@@ -360,7 +362,7 @@ VIEWS_RULE = (
     "transit {station, departures[{line, destination, minutes}]}; "
     "flight {number, airline, origin, destination, departs, arrives, status, gate, delay}; "
     "package {carrier, item, status, eta, steps[{when, text, done}]}; "
-    "calendar_day {date, events[{start, end, title, place}]}; agenda {days[{date, events[]}]}; "
+    "calendar_day {date, events[{start, end, title, place, url}]}; agenda {days[{date, events[]}]}; "
     "reminder {title, due, list}; countdown {label, date, days}; "
     "contact {name, subtitle, phone, email}; message_draft {channel, to, subject, body}; "
     "inbox {items[{from, subject, preview, when}]}; "
@@ -369,7 +371,7 @@ VIEWS_RULE = (
     "definition {word, phonetic, part, meanings[], example}; conversion {from_value, from_unit, to_value, to_unit}; "
     "translation {source_lang, target_lang, source, text, phonetic}; "
     "recipe {title, image_url, time, serves, ingredients[], steps[]}; nutrition {title, serving, calories, rows[]}; "
-    "comparison {title, columns[], rows[{label, values[]}], winner}; list {title, items[{text, done, detail}]}; "
+    "comparison {title, columns[], rows[{label, values[]}], winner}; list {title, items[{text, done, detail, url}]}; "
     "steps {title, items[]}; stats {title, items[{label, value, delta, good}]}; "
     "chart {title, style (line|bar), unit, labels[], series[{name, values[]}]}; progress {label, value, total, unit}; "
     "news {items[{headline, source, when, url}]}; quote {symbol, name, price, change_pct, points[]}; "
@@ -383,6 +385,10 @@ VIEWS_RULE = (
     "Answers count too: when you bring back information with data in it (numbers, a comparison, options to pick from, "
     "a timeline, a place, the weather, how things are doing), include at least one fitting card built from what you "
     "found, and make the DONE label the answer itself in 1-5 words (e.g. Saturday is the drier day). "
+    "Make things clickable: whenever the answer names something the user may want to open (an event or livestream "
+    "page, an article, a product or listing, tickets, a booking, a doc, a repo or pull request), give its real https "
+    "link, one you actually visited or that a tool returned, never a guessed one: as a markdown link [name](url) in "
+    "the full answer, and as `url` on that card or row. "
 )
 
 QUESTION_RULE = (
@@ -958,3 +964,20 @@ def answered_note(text: str) -> str:
     """Told to the voice (not spoken) when the user answered a task's question by tapping."""
     return (f"The user tapped an answer on a task's question card: \"{text}\". It is already on its way to "
             "that task; don't ask the question again. A short \"Got it\" is enough if anything.")
+
+
+def set_aside_answer(names: Names) -> str:
+    """Told to a task still waiting on the user's answer when they set its question aside."""
+    return (f"{names.user_cap} set this aside: it was already handled or isn't needed. "
+            "Don't ask again; wrap up.")
+
+
+def set_aside_note(task: str, by_voice: bool = False) -> str:
+    """Told to the voice (not spoken) when the user set a task's question aside, from the app or by
+    saying so. It must never be asked again; that re-asking is what setting it aside is for."""
+    name = notice_text(task, 120) or "an earlier task"
+    head = (f"The user set aside the question from the task \"{name}\": it was already handled or isn't "
+            "needed. It's closed. Don't ask it again, don't remind them of it, and don't start it again.")
+    if by_voice:
+        return head + " A couple of words at most (\"Sure, dropped it.\"), or nothing."
+    return head + " Say nothing about it now."

@@ -118,6 +118,34 @@ public struct TileButton: View {
     }
 }
 
+/// "Not needed": set aside what a job waits on without answering it. A quiet text link, always
+/// secondary to Approve, See options and the options themselves.
+public struct NotNeededButton: View {
+    @Environment(\.jobTextScale) private var s
+    var action: () -> Void
+    public init(action: @escaping () -> Void) { self.action = action }
+    @State private var hover = false
+    public var body: some View {
+        Button(action: action) {
+            Text("Not needed").font(.system(size: 11 * s, weight: .medium))
+                .foregroundStyle(hover ? Color.primary.opacity(0.75) : Color.secondary)
+                .underline(hover)
+                .padding(.horizontal, 4).frame(height: 26 * s)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .fixedSize()
+        .help(Self.help)
+        .accessibilityHint("Already handled or not needed. Closes it without answering.")
+    }
+    #if os(macOS)
+    static let help = "Already handled or not needed: close it without answering (N)"
+    #else
+    static let help = "Already handled or not needed: close it without answering"
+    #endif
+}
+
 /// Wraps children onto new lines (done chips, tag pills).
 public struct WrapLayout: Layout {
     public var spacing: CGFloat = 5
@@ -337,9 +365,12 @@ public struct DoneChip: View {
     public var body: some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                Image(systemName: job.newest.info.status == "completed" ? "checkmark" : "stop.fill")
+                Image(systemName: job.setAside ? "arrow.uturn.down" : job.newest.info.status == "completed" ? "checkmark" : "stop.fill")
                     .font(.system(size: 8 * s, weight: .bold)).foregroundStyle(JobStyle.green.opacity(0.9))
                 Text(job.name).font(.system(size: 11 * s)).lineLimit(1)
+                if job.setAside {
+                    Text("· Set aside").font(.system(size: 10.5 * s)).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                }
             }
             .padding(.horizontal, 8).padding(.vertical, 4)
             .background(Capsule().fill(Color.primary.opacity(hover ? 0.13 : 0.07)))
@@ -349,7 +380,8 @@ public struct DoneChip: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help("Open \(job.name)")
+        .help(job.setAside ? "\(job.name): set aside" : "Open \(job.name)")
+        .accessibilityLabel(job.setAside ? "\(job.name), set aside" : job.name)
     }
 }
 
@@ -393,7 +425,7 @@ public struct JobTile: View {
             if let p = JobBoard.progress(job.activeTask?.info ?? job.newest.info) {
                 JobPill(text: "\(p.done + 1) of \(p.total)", style: .blue)
             } else { JobPill(text: "Running", style: .blue) }
-        case .done: JobPill(text: "Done", style: .green)
+        case .done: JobPill(text: job.setAside ? "Set aside" : "Done", style: job.setAside ? .grey : .green)
         }
     }
 
@@ -417,6 +449,7 @@ public struct JobTile: View {
                 HStack(spacing: 6) {
                     if d.approvable { TileButton(title: "Approve", primary: true) { model.approve(job) } }
                     TileButton(title: "See options") { model.onOpenJob(job.id) }
+                    if model.setAsideTarget(job) != nil { NotNeededButton { model.setAside(job) } }
                 }
                 .padding(.top, 3)
             }
@@ -428,9 +461,12 @@ public struct JobTile: View {
                 HStack(spacing: 6) {
                     TileButton(title: "Approve once", primary: true) { model.onApproval("once") }
                     TileButton(title: "Deny") { model.onApproval("deny") }
+                    if model.setAsideTarget(job) != nil { NotNeededButton { model.setAside(job) } }
                 }
                 .disabled(model.busy)
                 .padding(.top, 4)
+            } else if model.setAsideTarget(job) != nil {
+                HStack { Spacer(minLength: 0); NotNeededButton { model.setAside(job) } }
             }
         case .needsYou(.review):
             let drafts = job.tasks.flatMap(\.info.pendingDrafts).count
@@ -443,7 +479,7 @@ public struct JobTile: View {
                 .font(.system(size: 11.5 * s)).foregroundStyle(.secondary).lineLimit(1)
             if let p = JobBoard.progress(info) { StepBar(done: p.done, total: p.total).padding(.top, 3) }
         case .done:
-            detailsLine(job.newest.info.result?.label ?? "Done")
+            detailsLine(job.setAside ? "Already handled or not needed" : job.newest.info.result?.label ?? "Done")
         }
     }
 
@@ -576,6 +612,7 @@ public struct JobDetailBody: View {
         case .needsYou(.decide): return "Waiting for your decision"
         case .needsYou(.approve): return "Waiting for your OK"
         case .needsYou(.review): return "Waiting for you to look"
+        case .done where job.setAside: return "Set aside"
         default: return ""
         }
     }
@@ -597,8 +634,25 @@ public struct JobDetailBody: View {
                 }
             }
         }
-        if let approval = model.state.approval, job.tasks.contains(where: { $0.info.runID == approval.runID }) {
+        if let approval = model.state.approval, job.tasks.contains(where: { $0.info.runID == approval.runID }),
+           job.stage == .needsYou(.approve) {
             renderers.approval(approval)
+            HStack { Spacer(minLength: 0); NotNeededButton { model.setAside(job) } }
+        } else if job.stage == .needsYou(.approve), model.setAsideTarget(job) != nil {
+            HStack { Spacer(minLength: 0); NotNeededButton { model.setAside(job) } }
+        }
+        if job.setAside {
+            HStack(alignment: .top, spacing: 7) {
+                Image(systemName: "arrow.uturn.down.circle.fill").foregroundStyle(.secondary).font(.system(size: 12 * s))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Set aside").font(.system(size: 10 * s, weight: .semibold)).foregroundStyle(.tertiary)
+                    Text("Already handled or not needed. Nothing is waiting on you here.")
+                        .font(.system(size: 12 * s, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+                    if let q = job.tasks.last(where: { $0.info.decision != nil })?.info.decision?.question {
+                        Text(q).font(.system(size: 10.5 * s)).foregroundStyle(.tertiary).lineLimit(2)
+                    }
+                }
+            }
         }
         if let failed = job.tasks.last, failed.info.status == "failed" {
             VStack(alignment: .leading, spacing: 3) {
@@ -621,7 +675,7 @@ public struct JobDetailBody: View {
             } else if let text = task.info.result?.full ?? task.info.result?.spoken {
                 VStack(alignment: .leading, spacing: 4) {
                     SectionLabel(text: "Result")
-                    Text(text).font(.system(size: 12 * s)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    Text(linkedText(text)).font(.system(size: 12 * s)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true).tint(JobStyle.blueInk)
                 }
             }
         }
@@ -707,7 +761,12 @@ public struct DecisionBrief: View {
                     if decision.approvable, let rec = decision.recommendedOption {
                         TileButton(title: "Approve: \(rec.text)", primary: true) { model.approve(job) }
                     }
-                    Text(hint).font(.system(size: 10.5 * s)).foregroundStyle(.tertiary)
+                    HStack(alignment: .center, spacing: 6) {
+                        Text(hint).font(.system(size: 10.5 * s)).foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 4)
+                        if model.setAsideTarget(job) != nil { NotNeededButton { model.setAside(job) } }
+                    }
                 }
             }
         }
@@ -964,7 +1023,8 @@ public struct ReportBoard: View {
                 }
                 .buttonStyle(.plain)
                 if expanded {
-                    Text(full).font(.system(size: 11.5 * s)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    Text(linkedText(full)).font(.system(size: 11.5 * s)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        .tint(JobStyle.blueInk)
                         .padding(9).frame(maxWidth: .infinity, alignment: .leading)
                         .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(0.06)))
                 }
@@ -979,7 +1039,8 @@ public struct ReportBoard: View {
                 ForEach(Array(items.prefix(8).enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .firstTextBaseline, spacing: 7) {
                         Circle().fill(color).frame(width: 6, height: 6).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
-                        Text(item).font(.system(size: 12 * s)).fixedSize(horizontal: false, vertical: true)
+                        Text(linkedText(item)).font(.system(size: 12 * s)).fixedSize(horizontal: false, vertical: true)
+                            .tint(JobStyle.blueInk)
                     }
                 }
             }

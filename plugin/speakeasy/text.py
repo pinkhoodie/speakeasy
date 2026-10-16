@@ -577,6 +577,36 @@ def delivery_text(result: dict[str, Any] | None) -> str:
     return "\n\n".join([text, *(f"MEDIA:{tag}" for tag in missing)]).strip() if missing else text
 
 
+_MD_LINK_RE = re.compile(r"\[([^\]\n]{1,120})\]\((https://[^\s)]{4,500})\)")
+_BARE_URL_RE = re.compile(r"(?<![\w(\[/])(https://[^\s<>()\[\]\"']{4,500})")
+MAX_LINKS = 6
+
+
+def links_in(text: str) -> list[dict[str, str]]:
+    """The https links an answer gives (markdown [name](url) or bare), in order, deduped, for the app's
+    tappable "Links" row. Only links the agent wrote; nothing is looked up or guessed."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(title: str, url: str) -> None:
+        url = url.rstrip(".,;:!?")
+        if url in seen or len(out) >= MAX_LINKS:
+            return
+        seen.add(url)
+        host = re.sub(r"^www\.", "", url.split("/")[2]) if url.count("/") >= 2 else url
+        out.append({"title": " ".join(title.split())[:80] or host, "url": url, "host": host})
+
+    spans = []
+    for m in _MD_LINK_RE.finditer(text):
+        spans.append((m.start(), m.group(1), m.group(2)))
+    stripped = _MD_LINK_RE.sub(" ", text)
+    for m in _BARE_URL_RE.finditer(stripped):
+        spans.append((len(text) + m.start(), "", m.group(1)))
+    for _, title, url in sorted(spans):
+        add(title, url)
+    return out
+
+
 def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: str = "Done. The details are in the app.") -> dict[str, Any] | None:
     """Split a final answer into the spoken register and the full display register.
 
@@ -653,6 +683,9 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
         result["cards"] = cards
     if views:
         result["views"] = views
+    found_links = links_in(full or "")
+    if found_links:
+        result["links"] = found_links
     if media_tags:
         result["_media"] = media_tags[:MAX_CARDS]
     if drafts:

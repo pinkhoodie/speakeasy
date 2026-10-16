@@ -19,7 +19,7 @@ MAX_VIEWS = 6
 S, N, B, URL, ANY_LIST, IMG = "str", "num", "bool", "url", "list", "img"
 
 # Row shapes reused by several kinds.
-EVENT = {"start": S, "end": S, "title": S, "place": S, "all_day": B, "color": S}
+EVENT = {"start": S, "end": S, "title": S, "place": S, "all_day": B, "color": S, "url": URL}
 GAME_SIDE = {"name": S, "abbr": S, "score": S, "logo_url": URL, "winner": B, "home": B, "record": S}
 DAY = {"label": S, "high": N, "low": N, "rain": N, "condition": S, "icon": S}
 HOUR = {"label": S, "temp": N, "rain": N, "icon": S}
@@ -81,7 +81,7 @@ CATALOG: dict[str, dict[str, Any]] = {
     "nutrition": {"title": S, "serving": S, "calories": N, "rows": (ROW_KV, 10)},
     # Comparing and lists
     "comparison": {"title": S, "columns": (S, 4), "rows": ({"label": S, "values": (S, 4)}, 10), "winner": S},
-    "list": {"title": S, "items": ({"text": S, "done": B, "detail": S}, 20)},
+    "list": {"title": S, "items": ({"text": S, "done": B, "detail": S, "url": URL}, 20)},
     "steps": {"title": S, "items": (S, 12)},
     "stats": {"title": S, "items": ({"label": S, "value": S, "delta": S, "good": B}, 8)},
     "chart": {"title": S, "style": S, "unit": S, "labels": (S, 60), "series": ({"name": S, "values": (N, 60)}, 4)},

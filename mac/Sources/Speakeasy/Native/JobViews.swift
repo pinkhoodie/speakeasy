@@ -184,7 +184,7 @@ struct JobDetailView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(job.name).font(.system(size: 15, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
                     let line = taskStatusLine(job.activeTask?.info ?? job.newest.info, now: model.state.now, assistantName: model.state.assistantName)
-                    Text(job.stage.needsYou ? JobDetailBody.stageLine(job) : line.0).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2)
+                    Text(job.stage.needsYou || job.setAside ? JobDetailBody.stageLine(job) : line.0).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2)
                 }
             }
             PanelScrollView(maxHeight: min(JobStyle.scrollCap, 560 + model.extraHeight)) {

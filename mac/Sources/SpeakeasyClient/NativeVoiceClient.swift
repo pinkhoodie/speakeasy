@@ -176,6 +176,7 @@ public final class NativeVoiceClient: VoiceCallClient {
         model.onTogglePause = { [weak self] in self?.togglePause() }
         model.onStopTask = { [weak self] runID in self?.stopWork(runID: runID) }
         model.onAnswer = { [weak self] taskID, text in self?.answerQuestion(taskID: taskID, text: text) }
+        model.onSetAside = { [weak self] runID in self?.setAside(runID) }
         model.loadCardImage = { [weak self] runID, number in
             guard let api = await self?.api else { return nil }
             return try? await api.image(runID: runID, index: number)
@@ -1358,6 +1359,23 @@ public final class NativeVoiceClient: VoiceCallClient {
         Task { [weak self] in
             do { try await api.dismissReview(runID: runID, cards: cards) }
             catch { self?.dispatch(.error("Couldn't dismiss: \(error.localizedDescription)")) }
+        }
+    }
+
+    /// "Not needed": already hidden from Needs you; tell the api so the task, the run and the voice
+    /// all let it go. On failure it comes back so it isn't silently lost.
+    private func setAside(_ runID: String) {
+        surface.setNeedsResize()
+        guard let api, !previewMode else { return }
+        Task { [weak self] in
+            do { try await api.setAside(runID: runID) }
+            catch {
+                guard let self else { return }
+                if let task = self.model.state.tasks.first(where: { $0.info.runID == runID }) {
+                    self.model.setAsideTasks.remove(task.id)
+                }
+                self.dispatch(.error("Couldn't set that aside. Say it instead."))
+            }
         }
     }
 

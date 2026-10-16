@@ -498,6 +498,46 @@ enum PanelSmoke {
         check(picked == "After 3 errors, for 30 seconds", "board: 2 picks the second option (got \(picked ?? "nothing"))")
         c.model.onAnswer = saved
         c.model.answers["router_q"] = nil
+        // "Not needed" (N on the focused tile): sets the question aside without answering it. It
+        // leaves Needs you for Done today, labeled "Set aside", and the orb's count drops.
+        let needsBefore = c.model.boardSections.needsYou.count
+        let orbBefore = c.model.orbState.badge ?? 0
+        var asideRun: String?
+        let savedAside = c.model.onSetAside
+        c.model.onSetAside = { asideRun = $0 }
+        let routerJob = c.model.jobs.first { $0.name == "Router setting" }
+        check(routerJob.flatMap { c.model.setAsideTarget($0) }?.id == "router_q", "not needed: the router question can be set aside")
+        check(c.model.jobs.first { $0.name == "Release v2.4" }.flatMap { c.model.setAsideTarget($0) } != nil,
+              "not needed: offered on every decision")
+        check(c.model.jobs.filter { $0.stage == .running }.allSatisfy { c.model.setAsideTarget($0) == nil },
+              "not needed: never on running work")
+        c.model.boardFocusID = routerJob?.id
+        key(45, "n")
+        await settle(0.4)
+        check(asideRun == "run_router_q", "not needed: N sets the focused question aside (got \(asideRun ?? "nothing"))")
+        let asideSections = c.model.boardSections
+        check(!asideSections.needsYou.contains { $0.name == "Router setting" }, "not needed: it leaves Needs you")
+        check(asideSections.doneToday.contains { $0.name == "Router setting" && $0.setAside }, "not needed: it lands in Done today as set aside")
+        check(asideSections.needsYou.count == needsBefore - 1 && (c.model.orbState.badge ?? 0) == orbBefore - 1,
+              "not needed: the needs-you count drops (\(needsBefore)→\(asideSections.needsYou.count), orb \(orbBefore)→\(c.model.orbState.badge ?? 0))")
+        check(c.model.answers["router_q"] == nil, "not needed: it isn't an answer")
+        c.model.onSetAside = savedAside
+        c.model.setAsideTasks = []
+        for name in ["jobs-set-aside", "job-set-aside"] {
+            guard PreviewFixtures.showJobFixture(name, on: c) else { fail("\(name): fixture missing"); continue }
+            await settle(1.0)
+            if name == "job-set-aside" {
+                guard let job = c.model.selectedJob else { fail("\(name): no job open"); continue }
+                check(job.setAside && job.stage == .done && job.decision == nil, "\(name): set aside, nothing to decide")
+                check(JobDetailBody.stageLine(job) == "Set aside", "\(name): the header says Set aside")
+            } else {
+                check(c.model.boardSections.doneToday.contains { $0.name == "Router setting" && $0.setAside },
+                      "\(name): the set-aside job sits in Done today")
+            }
+            onScreen(name)
+            snap(name)
+        }
+        c.model.setAsideTasks = []
         // Job views, before and after the pick.
         for name in ["job-release", "job-release-after", "job-nightly", "job-nightly-after", "job-rollout", "job-rollout-after"] {
             guard PreviewFixtures.showJobFixture(name, on: c) else { fail("\(name): fixture missing"); continue }

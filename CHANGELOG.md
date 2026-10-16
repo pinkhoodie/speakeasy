@@ -2,6 +2,12 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Mac 0.3.3 and Plugin 0.3.7 — Set things aside, links you can click, chats picked up in place
+
+- **"Not needed" on anything waiting for you.** A question, option set or approval you've already handled (or don't want to deal with now) can be set aside with one tap, from the board or the job. It leaves Needs you, shows in Done today as Set aside, and the work waiting on it is told to stop asking. You can also just say "that's already handled" or "never mind that one."
+- **Links you can click.** When an answer is about something you'd open (an event page, a livestream, an article, a product, tickets), the agent now includes the real link. Rows in lists and schedules open their page (look for ↗), and links in the report are clickable.
+- **Picking up a chat thread from voice works inside the thread.** A voice request for an existing Discord or Telegram thread is now said in that thread, through Hermes' webhook platform, so the agent has the whole conversation and replies there; the call still hears the answer. Without a thread or the webhook platform, it runs on its own with the chat's recent messages, as in 0.3.6.
+
 ## Plugin 0.3.6 — Voice requests for an existing chat work again
 
 - **Picking up a chat thread from voice works on current Hermes.** Recent Hermes versions no longer let outside apps add a turn to a Discord or Telegram conversation, so a voice request meant for an existing chat failed in about a second and the voice could only say it didn't go through. Speakeasy now runs that request as its own task, gives it the chat's recent messages so it knows what you were talking about, and still posts the answer into that chat. No Hermes changes are needed.

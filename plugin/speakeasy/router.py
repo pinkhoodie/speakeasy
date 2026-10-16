@@ -1060,3 +1060,39 @@ def starts_talk_mode(request: str) -> bool:
 
 def is_reaction(request: str) -> bool:
     return bool(_REACTION.match(" ".join((request or "").split())))
+
+
+# Setting a waiting question aside: "it's already handled", "never mind that one", "skip it". Strong
+# phrases say it's handled or name the question; weak ones ("never mind", "forget it") also mean
+# "stop the thing I just asked", so the call only takes them for a question that is the newest thing.
+_ASIDE_STRONG = re.compile(
+    r"(?i)\b(?:(?:it|that|this)(?:\s+one)?(?:'s|\s+is|\s+was|\s+has\s+been|\s+got)?\s+(?:already\s+)?"
+    r"(?:handled|taken\s+care\s+of|sorted(?:\s+out)?|dealt\s+with|been\s+handled)"
+    r"|(?:i|we)(?:'ve|\s+have)?\s+already\s+(?:handled|did|done|fixed|sorted|took\s+care\s+of|dealt\s+with)"
+    r"|(?:handled|did|sorted|fixed)\s+(?:it|that|this)(?:\s+one)?\s+already"
+    r"|already\s+(?:handled|taken\s+care\s+of|done|sorted)"
+    r"|set\s+(?:it|that|this)(?:\s+one)?\s+aside|set\s+aside"
+    r"|close\s+(?:it|that|this)(?:\s+one)?\s+out|close\s+out\s+(?:it|that|this)"
+    r"|pass\s+on\s+(?:it|that|this)(?:\s+one)?|not\s+needed|(?:don't|do\s+not|no\s+longer)\s+need\s+(?:it|that|this)"
+    r"|(?:skip|drop|ignore|forget(?:\s+about)?|dismiss|never\s*mind|nevermind)\s+(?:that|this|the)\s+(?:one|question|choice|decision))\b")
+_ASIDE_WEAK = re.compile(
+    r"(?i)^\W*(?:(?:oh|ok|okay|yeah|no|nah|nope|actually|um+|uh+|so|just|and|but)\W+)*"
+    r"(?:never\s*mind|nevermind|forget\s+(?:about\s+)?(?:it|that)|skip\s+(?:it|that)|drop\s+(?:it|that)|"
+    r"don't\s+worry\s+about\s+(?:it|that)|not\s+(?:right\s+)?now|leave\s+it)"
+    r"(?:\W+(?:for\s+now|then|thanks|thank\s+you|please|man|dude))*\W*$")
+# Words that make it an answer or new work, not setting it aside ("never mind, turn on the den").
+_ASIDE_WORK = re.compile(r"(?i)\b(?:turn|switch|book|buy|order|send|go\s+with|pick|choose|use|instead|but\s+can|can\s+you|"
+                         r"could\s+you|please\s+(?!.*\baside\b)\w+|look\s+up|find|check)\b")
+
+
+def set_aside_kind(request: str) -> str | None:
+    """"strong" or "weak" when the words set a waiting question aside, else None. Short utterances
+    only, and nothing that asks for work or picks an option."""
+    said = " ".join((request or "").split())
+    if not said or len(said.split()) > 14 or _ASIDE_WORK.search(said):
+        return None
+    if _ASIDE_STRONG.search(said):
+        return "strong"
+    if _ASIDE_WEAK.search(said):
+        return "weak"
+    return None

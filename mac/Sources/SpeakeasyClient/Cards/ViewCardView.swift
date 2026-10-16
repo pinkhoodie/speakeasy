@@ -153,6 +153,54 @@ func weatherSymbol(_ icon: String?) -> String {
     }
 }
 
+/// A row that opens its link when tapped: the whole row is the target, with a small ↗ so it reads as clickable.
+struct LinkedRow<Content: View>: View {
+    let url: URL?
+    @ViewBuilder var content: Content
+    var body: some View {
+        if let url = webURL(url) {
+            Link(destination: url) {
+                HStack(alignment: .top, spacing: 6) {
+                    content
+                    Image(systemName: "arrow.up.right").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(url.absoluteString)
+        } else {
+            content
+        }
+    }
+}
+
+/// Only https links open from a card.
+func webURL(_ url: URL?) -> URL? {
+    guard let url, url.scheme?.lowercased() == "https", url.host?.contains(".") == true else { return nil }
+    return url
+}
+
+/// Report text with its markdown links ([name](https://…)) and bare https links tappable.
+func linkedText(_ text: String) -> AttributedString {
+    var source = text
+    if let regex = try? NSRegularExpression(pattern: #"(?<![\[(<])\bhttps://[^\s<>()\[\]]+"#) {
+        let ns = source as NSString
+        for match in regex.matches(in: source, range: NSRange(location: 0, length: ns.length)).reversed() {
+            var raw = ns.substring(with: match.range)
+            var tail = ""
+            while let last = raw.last, ".,;:!?".contains(last) { tail = String(last) + tail; raw.removeLast() }
+            source = (source as NSString).replacingCharacters(in: match.range, with: "[\(raw)](\(raw))" + tail)
+        }
+    }
+    let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+    guard var out = try? AttributedString(markdown: source, options: options) else { return AttributedString(text) }
+    for run in out.runs where run.link != nil {
+        if webURL(run.link) == nil { out[run.range].link = nil } else { out[run.range].underlineStyle = .single }
+    }
+    return out
+}
+
 func openable(_ url: URL?) -> some View {
     Group {
         if let url {

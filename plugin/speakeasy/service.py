@@ -704,6 +704,46 @@ class VoiceService:
                 publish_state(self.store, interaction, name)
         return {"dismissed": dismissed}
 
+    def set_aside(self, run_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """"Not needed": set aside a question, decision or approval waiting on the user without
+        answering it (already handled, or not needed). The task settles as set aside (not failed),
+        a run still waiting on the answer is told to wrap up, and a live call hears it quietly so
+        the voice never asks again. A finished task's question starts no new work."""
+        if not ID_RE.fullmatch(run_id) or not isinstance(body, dict) or body:
+            raise ServiceError(400, "body must be empty")
+        key = self.store.key_for_run(run_id)
+        if key is None:
+            raise ServiceError(404, "task not found")
+        with self.lock:
+            live = list(self.interactions.values())
+        for interaction in live:
+            with interaction.lock:
+                task_id = next((t for t, r in interaction.runs.items() if r.idem_key == key), None)
+            worker = interaction.worker
+            if task_id is None or worker is None or worker.loop is None or worker.loop.is_closed():
+                continue
+            future = asyncio.run_coroutine_threadsafe(worker.set_aside(task_id), worker.loop)
+            if not future.result(20):
+                raise ServiceError(409, "nothing is waiting on you there")
+            return {"run_id": run_id, "set_aside": True}
+        # No live call holds it: record it; the next call and every app see it closed.
+        if not self.store.set_aside(key):
+            raise ServiceError(409, "nothing is waiting on you there")
+        for interaction in live:  # an approval left waiting after its call ended: decline it
+            with interaction.lock:
+                backend = next((r for r in interaction.runs.values() if r.idem_key == key), None)
+                approval = backend.approval if backend and backend.status == "waiting_for_approval" else None
+                if approval and backend.run_id:
+                    backend.approval, backend.status = None, "working"
+            if approval and backend.run_id:
+                try:
+                    self.hermes.approve(backend.run_id, approval.get("request_id", ""), "deny")
+                except Exception:
+                    logger.warning("speakeasy: set-aside could not decline the approval")
+        self.store.progress(key, "milestone", "Set aside")
+        self._republish_all()
+        return {"run_id": run_id, "set_aside": True}
+
     def dismiss_review(self, run_id: str, body: dict[str, Any]) -> dict[str, Any]:
         """Dismiss a finished task's image review card (all its images, or the listed card numbers).
         Stored per run and card, so it stays dismissed across calls; the images stay in the task."""

@@ -227,6 +227,11 @@ public final class ServerClient: @unchecked Sendable {
         return (WorkInfo(json: object["work"]), TaskItem.list(json: object["tasks"]) ?? [])
     }
 
+    /// "Not needed": set aside a task's waiting question, decision or approval without answering it.
+    public func setAside(runID: String) async throws {
+        _ = try await post("/voice/tasks/\(escape(runID))/set-aside", [:])
+    }
+
     /// Clear finished tasks from the task list (running tasks are never cleared).
     public func dismissTasks(runIDs: [String]) async throws {
         _ = try await post("/voice/tasks/dismiss", ["run_ids": runIDs])

@@ -121,6 +121,9 @@ public struct Job: Equatable, Sendable, Identifiable {
     public var stage: Stage
     /// The task whose question waits on you (stage `.needsYou(.decide)`).
     public var decisionTaskID: String?
+    /// Its question (or approval) was set aside ("Not needed") and nothing else waits on the user:
+    /// it sits in Done today labeled "Set aside".
+    public var setAside = false
 
     public var newest: TaskItem { tasks[tasks.count - 1] }
     public var updated: Date? { tasks.compactMap { $0.info.updatedAt ?? $0.info.updated }.max() }
@@ -135,7 +138,7 @@ public struct Job: Equatable, Sendable, Identifiable {
     /// along with a report (`WorkInfo.reviewIsIncidental`) are, and fold under it.
     public var answerTask: TaskItem? {
         let t = newest
-        guard stage == .done, t.info.status == "completed", t.info.result != nil, t.info.decision == nil,
+        guard stage == .done, !setAside, t.info.status == "completed", t.info.result != nil, t.info.decision == nil,
               t.info.pendingDrafts.isEmpty, t.info.reviewImages.isEmpty || t.info.reviewIsIncidental else { return nil }
         return t
     }
@@ -187,8 +190,9 @@ public enum JobBoard {
     /// - answered: task ids whose question was answered here.
     /// - dismissed: task ids whose cards the user closed.
     /// - reviewing: task ids with a design review still waiting.
+    /// - setAside: task ids the user just set aside here (the api confirms with `set_aside`).
     public static func jobs(_ tasks: [TaskItem], answered: Set<String> = [], dismissed: Set<String> = [],
-                            reviewing: Set<String> = [], now: Date = Date()) -> [Job] {
+                            reviewing: Set<String> = [], setAside: Set<String> = [], now: Date = Date()) -> [Job] {
         var order: [String] = []
         var grouped: [String: [TaskItem]] = [:]
         var names: [String: String] = [:]
@@ -203,7 +207,10 @@ public enum JobBoard {
             let last = items.compactMap { t in tasks.lastIndex { $0.id == t.id } }.max() ?? 0
             var decisionID: String?
             var need: Job.Need?
+            var asideAny = false
             for t in items.reversed() {
+                // Set aside: whatever it was waiting on is closed, never failed.
+                if t.info.setAside || setAside.contains(t.id) { asideAny = true; continue }
                 if t.info.status == "waiting_for_approval" { need = need ?? .approve; continue }
                 // Pictures that came with a finished report don't need the user: the job is an answer.
                 if !t.info.pendingDrafts.isEmpty || (reviewing.contains(t.id) && !t.info.reviewIsIncidental) { if need != .decide && need != .approve { need = .review }; continue }
@@ -215,11 +222,14 @@ public enum JobBoard {
             if decisionID != nil && need != .approve { need = .decide }
             let newest = items[items.count - 1]
             let stage: Job.Stage
+            let newestAside = newest.info.setAside || setAside.contains(newest.id)
             if let need { stage = .needsYou(need) }
+            else if newestAside { stage = .done }
             else if items.contains(where: \.isActive) { stage = .running }
             else if newest.info.status == "failed" { stage = .failed }
             else { stage = .done }
-            jobs.append((Job(id: key, name: names[key] ?? newest.name, tasks: items, stage: stage, decisionTaskID: decisionID), last))
+            jobs.append((Job(id: key, name: names[key] ?? newest.name, tasks: items, stage: stage, decisionTaskID: decisionID,
+                             setAside: asideAny && stage == .done && newestAside), last))
         }
         return jobs.sorted { $0.last > $1.last }.map(\.job)
     }

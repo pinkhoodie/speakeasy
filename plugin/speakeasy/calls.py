@@ -486,6 +486,8 @@ class SidebandWorker:
         # Home control: the question just asked (original request, question, when) and answers given
         # on this call, so "the thermostat" means the den until hang-up once they've said so.
         self.home_question: tuple[str, str, float] | None = None
+        # Tasks whose question the user set aside on this call (never asked again).
+        self.set_aside_tasks: set[str] = set()
         self.home_notes: list[str] = []
         self.home_tasks: set[str] = set()        # task ids that were instant home commands
         self.replied_task: str | None = None     # the task the voice last spoke an answer from
@@ -816,6 +818,58 @@ class SidebandWorker:
         await self.follow_up(delegation_id, 0, f"User: {text}", router.Part("follow_up", text, task_id))
         return delegation_id
 
+    def waiting_on_user(self) -> list[str]:
+        """This call's tasks waiting on the user, oldest first: an approval, or a finished task's
+        question nobody answered or set aside yet (the newest task of its job, so an answered one,
+        which went on as a follow-up, no longer counts)."""
+        with self.interaction.lock:
+            runs = [(r.delegation_id, r.idem_key, r.status) for r in self.interaction.runs.values()]
+        newest: dict[str, str] = {}
+        asking: list[tuple[str, str]] = []
+        for task_id, key, status in runs:
+            work = self.store.work(idem_key=key) or {}
+            job = (work.get("job") or {}).get("id") or key
+            newest[job] = task_id
+            if work.get("set_aside") or task_id in self.set_aside_tasks:
+                continue
+            if status == "waiting_for_approval" or (
+                    status == "completed" and (work.get("result") or {}).get("question")):
+                asking.append((task_id, job))
+        return [t for t, job in asking if newest.get(job) == t]
+
+    async def set_aside(self, task_id: str, by_voice: bool = False) -> bool:
+        """The user set a waiting question, decision or approval aside: already handled, or not
+        needed. It settles as no longer needed (not failed); a run still waiting on the answer is
+        told so and wraps up; the voice hears it quietly so it never asks again. A finished task's
+        question starts no new work."""
+        with self.interaction.lock:
+            run = self.interaction.runs.get(task_id)
+            if run is None:
+                return False
+            key, run_id, status, approval = run.idem_key, run.run_id, run.status, run.approval
+            if status == "waiting_for_approval":
+                run.approval, run.status = None, "resolving_approval"
+        if not self.store.set_aside(key) and status != "waiting_for_approval":
+            return False
+        self.set_aside_tasks.add(task_id)
+        self.store.progress(key, "milestone", "Set aside")
+        if status == "waiting_for_approval" and run_id:
+            answer = P.set_aside_answer(self.names)
+            try:
+                if approval and approval.get("request_id"):
+                    await asyncio.to_thread(self.hermes.approve, run_id, approval["request_id"], "deny")
+                await asyncio.to_thread(self.hermes.steer, run_id, P.steer_text(self.names, answer))
+            except Exception as exc:  # the run may already be gone; it is closed here either way
+                logger.warning("speakeasy: set-aside could not reach the run (%s)", type(exc).__name__)
+            with self.interaction.lock:
+                if run.status == "resolving_approval":
+                    run.status = "working"
+        self.publish()
+        if self.call_connected():
+            name = self.store.title(key) or self.store.request_text(key) or ""
+            await self.append("session.thinking.append", None, P.set_aside_note(name, by_voice))
+        return True
+
     def focus_job(self, task_id: str) -> str:
         """The name of the job a focused task belongs to (what the user sees on the job view)."""
         with self.interaction.lock:
@@ -1107,6 +1161,30 @@ class SidebandWorker:
             return True
         return False
 
+    async def _set_aside_by_voice(self, delegation_id: str, revision: int, kind: str, marked: Any = None) -> bool:
+        """"It's already handled", "never mind that one": set aside the question waiting on the
+        user instead of starting work. A plain "never mind" counts only when the waiting question
+        is the newest thing on the call (otherwise it stops the request just made)."""
+        pending = self.home_question
+        if pending and time.monotonic() - pending[2] <= home_control_mod.ASK_WINDOW_S:
+            self.home_question = None
+            await self._drop(delegation_id, revision, "Set aside", None)
+            await self.append("session.thinking.append", delegation_id, P.set_aside_note(pending[0], by_voice=True))
+            return True
+        waiting = self.waiting_on_user()
+        if not waiting:
+            return False
+        focused, _ = self.focus()
+        target = next((t for t in (marked, focused) if isinstance(t, str) and t in waiting), waiting[-1])
+        if kind == "weak":
+            with self.interaction.lock:
+                live = [r.delegation_id for r in self.interaction.runs.values() if r.status != "rejected"]
+            if not live or live[-1] != target:
+                return False
+        logger.info("speakeasy: question set aside by voice")
+        await self._drop(delegation_id, revision, "Set aside", None)
+        return await self.set_aside(target, by_voice=True)
+
     async def _drop(self, delegation_id: str, revision: int, reason: str, spoken: str | None) -> None:
         """A handoff that should never become a task. It ends visibly (no lingering "Waiting for")."""
         backend = BackendRun(delegation_id, revision, self._idem(delegation_id, revision))
@@ -1157,6 +1235,9 @@ class SidebandWorker:
             # "Hey" opens a conversation; it never starts work.
             logger.info("speakeasy: greeting, no task started")
             await self._drop(delegation_id, revision, "Just a greeting", P.GREETING_SPOKEN)
+            return
+        aside = router.set_aside_kind(last_request)
+        if aside and await self._set_aside_by_voice(delegation_id, revision, aside, marked):
             return
         if not marked and await self._talk_not_work(delegation_id, revision, last_request, context):
             return
@@ -1855,7 +1936,14 @@ class SidebandWorker:
                     return
                 raise ServiceError(502, "conversation stream ended without a result")
             if status == "failed" and continuity.refused(final.get("error")) and not output.strip():
-                await self.run_beside_conversation(backend, revision, context, asked, conv, where)
+                # Newer Hermes won't take an API turn into a chat's session. Say it in the thread
+                # itself, through Hermes' webhook platform, exactly as if typed there; without a
+                # thread (or the webhook platform), run it beside the chat with the chat's context.
+                self.store.forget_run_id(idem)
+                with self.interaction.lock:
+                    backend.run_id = None
+                if not await self.continue_in_thread(backend, conv, message, where):
+                    await self.run_beside_conversation(backend, revision, context, asked, conv, where)
                 return
             # The turn ran in the conversation's own session (its history), over the local API. Post
             # the answer into that chat ourselves, like any routed answer; Hermes config is untouched.
@@ -1869,6 +1957,41 @@ class SidebandWorker:
             said = failures.reason_text(failed_as) and failures.voice_text(failed_as)
             await self.append("session.commentary.append", delegation_id,
                               P.failed_because(said) if said else P.continuing_failed_note(where))
+
+    async def continue_in_thread(self, backend: "BackendRun", conv: continuity.Conversation, message: str,
+                                 where: str) -> bool:
+        """Put the request into the chat thread as if typed there, so the agent works inside that
+        thread with its whole history and Hermes replies there itself; the call hears the reply.
+        False when it can't be delivered that way (no thread, webhook platform off)."""
+        runner = self.rt.threads
+        thread_id = conv.thread_id or (conv.chat_id if conv.chat_type == "thread" else "")
+        if runner is None or not hasattr(runner, "post") or not hasattr(runner, "wait_turn") or not thread_id:
+            return False
+        idem = backend.idem_key
+        after = await asyncio.to_thread(threads.last_message_id, self.rt.state_db)
+        delivered = await asyncio.to_thread(runner.post, conv.platform, str(thread_id), message=message,
+                                            delivery_id=f"{idem[:40]}-{secrets.token_hex(4)}")
+        if not delivered:
+            return False
+        logger.info("speakeasy: continued a chat by messaging its thread")
+        backend.deliver_to = None  # Hermes answers in the thread itself; posting it too would double it
+        self.store.progress(idem, "milestone", f"Sent into {where}")
+        self.publish()
+        loop = asyncio.get_running_loop()
+
+        def on_activity(kind: str, text: str) -> None:
+            event = {"event": "message.interim" if kind == "commentary" else "tool.completed", "text": text}
+            asyncio.run_coroutine_threadsafe(self.thread_activity(backend, kind, text, event), loop).result()
+        answer = await asyncio.to_thread(runner.wait_turn, conv.platform, str(thread_id), after, on_activity)
+        if answer is None:
+            self.store.progress(idem, "result", f"Still going in {where}; the answer will land there")
+            await self.handle_hermes_event(backend, {"event": "run.completed",
+                                                     "output": f"Still working on it in {where}. The answer will land there.",
+                                                     "continued": True})
+            return True
+        await self.handle_hermes_event(backend, {"event": "run.completed", "output": P.without_voice_header(answer),
+                                                 "continued": True})
+        return True
 
     async def run_beside_conversation(self, backend: "BackendRun", revision: int, context: str, request: str,
                                       conv: continuity.Conversation, where: str) -> None:
