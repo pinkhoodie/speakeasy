@@ -228,6 +228,8 @@ def test_saved_voice_falls_back_when_provider_does_not_accept_it():
     def pick(provider, voice):
         return S.default_voice({"voice": {"provider": provider, "voice": voice}})
     assert pick("codex", "spruce") == "spruce"
+    assert pick("codex", "bubbie") == "bubbie"  # GPT-Live 1.1 voice
+    assert pick("codex", "porto") == S.DEFAULT_VOICES["codex"]  # listed by Codex, refused by the server
     assert pick("codex", "marin") == S.DEFAULT_VOICES["codex"]  # API voice saved, then switched to Codex
     assert pick("openai", "spruce") == S.DEFAULT_VOICES["openai"]
     assert pick("openai", "") == S.DEFAULT_VOICES["openai"]
