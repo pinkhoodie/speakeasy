@@ -2,6 +2,11 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Plugin 0.3.11 and the next Mac app — Clear an answer without opening it
+
+- **Every new answer has an ×.** Tap it (or long-press the answer and pick Dismiss) and it leaves New answers without opening; it's still in Done today if you want it later. *(Mac app and iPhone app)*
+- **"Lights off" doesn't leave a new answer behind.** A home command that Home Assistant carried out is already counted as read: you heard "done" on the call. Anything else, including a home request Hermes handled itself, still shows up as usual. *(Plugin)*
+
 ## Plugin 0.3.9 — One sentence, one task
 
 - **A question no longer starts two tasks.** The voice sometimes passes one sentence along twice, the whole thing and then a scrap of its ending a moment later. The second copy used to start its own task (and its own chat thread). Now a repeat of what you just asked is folded into the first request.
