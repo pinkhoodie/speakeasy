@@ -86,7 +86,8 @@ struct JobBoardView: View {
                 if !sections.newAnswers.isEmpty {
                     SectionLabel(text: "New answers").padding(.top, sections.needsYou.isEmpty ? 0 : 4)
                     ForEach(sections.newAnswers) { job in
-                        AnswerTile(job: job, focused: model.boardFocusID == job.id) { model.onOpenJob(job.id) }
+                        AnswerTile(job: job, focused: model.boardFocusID == job.id,
+                                   onDismiss: { model.dismissAnswer(job) }) { model.onOpenJob(job.id) }
                             .modifier(TileFrame(id: job.id))
                     }
                 }

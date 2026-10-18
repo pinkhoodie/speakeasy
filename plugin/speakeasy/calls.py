@@ -1460,6 +1460,9 @@ class SidebandWorker:
             self.store.update_run(idem, None, backend.status)
             self.store.set_result(idem, split_result(reply.spoken, ()))
             self.store.progress(idem, "result", reply.spoken)
+            if reply.ok:
+                # "Lights off" -> "Done": heard on the call, nothing to read, so no new-answer badge.
+                self.store.mark_seen(idem)
         except Exception:
             logger.warning("speakeasy: could not record the home-control card")
         self.handoff_at.pop(delegation_id, None)

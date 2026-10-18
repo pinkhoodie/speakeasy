@@ -108,6 +108,8 @@ class StateStore:
                 self._db.execute("ALTER TABLE runs ADD COLUMN plan TEXT")
             if "set_aside" not in columns:  # when the user set its question aside (handled, or not needed)
                 self._db.execute("ALTER TABLE runs ADD COLUMN set_aside REAL")
+            if "seen" not in columns:  # nothing to read (a finished home command): never a new answer
+                self._db.execute("ALTER TABLE runs ADD COLUMN seen INTEGER")
             # Finished tasks that never had a Hermes run id (quick answers, home control) could not be
             # cleared: "Clear done" and the x address tasks by run id. Give them their local id.
             settled = sorted(TERMINAL | {"rejected"})
@@ -342,6 +344,12 @@ class StateStore:
                 f"UPDATE runs SET set_aside=COALESCE(set_aside, ?) WHERE idem_key=? AND status IN ({marks})",
                 (time.time(), key, *settled))
         return bool(cursor.rowcount)
+
+    def mark_seen(self, key: str) -> None:
+        """Nothing in this task's answer the user needs to read (a home command that went through):
+        apps leave it out of New answers. Opening it still shows the answer."""
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET seen=1 WHERE idem_key=?", (key,))
 
     def is_set_aside(self, key: str) -> bool:
         with self._lock:
@@ -737,7 +745,7 @@ class StateStore:
              assistant_name: str = "Hermes") -> dict[str, Any] | None:
         """The latest admitted job or one exact server-owned run, including past calls."""
         cols = """idem_key,run_id,status,updated,short_status,detail,progress_updated,
-                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,session_id,set_aside"""
+                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,session_id,set_aside,seen"""
         with self._lock:
             if idem_key:
                 row = self._db.execute(f"SELECT {cols} FROM runs WHERE idem_key=?", (idem_key,)).fetchone()
@@ -749,7 +757,7 @@ class StateStore:
                 return None
             (key, actual_run_id, status, updated, short_status, detail, progress_updated,
              status_source, result_json, title, dismissed, summary, continued, settled_at, failure, session_id,
-             set_aside) = row
+             set_aside, seen) = row
             events = self._db.execute(
                 "SELECT kind,text,created FROM work_events WHERE idem_key=? ORDER BY seq DESC LIMIT 30", (key,)).fetchall()
         stale = status not in TERMINAL | {"waiting_for_approval"} and time.time() - updated > STALE_AFTER_S
@@ -783,6 +791,9 @@ class StateStore:
         if set_aside:
             # Its question was set aside: nothing waits on the user any more (only sent when true).
             work["set_aside"] = True
+        if seen:
+            # Nothing to read (a home command that went through): not a new answer (only sent when true).
+            work["seen"] = True
         why = public_failure(failure, self.hermes_home) if status == "failed" else None
         if why:
             # Speakeasy's own words for why it failed: a row label when the reason is known, and a

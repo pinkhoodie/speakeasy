@@ -313,7 +313,11 @@ public struct AnswerTile: View {
     var job: Job
     var focused: Bool
     var action: () -> Void
-    public init(job: Job, focused: Bool, action: @escaping () -> Void) { self.job = job; self.focused = focused; self.action = action }
+    /// Dismiss without opening (the x, or Dismiss in the long-press menu): it moves to Done today.
+    var onDismiss: (() -> Void)?
+    public init(job: Job, focused: Bool, onDismiss: (() -> Void)? = nil, action: @escaping () -> Void) {
+        self.job = job; self.focused = focused; self.onDismiss = onDismiss; self.action = action
+    }
     @State private var hover = false
 
     public var body: some View {
@@ -340,7 +344,7 @@ public struct AnswerTile: View {
                         .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(0.06)))
                 }
             }
-            .padding(.horizontal, 11).padding(.vertical, 9)
+            .padding(.leading, 11).padding(.trailing, onDismiss == nil ? 11 : 30 * s).padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(JobStyle.blueInk.opacity(hover ? 0.12 : 0.08)))
@@ -352,6 +356,38 @@ public struct AnswerTile: View {
         .onHover { hover = $0 }
         .help("Read \(job.name)")
         .accessibilityLabel("New answer: \(job.name). \(JobAnswer.headline(info) ?? "")")
+        .accessibilityAction(named: "Dismiss") { onDismiss?() }
+        .overlay(alignment: .topTrailing) {
+            if let onDismiss { DismissAnswerButton(name: job.name, action: onDismiss).padding(4 * s) }
+        }
+        .contextMenu {
+            if let onDismiss {
+                Button("Read", action: action)
+                Button("Dismiss", action: onDismiss)
+            }
+        }
+    }
+}
+
+/// The x on a new answer: clears it without opening it.
+struct DismissAnswerButton: View {
+    @Environment(\.jobTextScale) private var s
+    var name: String
+    var action: () -> Void
+    @State private var hover = false
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 9.5 * s, weight: .bold))
+                .foregroundStyle(hover ? Color.primary.opacity(0.8) : Color.secondary)
+                .frame(width: 22 * s, height: 22 * s)
+                .background(Circle().fill(Color.primary.opacity(hover ? 0.12 : 0.06)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help("Dismiss without opening")
+        .accessibilityLabel("Dismiss \(name)")
     }
 }
 

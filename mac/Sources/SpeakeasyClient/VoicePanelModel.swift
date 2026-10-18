@@ -241,6 +241,8 @@ public final class VoicePanelModel: ObservableObject {
         let key = JobBoard.seenKey(t)
         if !seenAnswers.contains(key) { seenAnswers.append(key) }
     }
+    /// Dismiss: the answer leaves New answers without being opened (it stays in Done today).
+    public func dismissAnswer(_ job: Job) { markAnswerSeen(job) }
     /// Answers finished today that the user hasn't opened.
     public var unreadAnswers: Int { boardSections.newAnswers.count }
     /// The orb's calm blue dot: answers to read and nothing more pressing.

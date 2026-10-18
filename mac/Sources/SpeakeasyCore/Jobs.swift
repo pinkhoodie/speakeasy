@@ -273,7 +273,7 @@ public enum JobBoard {
         }
         let unread = done.filter { j in
             guard let t = j.answerTask else { return false }
-            return !seen.contains(seenKey(t)) && !seen.contains(t.id)
+            return !t.info.seen && !seen.contains(seenKey(t)) && !seen.contains(t.id)
         }
         let unreadIDs = Set(unread.map(\.id))
         return Sections(needsYou: needs, newAnswers: unread, running: running, doneToday: done.filter { !unreadIDs.contains($0.id) })

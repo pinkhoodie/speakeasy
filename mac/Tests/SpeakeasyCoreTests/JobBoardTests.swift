@@ -208,6 +208,18 @@ final class JobBoardTests: XCTestCase {
         XCTAssertNil(JobBoard.jobs([answer("q", result: ["spoken": "Ship?", "views": q])], answered: ["q"]).first?.answerTask)
     }
 
+    func testAHomeCommandTheServerMarkedSeenIsNeverANewAnswer() {
+        var lights = answer("lights", result: ["spoken": "Kitchen lights are off."])
+        XCTAssertFalse(lights.info.seen)
+        lights = TaskItem(json: ["task_id": "lights", "run_id": "run_lights", "status": "completed", "title": "Lights off",
+                                 "updated_at": now.timeIntervalSince1970 - 10, "result": ["spoken": "Done."], "seen": true])!
+        XCTAssertTrue(lights.info.seen)
+        let wx = answer("wx", result: ["spoken": "Sunny."])
+        let s = JobBoard.sections(JobBoard.jobs([lights, wx]), now: now)
+        XCTAssertEqual(s.newAnswers.map(\.newest.id), ["wx"], "the read-out still waits to be read")
+        XCTAssertEqual(s.doneToday.map(\.newest.id), ["lights"], "the home command goes straight to Done today, still openable")
+    }
+
     func reviewed(_ id: String, result: [String: Any], status: String = "completed") -> TaskItem {
         var r = result
         r["cards"] = [["kind": "image", "name": "page.png"]]

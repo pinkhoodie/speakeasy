@@ -573,6 +573,16 @@ enum PanelSmoke {
                   "answers: a read answer drops to Done today")
             check(UserDefaults.standard.stringArray(forKey: "speakeasy.seenAnswers")?.contains("run_ans_wx") == true,
                   "answers: seen answers are remembered")
+            // Dismiss (the x): it leaves New answers without opening the job.
+            if let laptops = after.newAnswers.first(where: { $0.name == "Two laptops compared" }) {
+                c.model.dismissAnswer(laptops)
+                await settle(0.5)
+                let dismissed = c.model.boardSections
+                check(c.model.selectedJobID == nil, "answers: dismissing doesn't open the job")
+                check(!dismissed.newAnswers.contains { $0.id == laptops.id } && dismissed.doneToday.contains { $0.id == laptops.id },
+                      "answers: a dismissed answer drops to Done today")
+                snap("jobs-answers-dismissed")
+            } else { fail("answers: no laptops answer left to dismiss") }
         } else { fail("jobs-answers: fixture missing") }
         for name in ["answer-weather", "answer-nightly", "answer-laptops"] {
             guard PreviewFixtures.showJobFixture(name, on: c) else { fail("\(name): fixture missing"); continue }
