@@ -28,6 +28,10 @@ cd "$ROOT"
 PROFILE="${SPEAKEASY_NOTARY_PROFILE:-speakeasy}"
 IDENTITY="${SPEAKEASY_DEVELOPER_ID:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}"
 [[ -n "$IDENTITY" ]] || { echo "error: no Developer ID Application certificate in the keychain" >&2; exit 1; }
+# Sign from one named keychain (e.g. a dedicated signing keychain): with the same certificate also
+# in a locked login keychain, codesign otherwise picks that copy and fails with errSecInternalComponent.
+SIGN_KC=()
+[[ -n "${SPEAKEASY_CODESIGN_KEYCHAIN:-}" ]] && SIGN_KC=(--keychain "$SPEAKEASY_CODESIGN_KEYCHAIN")
 # A file keychain (e.g. the login keychain) keeps working while the screen is locked; the default
 # data-protection keychain does not, which breaks unattended releases.
 NOTARY_ARGS=(--keychain-profile "$PROFILE")
@@ -47,9 +51,9 @@ BUILD="$(git rev-list --count HEAD)"
 SPEAKEASY_CODESIGN_IDENTITY="-" ./scripts/package-app.sh >/dev/null
 APP="$ROOT/dist/Speakeasy.app"
 FW="$APP/Contents/Frameworks/WebRTC.framework"
-"$ROOT/scripts/sign-sparkle.sh" "$APP/Contents/Frameworks/Sparkle.framework" "$IDENTITY" --options runtime --timestamp
-codesign --force --options runtime --timestamp --sign "$IDENTITY" "$FW"
-codesign --force --options runtime --timestamp --entitlements Resources/Speakeasy.entitlements \
+"$ROOT/scripts/sign-sparkle.sh" "$APP/Contents/Frameworks/Sparkle.framework" "$IDENTITY" ${SIGN_KC[@]+"${SIGN_KC[@]}"} --options runtime --timestamp
+codesign --force ${SIGN_KC[@]+"${SIGN_KC[@]}"} --options runtime --timestamp --sign "$IDENTITY" "$FW"
+codesign --force ${SIGN_KC[@]+"${SIGN_KC[@]}"} --options runtime --timestamp --entitlements Resources/Speakeasy.entitlements \
     --sign "$IDENTITY" "$APP"
 codesign --verify --deep --strict "$APP"
 
@@ -61,7 +65,7 @@ ditto "$APP" "$STAGE/Speakeasy.app"
 ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
 hdiutil create -quiet -volname "Speakeasy" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
-codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+codesign --force ${SIGN_KC[@]+"${SIGN_KC[@]}"} --timestamp --sign "$IDENTITY" "$DMG"
 
 echo "Notarizing (usually a few minutes)…"
 xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait --timeout 30m | tee "$STAGE/notary.log"
