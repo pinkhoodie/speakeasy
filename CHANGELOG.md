@@ -2,10 +2,11 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
-## Plugin 0.3.11 and the next Mac app — Clear an answer without opening it
+## Mac 0.3.4 and Plugin 0.3.11 — Clear an answer without opening it
 
 - **Every new answer has an ×.** Tap it (or long-press the answer and pick Dismiss) and it leaves New answers without opening; it's still in Done today if you want it later. *(Mac app and iPhone app)*
 - **"Lights off" doesn't leave a new answer behind.** A home command that Home Assistant carried out is already counted as read: you heard "done" on the call. Anything else, including a home request Hermes handled itself, still shows up as usual. *(Plugin)*
+- **More voices with ChatGPT sign-in.** The voice picker lists the newer ChatGPT voices that work with a ChatGPT sign-in. *(Plugin 0.3.10 and Mac app)*
 
 ## Plugin 0.3.9 — One sentence, one task
 
