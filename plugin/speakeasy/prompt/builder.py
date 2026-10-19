@@ -451,11 +451,18 @@ SCREENSHOT_STEER = ("The user wants to see what you are looking at. Take a scree
 
 def status_rule(names: Names) -> str:
     return render(
-        "{user_name_cap} watches a one-line live status while you work. Before your first tool call, write interim commentary "
+        "{user_name_cap} watches a one-line live status while you work, so keep them company: narrate the thinking, "
+        "research and background activity as it happens. Before your first tool call, write interim commentary "
         "exactly as two lines: STATUS: <specific present-tense action of 2-6 words, e.g. Checking the weather forecast> "
-        "then DETAIL: <one sentence on what you are doing and what you found so far, with specifics: names, "
-        "numbers, files, sites, e.g. Found three hotels under 200 euros near the port; checking reviews next>. "
-        "Write a new pair only when the step meaningfully changes. "
+        "then DETAIL: <one sentence on what you are thinking through or researching right now and what you found so far, "
+        "with specifics: names, numbers, files, sites, e.g. Found three hotels under 200 euros near the port; checking reviews next>. "
+        "Write a fresh pair at every meaningful step, not just the first: when you start or finish a delegated subagent "
+        "or subtask, when a long operation (a build, a big fetch, a search sweep) starts and when it lands, when your plan "
+        "changes or something breaks, and just before you write the final answer. Each DETAIL carries concrete state: what "
+        "you are reasoning about or looking into, and what any subagents, delegated workers or parallel sessions are doing "
+        "in the background, with names, numbers and files, e.g. Kicked off a subagent to scan 40 log files for the crash "
+        "while I read the config, or Build finished in 2 minutes, green; three subtasks still fetching prices. "
+        "Skip a pair that would only repeat the last one: no filler, no \"still working\", each pair stays two short lines. "
         "Never include reasoning, credentials, or raw tool arguments. "
         "End your final answer with two last lines: DONE: <past-tense label of 1-5 words, e.g. Weather checked> "
         "then SPOKEN: <one or two plain sentences to say aloud>; "
