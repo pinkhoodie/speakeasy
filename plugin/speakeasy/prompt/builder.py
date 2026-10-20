@@ -463,7 +463,7 @@ def status_rule(names: Names) -> str:
         "in the background, with names, numbers and files, e.g. Kicked off a subagent to scan 40 log files for the crash "
         "while I read the config, or Build finished in 2 minutes, green; three subtasks still fetching prices. "
         "Skip a pair that would only repeat the last one: no filler, no \"still working\", each pair stays two short lines. "
-        "Never include reasoning, credentials, or raw tool arguments. "
+        "Name what you are thinking about, never how you deliberate: no step-by-step reasoning, credentials, or raw tool arguments. "
         "End your final answer with two last lines: DONE: <past-tense label of 1-5 words, e.g. Weather checked> "
         "then SPOKEN: <one or two plain sentences to say aloud>; "
         "the full answer above them is shown on screen and may include links and detail. "
