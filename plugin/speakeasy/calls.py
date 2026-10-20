@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import channels, continuity, failures, router, threads
+from .duck import Ducker
 from . import home_control as home_control_mod
 from . import instant as instant_mod
 from . import jev as jev_mod
@@ -143,6 +144,8 @@ class Runtime:
     quick_call: Callable[[str, str], str | None] | None = None
     # The local log of ended calls that "Tune from my calls" learns from (tune.CallLog); None = not kept.
     call_log: Any = None
+    # Lowers the Mac's volume while the call is speaking (duck.Ducker); None = never.
+    duck: Ducker | None = None
 
     @property
     def names(self) -> P.Names:
@@ -642,6 +645,8 @@ class SidebandWorker:
         A paused call keeps its transcript (and listening mode's room text) for Resume and defers the
         "Still working" notices. An ended call drops its room text: it never outlives the call.
         """
+        if self.rt.duck is not None:  # also when the transport dropped without a session.closed
+            self.rt.duck.restore(self.interaction.interaction_id)
         with self.interaction.lock:
             if self.interaction.call_closed:
                 return
@@ -708,6 +713,8 @@ class SidebandWorker:
             speaker = "user" if kind.startswith("session.input") else "assistant"
             self.fragments.append({"speaker": speaker, "text": delta, "at": time.monotonic(),
                                    "start_ms": int(event.get("start_ms", 0)), "end_ms": int(event.get("end_ms", 0))})
+            if self.rt.duck is not None:  # either side talking: duck the Mac's volume until it goes quiet
+                self.rt.duck.note(speaker, self.interaction.interaction_id)
             return
         if kind == "session.delegation.created":
             delegation = event.get("delegation") or {}

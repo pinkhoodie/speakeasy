@@ -6,6 +6,9 @@ import shutil
 import pytest
 
 from fakes import FakeHermesServer, FakeLiveWorker, FakeTransport, make_home, http  # noqa: F401
+from speakeasy import duck as _duck
+
+_REAL_DEFAULT_BACKEND = _duck.default_backend
 
 
 @pytest.fixture(autouse=True)
@@ -15,6 +18,19 @@ def no_real_routing_model(monkeypatch):
     from speakeasy import router
     monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S: None)
     monkeypatch.setattr(router, "routing_model", lambda config=None: "Hermes auxiliary default (auto)")
+
+
+@pytest.fixture(autouse=True)
+def no_real_volume(monkeypatch):
+    """Never touch the Mac's real output volume from tests: services get no volume backend unless a
+    test passes its own ``volume_backend``."""
+    monkeypatch.setattr(_duck, "default_backend", lambda: None)
+
+
+@pytest.fixture
+def real_default_backend():
+    """The unpatched ``duck.default_backend``, for tests of the platform check itself."""
+    return _REAL_DEFAULT_BACKEND
 
 
 @pytest.fixture

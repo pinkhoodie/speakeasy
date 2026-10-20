@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from . import __version__
 from . import delivery as D
+from . import duck as duck_mod
 from .brief import BriefInvalid, BriefManager
 from .calls import (ACTIVE_RUN_STATES, MAX_TASKS, ServiceError, Interaction, Notices, Runtime, SidebandWorker,
                     interaction_tasks, publish_state)
@@ -108,7 +109,8 @@ class VoiceService:
                  polish_call: Callable[[str], str | None] | None = None,
                  status_call: Callable[[str], str | None] | None = None,
                  home_plan_call: Callable[..., Any] | None = None, home_client: Callable[..., Any] | None = None,
-                 tune_run: Callable[[str, str], tuple[str, str]] | None = None):
+                 tune_run: Callable[[str, str], tuple[str, str]] | None = None,
+                 volume_backend: duck_mod.VolumeBackend | None = None):
         self.home = Path(hermes_home)
         self.dir = self.home / "speakeasy"
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -136,6 +138,11 @@ class VoiceService:
         from .tune import CallLog, TuneManager, merge_calls
         self.call_log = CallLog(self.dir)
         self.rt.call_log = self.call_log
+        # Only the gateway's long-lived service (start_threads) drives the volume: a short-lived CLI
+        # service would otherwise restore, at its start, a duck the gateway is holding mid-call.
+        backend = volume_backend or (duck_mod.default_backend() if start_threads else None)
+        self.duck = duck_mod.Ducker(self.home, self.settings.get, backend)
+        self.rt.duck = self.duck
         self.tune = TuneManager(self.dir, tune_run or brief_run or self._tune_run, self.brief,
                                 lambda: merge_calls(self.call_log.recent(), self.store.calls_from_tasks()),
                                 names=self._tune_names)
@@ -198,6 +205,7 @@ class VoiceService:
                     worker.stop_transport()
                 except Exception:
                     pass
+        self.duck.close()  # put the volume back before a reload swaps this code out
 
     # -- auth ---------------------------------------------------------------------------------
     def authenticate(self, headers: Any) -> str:

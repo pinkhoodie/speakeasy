@@ -636,6 +636,9 @@ partial object (nested objects merge); unknown keys or invalid values are 400.
 | `delivery.new_thread` | `false` | run each task in a new thread of the default target when `threads_supported` (older `new_thread_per_task` is accepted and migrated) |
 | `delivery.channels` | `[]` | up to 8 opted-in channels: `{target, label, topic, new_thread}`. A new task goes to the channel named in the request ("put this in #work"), else the one whose `topic` fits (routing model), else `delivery.target`. `new_thread` runs the task in a new thread there (Discord, Telegram, Slack, Matrix; needs `threads_supported`), otherwise the answer is posted there. Follow-ups stay where their task runs |
 | `continuity.enabled` | `true` | when a request is about something already being discussed in a Hermes chat or thread, continue inside that conversation (with its history) and post the reply there |
+| `audio_duck.enabled` | `true` | lower the Mac's output volume while either side of a call is speaking (macOS only; `SPEAKEASY_VOICE_DUCK=0` in the environment also turns it off) |
+| `audio_duck.level` | `30` | output volume (0-100) while ducked; a volume already at or below it, or muted, is left alone |
+| `audio_duck.hold_s` | `4.0` | seconds without speech (0.5-60) before the old volume comes back; it also comes back when the call ends. A volume the user changed while ducked is kept |
 | `server.advertised_url`, `server.tailscale_name` | `""` | set by `hermes voice setup`: the address other devices use (e.g. the tailnet URL) |
 | `brief.auto_refresh` | `true` | daily background brief refresh when its inputs change |
 | `brief.include_recent_voice` | `true` | include recent voice turns in a new call's context |

@@ -46,6 +46,9 @@ DEFAULTS: dict[str, Any] = {
     # typesafe) that sorts each request in well under a second; the key comes from the profile .env.
     # home_place: a city for weather questions that don't name one ("what's the weather tomorrow").
     "fast_routing": {"quick_answers": True, "jev": "", "home_place": ""},
+    # Lower the Mac's output volume to `level` % while either side of a call speaks; the old volume
+    # comes back after `hold_s` seconds without speech or when the call ends (macOS only).
+    "audio_duck": {"enabled": True, "level": 30, "hold_s": 4.0},
     "image_roots": [],
     # Written by `hermes voice setup`: the URL other devices use to reach this server (a tailnet
     # HTTPS name when Tailscale was imported), reused by `hermes voice pair`.
@@ -124,6 +127,7 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
     s["delivery"] = validate_delivery(s["delivery"])
     s["home_control"] = validate_home_control(s["home_control"])
     s["server"] = validate_server(s["server"])
+    s["audio_duck"] = validate_audio_duck(s["audio_duck"])
     fast = s["fast_routing"]
     if not isinstance(fast.get("quick_answers"), bool):
         raise SettingsError("fast_routing.quick_answers must be true or false")
@@ -144,6 +148,17 @@ def validate(settings: dict[str, Any]) -> dict[str, Any]:
 
 
 ENTITY_ID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
+
+
+def validate_audio_duck(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or not isinstance(raw.get("enabled"), bool):
+        raise SettingsError("audio_duck.enabled must be true or false")
+    level, hold = raw.get("level"), raw.get("hold_s")
+    if isinstance(level, bool) or not isinstance(level, (int, float)) or not 0 <= level <= 100 or level != int(level):
+        raise SettingsError("audio_duck.level must be a whole number from 0 to 100")
+    if isinstance(hold, bool) or not isinstance(hold, (int, float)) or not 0.5 <= hold <= 60:
+        raise SettingsError("audio_duck.hold_s must be 0.5 to 60 seconds")
+    return {"enabled": raw["enabled"], "level": int(level), "hold_s": float(hold)}
 
 
 def validate_home_control(raw: Any) -> dict[str, Any]:
