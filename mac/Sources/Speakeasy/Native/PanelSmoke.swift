@@ -433,7 +433,7 @@ enum PanelSmoke {
             check(c.model.showsSlim, "\(name): folded into the orb")
             check(c.model.orbState == state, "\(name): orb shows \(state) (got \(c.model.orbState))")
             check(c.model.orbAnswerDot == dot, "\(name): answer dot \(dot ? "shown" : "hidden") (unread \(c.model.unreadAnswers))")
-            check(c.panel.window.frame.width <= VoicePanelModel.orbWidth + 1, "\(name): the orb panel is small (\(Int(c.panel.window.frame.width))pt)")
+            check(c.panel.window.frame.width <= VoicePanelModel.orbWidthWithScreen + 1, "\(name): the orb panel is small (\(Int(c.panel.window.frame.width))pt)")
             let folded = JobOrb.drawn["folded"]
             check(folded == JobOrb.Drawn(state: state, answerDot: dot), "\(name): the folded orb draws \(state) (got \(String(describing: folded)))")
             onScreen(name)

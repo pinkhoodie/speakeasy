@@ -1424,6 +1424,12 @@ class SidebandWorker:
         intent = router.screen_intent(last_request) if self.interaction.attachments.declared else None
         if intent is not None:
             rest = router.after_stop(last_request) if intent == "stop" else ""
+            if not rest and not marked:
+                # The voice sometimes hands the same words off twice: hint (or stop) once.
+                if self._echoes_recent(last_request):
+                    await self._drop(delegation_id, revision, "Added to the previous request", None)
+                    return
+                self._remember_request(last_request)
             await self.screen_words(delegation_id, intent, more=bool(rest))
             if not rest:
                 return
@@ -2484,6 +2490,8 @@ class SidebandWorker:
         show = self._take_show(voice_id or task_id, idem)
         if show:
             focus = (focus or request) + P.SHOW_IT_FOCUS
+        # Read now, before any await: the call may end (and drop its room text) while what was shared is collected.
+        room = self.room_handoff_text(voice_id or task_id)
         state, known_run = self.store.reserve_run(idem, self.interaction.interaction_id, task_id, revision)
         if state != "created":
             if known_run:
@@ -2515,8 +2523,7 @@ class SidebandWorker:
             self.store.add_shared(idem, items)
             self.publish()
         prompt = P.build_task_prompt(self.names, revision, context, focus, label, shared=self.shared_prompt(
-            items, bool(images), session_id if continuing else None, shared.capture is not None),
-            room=self.room_handoff_text(voice_id or task_id))
+            items, bool(images), session_id if continuing else None, shared.capture is not None), room=room)
         try:
             run_id = await asyncio.to_thread(self.hermes.start_run, prompt, idem, session_id,
                                              **({"images": images} if images else {}))

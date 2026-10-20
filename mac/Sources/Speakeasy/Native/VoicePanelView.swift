@@ -567,30 +567,7 @@ struct VoicePanelView: View {
                     .padding(.horizontal, 12).padding(.bottom, 10)
                     .transition(.opacity)
             }
-            if model.showsSlim {
-                // Slim: header only. A task summary stands in for the list; clicking it
-                // (or the status line, or the expand button) brings the full panel back.
-                if let summary = slimTaskSummary(model.state.tasks, approvalPending: model.state.approval != nil,
-                                                 holdActive: holding) {
-                    Button { model.onToggleSlim() } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: holding ? "eye" : "list.bullet")
-                                .foregroundStyle(holding ? AnyShapeStyle(Tokens.screen) : AnyShapeStyle(.secondary))
-                            Text(summary).lineLimit(1)
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.down")
-                        }
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 10).frame(height: 24)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Show the full panel")
-                    .accessibilityLabel("\(summary). Show the full panel")
-                    .padding(.horizontal, 8).padding(.bottom, 6)
-                }
-            } else if let job {
+            if let job {
                 if !model.state.workOnly { Divider().opacity(0.5).padding(.horizontal, 14) }
                 JobDetailView(job: job, model: model)
             } else if model.workExpanded || model.state.workOnly {

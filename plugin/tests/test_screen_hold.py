@@ -488,6 +488,17 @@ def test_share_my_screen_explains_the_button(open_call, hermes):
     assert call.snap()["screen"]["on"] is False and never_held(call)
 
 
+def test_share_my_screen_handed_off_twice_hints_once(open_call, hermes):
+    """The voice sometimes hands the same words off twice: the button is explained once."""
+    call = open_call("share_twice")
+    call.say("call_share_a", "Please share my screen now")
+    wait_for(lambda: P.share_hint() in call.spoken())
+    call.say("call_share_b", "Please share my screen now")
+    time.sleep(0.6)
+    assert call.events("screen.hint") == [{"reason": "share_request"}]
+    assert call.spoken().count(P.share_hint()) == 1 and hermes.calls == []
+
+
 def test_share_my_screen_while_sharing_is_on(open_call, hermes):
     call = open_call("share_on")
     call.sharing(True)

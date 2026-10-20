@@ -254,8 +254,12 @@ public final class VoicePanelModel: ObservableObject {
 
     /// Width of the folded orb panel.
     public static let orbWidth: CGFloat = 132
+    /// Width of the folded orb panel in a call that can share its screen: the eye sits beside the mic,
+    /// so sharing stays visible (and can be stopped) while folded.
+    public static let orbWidthWithScreen: CGFloat = 164
+    public var foldedWidth: CGFloat { screenState == .unavailable ? Self.orbWidth : Self.orbWidthWithScreen }
     /// The panel's width right now: the orb when folded, else the user's width.
-    public var displayWidth: CGFloat { showsSlim ? Self.orbWidth : panelWidth }
+    public var displayWidth: CGFloat { showsSlim ? foldedWidth : panelWidth }
     /// The job open in the job view (a `Job.id`); nil shows the board.
     @Published public var selectedJobID: String?
     /// The board tile the arrow keys are on.
@@ -316,8 +320,11 @@ public final class VoicePanelModel: ObservableObject {
         }
     }
     /// The header's second line: the orb's reason when it has one, else the live status.
-    public var headerStatus: String { orbReason?.text ?? shownStatus }
-    public var headerTone: StatusTone { orbReason?.tone ?? shownTone }
+    /// A fresh screen-sharing notice ("Screen Recording is off · Set up", "Up to 3 at a time") is on
+    /// the status line now: it wins over the orb's summary, which would otherwise hide it (and its tap).
+    private var showingShareNotice: Bool { shareNotice.map { $0.text == shownStatus } ?? false }
+    public var headerStatus: String { showingShareNotice ? shownStatus : (orbReason?.text ?? shownStatus) }
+    public var headerTone: StatusTone { showingShareNotice ? shownTone : (orbReason?.tone ?? shownTone) }
     public var selectedJob: Job? { selectedJobID.flatMap { id in jobs.first { $0.id == id } } }
     /// The board replaces the task list once there's more than one task, anything needs you, or a
     /// task brought back a card. Cards never pile up under the board: each lives in its job's view.
