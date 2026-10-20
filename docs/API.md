@@ -274,7 +274,7 @@ Stops one task's Hermes run.
 
 Past tasks whose shown title is still the stand-in label built from the request's own words —
 the cloud titler never landed (out of credits, reload mid-name) or the task never got one.
-Newest first, at most 40. The Mac app's on-device Apple Intelligence sweep renames these;
+Finished tasks only (a running one may still get the cloud titler's name). Newest first, at most 40. The Mac app's on-device Apple Intelligence sweep renames these;
 tasks the titler (or a chat thread) already named properly are never offered.
 
 `200`
@@ -290,7 +290,8 @@ Set one task's title, generated on device in the app (Apple Intelligence). Same 
 the cloud titler's answer: the title also refines the name of the job the task first named.
 `{"task_id": "call_doc_1", "title": "rename voice threads"}` →
 `200 {"task_id": "call_doc_1", "title": "rename voice threads", "renamed": true}`.
-Errors: 400 (bad body, or a title outside 2-90 characters), 404 (unknown task).
+Errors: 400 (bad body, or a title outside 2-90 characters), 404 (unknown task), 409 (the task
+already has a real title: the cloud titler or a chat thread named it after the app asked).
 
 ## GET /voice/work/latest
 

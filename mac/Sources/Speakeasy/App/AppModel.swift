@@ -282,6 +282,9 @@ final class AppModel: ObservableObject {
 
     // MARK: AI thread titles
 
+    /// A rename sweep is in flight (the automatic one or Settings' Rename now).
+    private var titleSweepRunning = false
+
     /// Renames past threads that still show their stand-in label, on device, with Apple
     /// Intelligence — the Wing thread-titler applied to Speakeasy's voice threads. Touches
     /// only stand-in labels, runs at most once every six hours (or forced from Settings),
@@ -290,14 +293,16 @@ final class AppModel: ObservableObject {
     func sweepThreadTitles(force: Bool = false) async -> Int {
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: Prefs.renameThreadsWithAI) as? Bool ?? true else { return 0 }
-        guard isPaired, ThreadTitler.isAvailable() else { return 0 }
+        guard isPaired, ThreadTitler.isAvailable(), !titleSweepRunning, let api else { return 0 }
         if !force {
             let last = defaults.object(forKey: Prefs.lastAITitleSweep) as? Date ?? .distantPast
             guard Date().timeIntervalSince(last) > 6 * 3600 else { return 0 }
         }
+        titleSweepRunning = true   // refresh() runs often: one sweep at a time
+        defer { titleSweepRunning = false }
+        // No list (server unreachable, or an older plugin without the route): try again next refresh.
+        guard let pending = try? await api.pendingThreadTitles() else { return 0 }
         defaults.set(Date(), forKey: Prefs.lastAITitleSweep)
-        guard let api else { return 0 }
-        guard let pending = try? await api.pendingThreadTitles(), !pending.isEmpty else { return 0 }
         var renamed = 0
         for candidate in pending.prefix(30) {
             let material = candidate.request.isEmpty ? candidate.title : candidate.request
@@ -306,7 +311,9 @@ final class AppModel: ObservableObject {
             do {
                 try await api.renameThread(taskID: candidate.taskID, title: title)
                 renamed += 1
-            } catch { break }  // server gone or an older plugin: stop quietly, finish next sweep
+            } catch let error as ServerClient.HTTPError where error.status == 409 || error.status == 404 {
+                continue  // named meanwhile (the cloud titler won) or cleared: skip just this one
+            } catch { break }  // server gone: stop quietly, finish next sweep
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
         return renamed

@@ -53,6 +53,11 @@ def local_run_id(idem_key: str) -> str:
     return "lr_" + hashlib.sha256(idem_key.encode()).hexdigest()[:32]
 
 
+def _is_stand_in(title: str | None, request: str | None) -> bool:
+    """A task title that is only the word-based label made from its own request (or missing)."""
+    return not title or title == short_title(notice_text(request, 1200) or "")
+
+
 class StateStore:
     def __init__(self, path: Path, hermes_home: Path | None = None):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -665,30 +670,33 @@ class StateStore:
     def stand_in_titles(self, limit: int = 40) -> list[dict[str, Any]]:
         """Past tasks whose shown title is still the stand-in label built from their own words
         (the titler never landed: out of credits, reload mid-name) or that never got one.
-        These are what the Mac app's on-device Apple Intelligence titler may rename."""
+        These are what the Mac app's on-device Apple Intelligence titler may rename. Only
+        finished tasks: a running one may still get the cloud titler's name."""
+        marks = ",".join("?" * len(TERMINAL))
         with self._lock:
             rows = self._db.execute(
-                "SELECT idem_key, delegation_id, title, status, updated FROM runs "
-                "ORDER BY updated DESC LIMIT 400").fetchall()
-        unsettled = {"rejected", "admitting", "working", "waiting_for_approval", "running", "ambiguous"}
+                "SELECT r.idem_key, r.delegation_id, r.title, r.updated, "
+                "(SELECT e.text FROM work_events e WHERE e.idem_key=r.idem_key AND e.kind='request' "
+                " ORDER BY e.seq LIMIT 1) FROM runs r "
+                f"WHERE r.status IN ({marks}) ORDER BY r.updated DESC LIMIT 400",
+                tuple(sorted(TERMINAL))).fetchall()
         out = []
-        for key, delegation_id, title, status, updated in rows:
-            if status in unsettled:
-                continue
-            request = notice_text(self._request_text(key), 1200) or ""
-            if title and title != short_title(request):
+        for key, delegation_id, title, updated, request_text in rows:
+            if not _is_stand_in(title, request_text):
                 continue  # a real name (the titler's, a chat thread's, an older row's): never touched
             out.append({"task_id": delegation_id or key, "title": title or "",
-                        "request": request, "updated": float(updated or 0)})
+                        "request": notice_text(request_text, 1200) or "", "updated": float(updated or 0)})
             if len(out) >= limit:
                 break
         return out
 
-    def _request_text(self, key: str) -> str | None:
+    def has_stand_in_title(self, key: str) -> bool:
+        """The task still shows its stand-in label (or none): a rename can't clobber a real name."""
         with self._lock:
-            row = self._db.execute("SELECT text FROM work_events WHERE idem_key=? AND kind='request' "
-                                   "ORDER BY seq LIMIT 1", (key,)).fetchone()
-        return row[0] if row else None
+            row = self._db.execute(
+                "SELECT r.title, (SELECT e.text FROM work_events e WHERE e.idem_key=r.idem_key "
+                "AND e.kind='request' ORDER BY e.seq LIMIT 1) FROM runs r WHERE r.idem_key=?", (key,)).fetchone()
+        return bool(row) and _is_stand_in(row[0], row[1])
 
     # -- live view ("what it's looking at") -------------------------------------------------
     def set_live_image(self, key: str, kind: str, ref: str, name: str, source: str) -> bool:

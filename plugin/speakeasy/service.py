@@ -794,6 +794,9 @@ class VoiceService:
         key = self.store.key_for_task(task_id)
         if key is None:
             raise ServiceError(404, "task not found")
+        if not self.store.has_stand_in_title(key):
+            # The cloud titler (or a chat thread) named it after the app asked: that name wins.
+            raise ServiceError(409, "task already has a title")
         self.store.set_title(key, title)
         return {"task_id": task_id, "title": title, "renamed": True}
 

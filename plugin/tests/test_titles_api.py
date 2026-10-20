@@ -8,7 +8,8 @@ from test_routing import start_call, tasks
 def test_stand_in_titles_are_offered_and_renames_stick(server, service, hermes):
     _, worker = start_call(server, service)
     worker.delegate("call_t", "Um, book a train to Boston for tomorrow morning please")
-    wait_for(lambda: any(t.get("task_id") == "call_t" and t.get("title")
+    # Only finished tasks are offered: a running one may still get the cloud titler's name.
+    wait_for(lambda: any(t.get("task_id") == "call_t" and t.get("title") and t["status"] == "completed"
                          for t in tasks(server)))
 
     status, pending = http(server.base_url, "GET", "/voice/titles", token=server.token)
@@ -44,7 +45,8 @@ def test_rename_validation_and_auth(server, service, hermes):
 
     _, worker = start_call(server, service)
     worker.delegate("call_v", "Find a dentist near the office")
-    wait_for(lambda: any(t.get("task_id") == "call_v" and t.get("title") for t in tasks(server)))
+    wait_for(lambda: any(t.get("task_id") == "call_v" and t.get("title") and t["status"] == "completed"
+                         for t in tasks(server)))
 
     too_short = http(server.base_url, "POST", "/voice/titles", {"task_id": "call_v", "title": "  "}, server.token)
     assert too_short[0] == 400
@@ -72,3 +74,35 @@ def test_finished_and_unsettled_tasks_are_handled(server, service, hermes):
     assert status == 200
     assert all("request" in t and "task_id" in t and "title" in t and "updated" in t
                for t in pending["tasks"])
+
+
+def test_a_real_title_is_never_offered_or_clobbered(server, service, hermes):
+    """The cloud titler (or a chat thread) named the task after the app asked: its rename is refused."""
+    _, worker = start_call(server, service)
+    worker.delegate("call_r", "Compare three espresso machines under 500 dollars")
+    wait_for(lambda: any(t.get("task_id") == "call_r" and t["status"] == "completed" for t in tasks(server)))
+    status, pending = http(server.base_url, "GET", "/voice/titles", token=server.token)
+    assert status == 200 and [t for t in pending["tasks"] if t["task_id"] == "call_r"]
+
+    key = service.store.key_for_task("call_r")
+    service.store.set_title(key, "Espresso machine shortlist")  # the cloud titler lands meanwhile
+
+    status, pending = http(server.base_url, "GET", "/voice/titles", token=server.token)
+    assert status == 200 and not [t for t in pending["tasks"] if t["task_id"] == "call_r"]
+    status, _ = http(server.base_url, "POST", "/voice/titles",
+                     {"task_id": "call_r", "title": "compare espresso machines"}, server.token)
+    assert status == 409
+    assert service.store.title(key) == "Espresso machine shortlist"
+
+
+def test_running_tasks_are_not_offered(service):
+    """A task still working may yet get the cloud titler's name: never offered until it finishes."""
+    from speakeasy.text import short_title
+    store = service.store
+    request = "Plan the garden beds for spring"
+    store._db.execute("INSERT INTO runs (idem_key, interaction_id, delegation_id, revision, status, title, updated) "
+                      "VALUES ('k_run', 'vi_x', 'call_run', 1, 'running', ?, 2)", (short_title(request),))
+    store.progress("k_run", "request", request)
+    assert not [t for t in store.stand_in_titles() if t["task_id"] == "call_run"]
+    store._db.execute("UPDATE runs SET status='completed' WHERE idem_key='k_run'")
+    assert [t for t in store.stand_in_titles() if t["task_id"] == "call_run"]

@@ -99,6 +99,8 @@ private struct GeneralSettings: View {
                 Toggle("Start calls muted", isOn: $startMuted)
                 Toggle("Follow the system's audio devices (AirPods etc.)", isOn: $followSystemAudio)
                 Toggle("Rename past threads with Apple Intelligence", isOn: $renameThreadsAI)
+                    .disabled(!ThreadTitler.isAvailable())
+                    .help(ThreadTitler.isAvailable() ? "" : "Needs Apple Intelligence on this Mac (macOS 26 or later)")
                 HStack {
                     Button("Rename past threads now") {
                         renamingThreads = true
@@ -108,7 +110,7 @@ private struct GeneralSettings: View {
                             renamingThreads = false
                         }
                     }
-                    .disabled(renamingThreads || !app.isPaired)
+                    .disabled(renamingThreads || !app.isPaired || !renameThreadsAI || !ThreadTitler.isAvailable())
                     if renamingThreads { ProgressView().controlSize(.small) }
                     if renamedThreads > 0 {
                         Text("Renamed \(renamedThreads)").font(.caption).foregroundStyle(.secondary)
