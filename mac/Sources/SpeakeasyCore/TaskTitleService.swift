@@ -11,9 +11,11 @@ public enum TaskTitleService {
     /// Refine a spoken request into `(title, emoji)`. Emoji is nil when the model
     /// declined or its reply didn't parse as a single emoji cluster.
     public static func refine(request: String) async -> (title: String, emoji: String?)? {
-        if #available(macOS 26.0, iOS 26.0, *) {
+        #if canImport(FoundationModels)
+        if #available(macOS 26.0, iOS 26.0, visionOS 26.0, *) {
             return await FoundationTitleRefiner.shared.refine(request: request)
         }
+        #endif
         return nil
     }
 }
@@ -21,7 +23,7 @@ public enum TaskTitleService {
 #if canImport(FoundationModels)
 import FoundationModels
 
-@available(macOS 26.0, iOS 26.0, *)
+@available(macOS 26.0, iOS 26.0, visionOS 26.0, *)
 private actor FoundationTitleRefiner {
     static let shared = FoundationTitleRefiner()
 

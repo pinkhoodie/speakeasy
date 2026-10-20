@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fakes import http, wait_for
 from test_routing import start_call, tasks
+from test_run_failures import VENICE_402
 
 
 def test_stand_in_titles_are_offered_and_renames_stick(server, service, hermes):
@@ -66,14 +67,29 @@ def test_rename_validation_and_auth(server, service, hermes):
 
 
 def test_finished_and_unsettled_tasks_are_handled(server, service, hermes):
-    """A failed task keeps its stand-in title offer; nothing from another interaction leaks in."""
+    """A failed task keeps its stand-in title offer; every offer carries the fields the app reads."""
+    hermes.fail_with = VENICE_402
     _, worker = start_call(server, service)
     worker.delegate("call_f", "Show me the weather in Lisbon this weekend")
-    wait_for(lambda: any(t.get("task_id") == "call_f" for t in tasks(server)))
+    wait_for(lambda: any(t.get("task_id") == "call_f" and t["status"] == "failed" for t in tasks(server)))
     status, pending = http(server.base_url, "GET", "/voice/titles", token=server.token)
     assert status == 200
-    assert all("request" in t and "task_id" in t and "title" in t and "updated" in t
-               for t in pending["tasks"])
+    assert [t for t in pending["tasks"] if t["task_id"] == "call_f"]
+    assert all(set(t) == {"request", "task_id", "title", "updated"} and t["request"] for t in pending["tasks"])
+
+
+def test_chat_thread_tasks_are_never_offered(service):
+    """A task in a chat thread shows the thread's name: renaming it here would split it from the thread."""
+    from speakeasy.text import short_title
+    store = service.store
+    request = "Draft the weekly update for the team"
+    store._db.execute("INSERT INTO runs (idem_key, interaction_id, delegation_id, revision, status, title, updated) "
+                      "VALUES ('k_th', 'vi_x', 'call_th', 1, 'completed', ?, 2)", (short_title(request),))
+    store.progress("k_th", "request", request)
+    assert [t for t in store.stand_in_titles() if t["task_id"] == "call_th"]
+    store.set_thread("k_th", "discord", "123", "weekly update")
+    assert not [t for t in store.stand_in_titles() if t["task_id"] == "call_th"]
+    assert store.rename_stand_in("k_th", "weekly team update") is False
 
 
 def test_a_real_title_is_never_offered_or_clobbered(server, service, hermes):

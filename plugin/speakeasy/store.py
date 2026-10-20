@@ -53,8 +53,11 @@ def local_run_id(idem_key: str) -> str:
     return "lr_" + hashlib.sha256(idem_key.encode()).hexdigest()[:32]
 
 
-def _is_stand_in(title: str | None, request: str | None) -> bool:
-    """A task title that is only the word-based label made from its own request (or missing)."""
+def _is_stand_in(title: str | None, request: str | None, continued: str | None = None) -> bool:
+    """A task title that is only the word-based label made from its own request (or missing). A task
+    in a chat thread shows the thread's name, which a rename here would split from the thread itself."""
+    if '"thread_id"' in (continued or ""):
+        return False
     return not title or title == short_title(notice_text(request, 1200) or "")
 
 
@@ -675,28 +678,37 @@ class StateStore:
         marks = ",".join("?" * len(TERMINAL))
         with self._lock:
             rows = self._db.execute(
-                "SELECT r.idem_key, r.delegation_id, r.title, r.updated, "
+                "SELECT r.idem_key, r.delegation_id, r.title, r.updated, r.continued, "
                 "(SELECT e.text FROM work_events e WHERE e.idem_key=r.idem_key AND e.kind='request' "
                 " ORDER BY e.seq LIMIT 1) FROM runs r "
                 f"WHERE r.status IN ({marks}) ORDER BY r.updated DESC LIMIT 400",
                 tuple(sorted(TERMINAL))).fetchall()
         out = []
-        for key, delegation_id, title, updated, request_text in rows:
-            if not _is_stand_in(title, request_text):
-                continue  # a real name (the titler's, a chat thread's, an older row's): never touched
+        for key, delegation_id, title, updated, continued, request_text in rows:
+            request = notice_text(request_text, 1200)
+            if not request or not _is_stand_in(title, request_text, continued):
+                continue  # a real name (the titler's, a chat thread's, an older row's), or nothing to title from
             out.append({"task_id": delegation_id or key, "title": title or "",
-                        "request": notice_text(request_text, 1200) or "", "updated": float(updated or 0)})
+                        "request": request, "updated": float(updated or 0)})
             if len(out) >= limit:
                 break
         return out
 
-    def has_stand_in_title(self, key: str) -> bool:
-        """The task still shows its stand-in label (or none): a rename can't clobber a real name."""
-        with self._lock:
+    def rename_stand_in(self, key: str, title: str) -> bool:
+        """Set the app's on-device title only while the task still shows its stand-in label, checked
+        and written under one lock: a name the cloud titler or a chat thread gave it always wins."""
+        with self._lock, self._db:
             row = self._db.execute(
-                "SELECT r.title, (SELECT e.text FROM work_events e WHERE e.idem_key=r.idem_key "
+                "SELECT r.title, r.continued, (SELECT e.text FROM work_events e WHERE e.idem_key=r.idem_key "
                 "AND e.kind='request' ORDER BY e.seq LIMIT 1) FROM runs r WHERE r.idem_key=?", (key,)).fetchone()
-        return bool(row) and _is_stand_in(row[0], row[1])
+            if not row or not _is_stand_in(row[0], row[2], row[1]):
+                return False
+            self._db.execute("UPDATE runs SET title=? WHERE idem_key=?", (title, key))
+            name = job_name(title)
+            if name:
+                self._db.execute("UPDATE runs SET own_title=? WHERE idem_key=?", (title, key))
+                self._db.execute("UPDATE jobs SET name=?, updated=? WHERE from_key=?", (name, time.time(), key))
+        return True
 
     # -- live view ("what it's looking at") -------------------------------------------------
     def set_live_image(self, key: str, kind: str, ref: str, name: str, source: str) -> bool:
