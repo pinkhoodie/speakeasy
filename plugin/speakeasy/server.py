@@ -19,6 +19,7 @@ from . import __version__
 from . import attachments as A
 from .service import VoiceService
 from .calls import ServiceError, Interaction, publish_state
+from .text import MAX_ROOM_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,10 @@ UPLOAD_RECV_S = 15     # an upload never stalls longer than this between chunks
 # arriving, so the app gets the reply instead of a reset connection; for at most DRAIN_MAX_S.
 DRAIN_RECV_S = 1.0     # a drain stops once nothing arrives for this long
 DRAIN_MAX_S = 10.0
+# POST /voice/sessions can also carry listening mode's room text: up to MAX_ROOM_CHARS code points,
+# each at worst 12 bytes of JSON (a character outside the BMP written as two \uXXXX escapes), on top
+# of the usual body (whose 128 KiB already fits the largest SDP offer, MAX_SDP, with its escaping).
+MAX_SESSION_BODY = MAX_BODY + MAX_ROOM_CHARS * 12
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 _ID = r"([A-Za-z0-9_-]+)"
 
@@ -65,12 +70,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _body(self) -> dict[str, Any]:
+    def _body(self, limit: int = MAX_BODY) -> dict[str, Any]:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             raise ServiceError(400, "invalid content length") from None
-        if length <= 0 or length > MAX_BODY:
+        if length <= 0 or length > limit:
             raise ServiceError(413, "request body size rejected")
         try:
             body = json.loads(self.rfile.read(length))
@@ -287,7 +292,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             device_id = self._auth()
             if path == "/voice/sessions":
-                self._reply(201, self.service.create_session(self._body(), self.headers.get("Idempotency-Key", ""),
+                self._reply(201, self.service.create_session(self._body(MAX_SESSION_BODY),
+                                                            self.headers.get("Idempotency-Key", ""),
                                                             device_id))
                 return
             if path == "/voice/tasks/dismiss":
@@ -314,6 +320,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/voice/routing":
                 self._reply(200, self.service.choose_routing(self._body()))
                 return
+            aside = re.fullmatch(rf"/voice/tasks/{_ID}/set-aside", path)
+            if aside:
+                self._reply(200, self.service.set_aside(aside.group(1), self._body()))
+                return
             review = re.fullmatch(rf"/voice/reviews/{_ID}/dismiss", path)
             if review:
                 self._reply(200, self.service.dismiss_review(review.group(1), self._body()))
@@ -326,7 +336,7 @@ class Handler(BaseHTTPRequestHandler):
             if capture:
                 self._reply(200, self.service.capture_status(capture.group(1), capture.group(2), self._body()))
                 return
-            action = re.fullmatch(rf"/voice/interactions/{_ID}/(end|pause|approval|cancel-backend|skip-tour|early-request|mic-check|answer|screen)", path)
+            action = re.fullmatch(rf"/voice/interactions/{_ID}/(end|pause|approval|cancel-backend|skip-tour|early-request|mic-check|answer|screen|focus)", path)
             if not action:
                 raise ServiceError(404, "not found")
             interaction_id, verb = action.groups()
@@ -338,6 +348,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._reply(200, self.service.early_request(interaction_id, self._body()))
             elif verb == "answer":
                 self._reply(200, self.service.answer(interaction_id, self._body()))
+            elif verb == "focus":
+                self._reply(200, self.service.focus(interaction_id, self._body()))
             elif verb == "mic-check":
                 self._reply(200, self.service.mic_check(interaction_id, self._body()))
             elif verb == "pause":

@@ -497,6 +497,130 @@ def test_continuing_a_chat_posts_there_and_never_writes_hermes_config(server, se
     assert (config.stat().st_mtime_ns if config.exists() else None) == mtime
 
 
+def test_a_chat_that_refuses_outside_turns_still_gets_the_answer(server, service, hermes, monkeypatch, tmp_path):
+    """Newer Hermes refuses API turns into a Discord session (permission_denied). The request then
+    runs as its own task carrying the chat's recent messages, and the answer still posts there."""
+    conv = continuity.Conversation("s_league", "discord", "777", "thread", "777", "42", "111",
+                                   "Server / #work / League", "League team", time.time())
+    monkeypatch.setattr(continuity, "conversations_with_context", lambda db, request, **kw: [continuity.Candidate(conv, ())])
+    monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
+    monkeypatch.setattr(continuity, "recent_exchange", lambda db, sid, **k: "User: who do I start at flex?")
+    from speakeasy import router
+    monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S:
+                        '{"follow_up_task_id": null, "conversation": "c1", "parts": ["x"], "channel": null}')
+
+    def refusing_stream(base, key, c, message, callback, **k):
+        callback("run.started", {"run_id": "run_refused"})
+        callback("run.failed", {"error": "permission_denied"})
+        return True
+    monkeypatch.setattr(continuity, "stream_session_chat", refusing_stream)
+    prompts = []
+    hermes.responder = lambda prompt, sid: prompts.append(prompt) or "Start the receiver.\nSPOKEN: Start the receiver."
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [
+        {"target": "discord:111", "label": "#work", "topic": "work"}]}})
+    posted = []
+    monkeypatch.setattr(service.rt.notices, "post",
+                        lambda key, text, limit=600, target=None: posted.append((key, target, text)) or True)
+    _, worker = start_call(server, service)
+    worker.delegate("call_r", "In the league team thread, am I going to win this week?")
+    wait_for(lambda: [p for p in posted if p[0].startswith("answer:")])
+    answer = [p for p in posted if p[0].startswith("answer:")]
+    assert answer and answer[0][1] == "discord:777" and "Start the receiver." in answer[0][2]
+    assert prompts and "who do I start at flex?" in prompts[0] and "am I going to win this week?" in prompts[0]
+    assert not any("go through" in c.lower() or "failed" in c.lower() for _, _, c in worker.sent)
+
+
+def test_a_refused_chat_thread_gets_the_request_typed_into_it(server, service, hermes, monkeypatch):
+    """With Hermes' webhook platform on, the refused request is said in the thread itself (full
+    history, Hermes replies there); the call hears the reply and Speakeasy doesn't post it twice."""
+    conv = continuity.Conversation("s_league", "discord", "777", "thread", "777", "42", "111",
+                                   "Server / #work / League", "League team", time.time())
+    monkeypatch.setattr(continuity, "conversations_with_context", lambda db, request, **kw: [continuity.Candidate(conv, ())])
+    monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
+    from speakeasy import router, threads
+    monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S:
+                        '{"follow_up_task_id": null, "conversation": "c1", "parts": ["x"], "channel": null}')
+
+    def refusing_stream(base, key, c, message, callback, **k):
+        callback("run.started", {"run_id": "run_refused"})
+        callback("run.failed", {"error": "permission_denied"})
+        return True
+    monkeypatch.setattr(continuity, "stream_session_chat", refusing_stream)
+    monkeypatch.setattr(threads, "last_message_id", lambda db: 41)
+    said = []
+
+    class Runner:
+        def available(self, target): return True
+        def post(self, platform, thread_id, *, message, delivery_id):
+            said.append((platform, thread_id, message)); return True
+        def wait_turn(self, platform, thread_id, after_id, on_activity=None):
+            assert after_id == 41
+            return "You're projected to win by 12.\nSPOKEN: Projected to win by 12."
+    service.rt.threads = Runner()
+    hermes.responder = lambda prompt, sid: (_ for _ in ()).throw(AssertionError("no separate run"))
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [
+        {"target": "discord:111", "label": "#work", "topic": "work"}]}})
+    posted = []
+    monkeypatch.setattr(service.rt.notices, "post",
+                        lambda key, text, limit=600, target=None: posted.append((key, target, text)) or True)
+    _, worker = start_call(server, service)
+    worker.delegate("call_t", "In the league team thread, am I going to win this week?")
+    wait_for(lambda: any("Projected to win by 12" in c for _, _, c in worker.sent))
+    assert said and said[0][:2] == ("discord", "777") and "am I going to win this week?" in said[0][2]
+    assert not [p for p in posted if p[0].startswith("answer:")]
+    rows = service.store._db.execute("SELECT status, run_id FROM runs").fetchall()
+    assert ("completed" in [r[0] for r in rows]) and not any(r[1] == "run_refused" for r in rows)
+
+
+def test_a_refusal_seen_only_on_the_run_still_falls_back(server, service, hermes, monkeypatch):
+    """What real Hermes does: the chat stream ends after run.started with no run.failed; the run's
+    own status says failed / permission_denied. The request must still go into the thread."""
+    conv = continuity.Conversation("s_music", "discord", "888", "thread", "888", "42", "111",
+                                   "Server / #home / Music", "Music", time.time())
+    monkeypatch.setattr(continuity, "conversations_with_context", lambda db, request, **kw: [continuity.Candidate(conv, ())])
+    monkeypatch.setattr(continuity, "session_busy", lambda db, sid, **k: False)
+    from speakeasy import router, threads
+    monkeypatch.setattr(router, "aux_call", lambda messages, timeout=router.ROUTE_TIMEOUT_S:
+                        '{"follow_up_task_id": null, "conversation": "c1", "parts": ["x"], "channel": null}')
+
+    def silent_stream(base, key, c, message, callback, **k):
+        callback("run.started", {"run_id": "run_silent"})
+        return True
+    monkeypatch.setattr(continuity, "stream_session_chat", silent_stream)
+    monkeypatch.setattr(threads, "last_message_id", lambda db: 7)
+    said = []
+
+    class Runner:
+        def available(self, target): return True
+        def post(self, platform, thread_id, *, message, delivery_id):
+            said.append(thread_id); return True
+        def wait_turn(self, platform, thread_id, after_id, on_activity=None):
+            return "Turned it down a notch.\nSPOKEN: Turned it down a notch."
+    service.rt.threads = Runner()
+    service.settings.patch({"delivery": {"target": "telegram:555", "channels": [
+        {"target": "discord:111", "label": "#home", "topic": "home"}]}})
+    _, worker = start_call(server, service)
+    from speakeasy import hermes_api
+    monkeypatch.setattr(hermes_api.HermesAPI, "get_run",
+                        lambda self, run_id: {"status": "failed", "error": "permission_denied"})
+    worker.delegate("call_s", "In the music thread, turn it down just a little bit")
+    wait_for(lambda: any("down a notch" in c for _, _, c in worker.sent))
+    assert said == ["888"]
+
+
+def test_recent_exchange_reads_both_sides_in_order(tmp_path):
+    import sqlite3
+    db = tmp_path / "state.db"
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT)")
+    c.executemany("INSERT INTO messages (session_id, role, content) VALUES (?,?,?)", [
+        ("s", "user", "Make the options dismissable"), ("s", "tool", "{}"),
+        ("s", "assistant", "Sure, adding a close button."), ("x", "user", "other chat")])
+    c.commit(); c.close()
+    assert continuity.recent_exchange(db, "s") == "User: Make the options dismissable\nAssistant: Sure, adding a close button."
+    assert continuity.refused("RuntimeStoreError: permission_denied") and not continuity.refused(None)
+
+
 def test_conversation_targets_match_hermes_send():
     t = time.time()
     thread = continuity.Conversation("s", "discord", "777", "thread", "777", "", "111", "", "", t)
@@ -774,7 +898,7 @@ def test_thread_email_draft_becomes_an_approvable_card(server, service, hermes):
 def test_voice_rules_never_claim_a_draft_before_it_exists():
     text = P.rules_text(P.Names.from_settings(S.validate({})), "Telegram", [])
     email = text.split("# Email drafts", 1)[1]
-    assert "I drafted it" not in email and "never that it is drafted" in email
+    assert "I drafted it" not in email and "never say it is drafted" in email
 
 
 def test_new_task_shows_what_it_was_handed_instead_of_a_bare_wait(server, service, hermes):
@@ -787,6 +911,55 @@ def test_new_task_shows_what_it_was_handed_instead_of_a_bare_wait(server, servic
     task = wait_for(lambda: [t for t in tasks(server) if t.get("short_status") == "Drafting your Portugal trip email"])[0]
     assert task["title"] == "Draft Portugal trip email"
     assert task["detail"] == "Handed to Hermes: Write me a note summarizing the Portugal plans."
+
+
+def test_a_handed_off_task_gets_a_plan_for_its_progress_line(server, service, hermes):
+    service.rt.title_call = lambda request: "Plan Portugal trip"
+    service.rt.plan_call = lambda request: ["Compare flights", "Draft itinerary", "Your review"]
+    hermes.hold = True
+    _, worker = start_call(server, service)
+    worker.delegate("call_p", "plan me a long weekend in Portugal")
+    task = wait_for(lambda: [t for t in tasks(server) if t.get("plan")])[0]
+    assert task["plan"] == ["Compare flights", "Draft itinerary", "Your review"]
+
+
+def test_plan_output_is_validated():
+    from speakeasy import router
+    assert router.clean_plan('{"steps": ["compare flights", "Draft itinerary.", "Your review"]}') == [
+        "Compare flights", "Draft itinerary", "Your review"]
+    assert router.clean_plan('{"steps": ["Only one", "two"]}') is None   # too few to be a plan
+    assert router.clean_plan('{"steps": ["Search", "a step that rambles on for far too many words here", "Done", "Review"]}') == [
+        "Search", "Done", "Review"]
+    assert router.clean_plan("no json") is None
+
+
+def test_shape_output_is_validated():
+    from speakeasy import router
+    raw = json.dumps({"type": "build", "headline": "Dice app is live and tested",
+                      "checks": [{"label": "Roll parser", "value": "passed", "good": True}, {"label": "", "value": "x"}],
+                      "shipped": ["Dice app is live", ""], "open": ["Public link needs your go-ahead"],
+                      "sections": [{"title": "Dice", "points": ["Tap a die to build a roll"]}, {"points": ["no title"]}],
+                      "undo": False})
+    shape = router.clean_shape("here you go " + raw)
+    assert shape["type"] == "build" and shape["checks"] == [{"label": "Roll parser", "value": "passed", "good": True}]
+    assert shape["shipped"] == ["Dice app is live"] and [s["title"] for s in shape["sections"]] == ["Dice"]
+    assert router.clean_shape(json.dumps({"type": "poem", "open": ["x"]})) is None          # unknown type
+    assert router.clean_shape(json.dumps({"type": "answer", "headline": "Nothing else"})) is None   # no body
+    assert router.clean_shape('{"type": "build", "open": ["cut off') is None
+
+
+def test_a_long_finished_report_gets_its_shape(server, service, hermes):
+    seen = []
+    service.rt.shape_call = lambda request, report: seen.append(report) or {
+        "type": "build", "headline": "Fixed and deployed", "checks": [], "shipped": ["Fix is live"],
+        "open": ["Reindex one book"], "sections": [], "undo": True}
+    hermes.responder = lambda prompt, sid: ("Fixed it and deployed. " + "Details of the fix and the checks I ran. " * 20
+                                            + "\nDONE: Fixed\nSPOKEN: Fixed and deployed.")
+    _, worker = start_call(server, service)
+    worker.delegate("call_shape", "fix the library bug and deploy it")
+    task = wait_for(lambda: [t for t in tasks(server) if ((t.get("result") or {}).get("shape") or {}).get("type")])[0]
+    assert task["result"]["shape"]["open"] == ["Reindex one book"]
+    assert seen and seen[0].startswith("Fixed it and deployed.")
 
 
 def test_handoff_status_never_overrides_real_progress(service):

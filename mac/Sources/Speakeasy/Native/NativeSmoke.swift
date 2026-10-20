@@ -102,9 +102,10 @@ enum PreviewFixtures {
         return rep.representation(using: .png, properties: [:])
     }
 
-    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "looking", "email-draft", "ended", "home", "failed"]
+    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "looking", "email-draft", "ended", "home", "failed", "busy"] + jobNames
 
     static func state(_ name: String) -> (VoiceState, workExpanded: Bool)? {
+        if let job = jobState(name) { return job }
         let now = Date()
         var s = VoiceState()
         s.now = now
@@ -191,6 +192,33 @@ enum PreviewFixtures {
             s.workInfo = s.tasks[2].info
             s.exchange = Exchange(you: "Salty, around sixty bucks.", assistant: "Got it — looking into that now.", replyStarted: true)
             if name == "paused" { s.connection = .paused; s.resumeFrom = "vi_preview" }
+        case "busy":
+            // A long call: several finished tasks, then one that asks a question and lists what's
+            // open. The question must stay in view; finished tasks fold away.
+            func done(_ id: String, _ title: String, _ label: String?, age: TimeInterval, views: [ViewCard] = []) -> TaskItem {
+                TaskItem(id: id, info: WorkInfo(runID: "run_\(id)", status: "completed", updated: now - age, shortStatus: "Done",
+                                                updatedAt: now - age, statusSource: "authored",
+                                                events: [WorkEventItem(kind: "request", text: title, at: now - age - 30)],
+                                                result: WorkResult(spoken: "Done.", full: nil, label: label, views: views),
+                                                title: title))
+            }
+            let question = ViewCard(kind: "question", number: 1, data: [
+                "question": "Want me to update the laptop app and fix the retry setting now?",
+                "options": ["Do both", "Just the app update", "Not now"], "recommended": 0])
+            let open = ViewCard(kind: "list", number: 2, data: ["title": "Worth picking up", "items": [
+                ["text": "Restart the desktop", "done": false], ["text": "First real test recording", "done": false],
+                ["text": "Update the app on the laptop", "done": false], ["text": "Retry setting: 3 errors / 30s", "done": false],
+                ["text": "Hermes update", "done": true]]])
+            s.tasks = [
+                done("b0", "Hermes update changelog", nil, age: 300),
+                done("b1", "How do you know", nil, age: 240),
+                done("b2", "Review recent work and projects", "Recent work reviewed", age: 120),
+                done("b3", "Context on what to pick up", "Open loops reviewed", age: 20, views: [question, open]),
+            ]
+            s.runID = "run_b3"
+            s.workInfo = s.tasks[3].info
+            s.exchange = Exchange(you: "Okay, that seems reasonable.", assistant: "The tested release, not every commit in between.",
+                                  replyStarted: true)
         case "home":
             // Instant home control: the lights and heat are done before the reply ends, while a
             // bigger task keeps running next to it.

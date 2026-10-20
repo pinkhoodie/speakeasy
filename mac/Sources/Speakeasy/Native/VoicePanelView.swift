@@ -7,10 +7,8 @@ import UniformTypeIdentifiers
 // MARK: - Tokens
 
 enum Tokens {
-    static let width: CGFloat = 400
-    /// Narrowest panel: the header's controls (with the screen half beside the mic) still leave the
-    /// status line room for "Screen Recording is off · Set up" in two lines (PanelSmoke checks it).
-    static let minWidth: CGFloat = 390
+    static let width: CGFloat = 360
+    static let minWidth: CGFloat = 320
     static let maxWidth: CGFloat = 760
     static let maxExtraHeight: CGFloat = 700
     static let radius: CGFloat = 18
@@ -18,8 +16,6 @@ enum Tokens {
     /// Brand palette (matches speakeasyvoice.ai): brass on warm near-black.
     static let brass = Color(red: 0.831, green: 0.635, blue: 0.298)      // #d4a24c
     static let brassLight = Color(red: 0.941, green: 0.784, blue: 0.447) // #f0c872
-    static let brassGlow = Color(red: 1.0, green: 0.89, blue: 0.64)      // #ffe3a3
-    static let brassDeep = Color(red: 0.42, green: 0.29, blue: 0.094)    // #6b4a18
     static let brassInk = Color(red: 0.09, green: 0.067, blue: 0.039)    // #17110a
     static let panelDark = Color(red: 0.086, green: 0.075, blue: 0.059)  // #16130f
     static let amber = Color(red: 0.97, green: 0.745, blue: 0.44)
@@ -40,60 +36,6 @@ struct VisualEffectBackground: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: NSVisualEffectView, context: Context) { view.material = material }
-}
-
-// MARK: - the assistant mark
-
-struct AssistantMark: View {
-    var mark: PillPresentation.Mark
-    /// 0...1: the assistant's voice while it speaks, the user's mic while listening.
-    var level: Double = 0
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        let dim = mark == .muted || mark == .idle
-        let reacting = !reduceMotion && (mark == .speaking || mark == .listening)
-        let lift = reacting ? CGFloat(min(max(level, 0), 1)) : 0
-        ZStack {
-            // Glow grows with the voice.
-            Circle()
-                .fill(Tokens.brassLight.opacity(dim ? 0 : 0.28 + 0.4 * lift))
-                .frame(width: 34, height: 34)
-                .blur(radius: 7 + 7 * lift)
-                .scaleEffect(1 + 0.3 * lift)
-            Group {
-                if mark == .connecting && !reduceMotion {
-                    TimelineView(.animation(minimumInterval: 1 / 30)) { context in
-                        let t = context.date.timeIntervalSinceReferenceDate
-                        orb.scaleEffect(0.92 + 0.06 * CGFloat((sin(t * 3.2) + 1) / 2))
-                    }
-                } else {
-                    orb.scaleEffect(1 + 0.16 * lift)
-                }
-            }
-            .saturation(dim ? 0.2 : 1)
-            .opacity(dim ? 0.6 : 1)
-            if mark == .muted {
-                Image(systemName: "mic.slash.fill")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Tokens.amberInk)
-                    .padding(3)
-                    .background(Circle().fill(Tokens.amber))
-                    .offset(x: 13, y: 13)
-            }
-        }
-        .frame(width: 36, height: 36)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: lift)
-        .accessibilityHidden(true)
-    }
-
-    private var orb: some View {
-        Circle()
-            .fill(RadialGradient(colors: [Tokens.brassGlow, Tokens.brass, Tokens.brassDeep],
-                                 center: UnitPoint(x: 0.35, y: 0.35), startRadius: 1, endRadius: 22))
-            .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
-            .frame(width: 32, height: 32)
-    }
 }
 
 // MARK: - Shimmer status text
@@ -435,6 +377,105 @@ struct StartButton: View {
     }
 }
 
+/// Turns listening mode on (idle header only; once on, the strip below has the controls).
+struct ListenButton: View {
+    var blocked: String?
+    var shortcutHint: String
+    var action: () -> Void
+    @State private var hover = false
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "ear").font(.system(size: 12, weight: .semibold))
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(Color.primary.opacity(hover && blocked == nil ? 0.14 : 0.08)))
+                .contentShape(Circle())
+                .opacity(blocked == nil ? 1 : 0.45)
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(blocked ?? (["Listening mode: pause the call and hear the room without answering. Turn it off to ask about it.",
+                           shortcutHint].filter { !$0.isEmpty }.joined(separator: "\n")))
+        .accessibilityLabel("Turn on listening mode")
+        .accessibilityHint(blocked ?? "Pauses the call and transcribes the room on this Mac without answering")
+    }
+}
+
+/// Listening mode's strip under the header: what it's doing, and the two ways out.
+struct RoomStrip: View {
+    var room: RoomPresentation?
+    var notice: String?
+    /// What it heard can be asked about (on, or kept after listening stopped by itself).
+    var canAsk = false
+    var onAsk: () -> Void
+    var onDiscard: () -> Void
+    var onDismissNotice: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var color: Color {
+        switch room?.tone ?? .plain {
+        case .error: return Tokens.red
+        case .warning, .attention: return .orange
+        default: return Tokens.brass
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let room {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: room.isOn ? "ear.fill" : "ear.trianglebadge.exclamationmark")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(color)
+                        .symbolEffect(.pulse, options: .repeating, isActive: room.isOn && room.tone == .plain && !reduceMotion)
+                        .frame(width: 18)
+                        .accessibilityHidden(true)   // the title next to it says the same
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(room.title).font(.system(size: 12, weight: .semibold))
+                        if !room.detail.isEmpty {
+                            Text(room.detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if let hint = room.hint {
+                            Text(hint).font(.system(size: 11)).foregroundStyle(.tertiary)
+                        }
+                        ForEach(room.warnings, id: \.self) { warning in
+                            Label(warning, systemImage: "exclamationmark.triangle")
+                                .font(.system(size: 10.5)).foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityElement(children: .combine)
+                }
+                if room.isOn || canAsk {
+                    HStack(spacing: 6) {
+                        Spacer(minLength: 0)
+                        PillButton(title: "Discard", destructive: true, action: onDiscard)
+                            .help("Stop listening and forget what it heard. No call starts.")
+                        PillButton(title: room.isOn ? "Turn off and ask" : "Ask about it", prominent: true, action: onAsk)
+                            .help("Start a call that knows what was said.")
+                    }
+                }
+            }
+            if let notice {
+                HStack(spacing: 6) {
+                    Text(notice).font(.system(size: 11)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button { onDismissNotice() } label: {
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).padding(4)
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Dismiss")
+                    .accessibilityLabel("Dismiss note")
+                }
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.10)))
+        .accessibilityAddTraits(.updatesFrequently)
+    }
+}
+
 struct IconButton: View {
     var symbol: String
     var help: String
@@ -483,9 +524,31 @@ struct VoicePanelView: View {
 
     var body: some View {
         let p = model.presentation
+        if model.showsSlim { orbPanel } else { fullPanel(p) }
+    }
+
+    /// Folded into the orb: the orb and the call buttons, nothing else.
+    private var orbPanel: some View {
+        OrbBar(model: model)
+            .onHover { model.hovering = $0 }
+            .fixedSize(horizontal: false, vertical: true)
+            .background(
+                ZStack {
+                    VisualEffectBackground(material: scheme == .dark ? .hudWindow : .popover)
+                    (scheme == .dark ? Tokens.panelDark : Color.white).opacity(scheme == .dark ? 0.78 : 0.35)
+                }
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Tokens.radius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Tokens.radius, style: .continuous)
+                .strokeBorder(Color.primary.opacity(scheme == .dark ? 0.16 : 0.12), lineWidth: 0.5))
+    }
+
+    private func fullPanel(_ p: PillPresentation) -> some View {
+        let board = model.showsBoard
+        let job = model.workExpanded ? model.selectedJob : nil
         let pending = model.pendingAttachments
         let holding = model.hold?.isWaiting == true
-        VStack(alignment: .leading, spacing: 0) {
+        return VStack(alignment: .leading, spacing: 0) {
             if !model.state.workOnly { header(p) }
             // Pictures and files waiting for the next request: under the header in every layout.
             if !model.state.workOnly && !pending.isEmpty {
@@ -495,6 +558,14 @@ struct VoicePanelView: View {
             }
             if model.tourActive && model.state.connection.isOpen && !model.state.workOnly {
                 TourStrip(action: model.onSkipTour)
+            }
+            // Beside the call, never in it: shown with no call open, or while the call is paused
+            // (listening mode turned on mid-conversation pauses it).
+            if !model.state.connection.isInCall && !model.state.workOnly && (model.room != nil || model.roomNotice != nil) {
+                RoomStrip(room: model.room, notice: model.roomNotice, canAsk: model.roomCanAsk, onAsk: model.onAskRoom,
+                          onDiscard: model.onDiscardRoom, onDismissNotice: model.onDismissRoomNotice)
+                    .padding(.horizontal, 12).padding(.bottom, 10)
+                    .transition(.opacity)
             }
             if model.showsSlim {
                 // Slim: header only. A task summary stands in for the list; clicking it
@@ -519,6 +590,9 @@ struct VoicePanelView: View {
                     .accessibilityLabel("\(summary). Show the full panel")
                     .padding(.horizontal, 8).padding(.bottom, 6)
                 }
+            } else if let job {
+                if !model.state.workOnly { Divider().opacity(0.5).padding(.horizontal, 14) }
+                JobDetailView(job: job, model: model)
             } else if model.workExpanded || model.state.workOnly {
                 if !model.state.workOnly { Divider().opacity(0.5).padding(.horizontal, 14) }
                 WorkDetailView(model: model)
@@ -539,13 +613,23 @@ struct VoicePanelView: View {
                         .padding(.horizontal, 12).padding(.bottom, model.showsTaskList ? 6 : 10)
                         .transition(.opacity)
                 }
-                if model.showsTaskList {
-                    TaskListView(model: model, compact: true)
+                if board {
+                    JobBoardView(model: model)
+                        .padding(.leading, 12).padding(.trailing, 6).padding(.bottom, 10)
+                        .transition(.opacity)
+                } else if model.showsTaskList {
+                    // Something below needs you (a question, an approval, a draft, a review):
+                    // finished tasks shrink to one row so it stays in view.
+                    let crowded = model.state.approval != nil || model.pinnedViews != nil
+                        || !model.pinnedDrafts.isEmpty || !model.pinnedReviews.isEmpty
+                    TaskListView(model: model, compact: true, maxSettled: crowded ? 1 : 2)
                         .padding(.horizontal, 12).padding(.bottom, 10)
                         .transition(.opacity)
                 }
                 let reviewing = Set(model.pinnedReviews.map(\.taskID))
-                if let task = model.state.tasks.last(where: { !reviewing.contains($0.id) &&
+                // Not when the same task's cards are already pinned below: the bar would repeat them.
+                let pinnedTask = model.pinnedViews?.taskID
+                if !board, let task = model.state.tasks.last(where: { !reviewing.contains($0.id) && $0.id != pinnedTask &&
                     (!$0.info.products.isEmpty || !$0.info.cards.isEmpty || !$0.info.images.isEmpty || !$0.info.views.isEmpty) }) {
                     Button {
                         model.onSelectTask(task.id)
@@ -568,11 +652,15 @@ struct VoicePanelView: View {
                     .padding(.horizontal, 14).padding(.bottom, 8)
                 }
             }
-            if let approval = model.state.approval, !(model.workExpanded || model.state.workOnly) {
+            if let approval = model.state.approval, !(model.workExpanded || model.state.workOnly),
+               !(board && model.jobs.contains { j in j.tasks.contains { $0.info.runID == approval.runID } }) {
                 ApprovalRow(approval: approval, busy: model.busy, onChoice: model.onApproval)
                     .padding(.horizontal, 12).padding(.bottom, 12)
             }
-            if !(model.workExpanded || model.state.workOnly), let pinned = model.pinnedViews {
+            // Nothing pins under the board: every card opens from its job's tile (see `showsBoard`,
+            // which is on whenever a card, draft or review exists). These only draw without a board.
+            let loose = Self.looseCards(model)
+            if let pinned = loose.views {
                 VStack(spacing: 8) {
                     ForEach(pinned.views.prefix(2)) { card in ViewCardView(card) }
                         .environment(\.questionActions, model.questionActions(for: pinned.taskID))
@@ -586,19 +674,15 @@ struct VoicePanelView: View {
                 .padding(.horizontal, 12).padding(.bottom, 12)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            if !(model.workExpanded || model.state.workOnly) {
-                ForEach(model.pinnedDrafts) { draft in
-                    EmailDraftCard(draft: draft, model: model)
-                        .padding(.horizontal, 12).padding(.bottom, 12)
-                }
-                // Finished images pop up for review without opening the task; they stay until dismissed.
-                let reviews = model.pinnedReviews
-                let open = ImageReviewLayout.focused(reviews, picked: model.focusedReviewID)
-                ForEach(reviews) { review in
-                    ImageReviewCard(review: review, shownCount: reviews.count + model.pinnedDrafts.count,
-                                    compact: review.runID != open, model: model)
-                        .padding(.horizontal, 12).padding(.bottom, review.runID == reviews.last?.runID ? 12 : 6)
-                }
+            ForEach(loose.drafts) { draft in
+                EmailDraftCard(draft: draft, model: model)
+                    .padding(.horizontal, 12).padding(.bottom, 12)
+            }
+            let open = ImageReviewLayout.focused(loose.reviews, picked: model.focusedReviewID)
+            ForEach(loose.reviews) { review in
+                ImageReviewCard(review: review, shownCount: loose.reviews.count + loose.drafts.count,
+                                compact: review.runID != open, model: model)
+                    .padding(.horizontal, 12).padding(.bottom, review.runID == loose.reviews.last?.runID ? 12 : 6)
             }
         }
         .frame(width: model.panelWidth, alignment: .top)
@@ -629,15 +713,38 @@ struct VoicePanelView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: pending.map(\.id))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.holdText)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: model.dropTargeted)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: model.room?.isOn)
+    }
+
+    /// Cards drawn loose in the panel, outside any job view. With a board (on whenever a card,
+    /// draft or review exists) there are none: each card opens from its job's tile.
+    struct LooseCards {
+        var views: (taskID: String, views: [ViewCard])?
+        var drafts: [EmailDraft] = []
+        var reviews: [ImageReview] = []
+        var count: Int { (views?.views.count ?? 0) + drafts.count + reviews.count }
+    }
+    static func looseCards(_ model: VoicePanelModel) -> LooseCards {
+        guard !(model.workExpanded || model.state.workOnly || model.showsSlim || model.showsBoard) else { return LooseCards() }
+        return LooseCards(views: model.pinnedViews, drafts: model.pinnedDrafts, reviews: model.pinnedReviews)
     }
 
     private func header(_ p: PillPresentation) -> some View {
         // "Screen Recording is off · Set up" on the status line: tapping it opens Settings › General › Screen.
-        let setUp = model.shareNotice.map { $0.action == .openScreenSettings && $0.text == model.shownStatus } ?? false
+        let setUp = model.shareNotice.map { $0.action == .openScreenSettings && $0.text == model.headerStatus } ?? false
         let statusTaps = setUp || p.statusClickable || model.showsSlim
         return HStack(spacing: 8) {
-            AssistantMark(mark: p.mark, level: model.orbLevel)
-                .padding(.trailing, 2)
+            // The orb: clicking it folds the panel into it (the call keeps running).
+            Button(action: { if model.state.connection.isOpen && !model.state.workOnly { model.onToggleSlim() } }) {
+                // The same orb as the folded panel: one colour language for the whole call.
+                JobOrb(state: model.orbState, size: 28, level: model.orbLevel, mark: p.mark, unreadAnswers: model.unreadAnswers,
+                       placement: "header")
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!(model.state.connection.isOpen && !model.state.workOnly))
+            .help(model.state.connection.isOpen ? "Fold into the orb (the call keeps running)" : "")
+            .padding(.trailing, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(p.primary).font(.system(size: 13.5, weight: .semibold)).lineLimit(1)
                     .minimumScaleFactor(0.85)
@@ -647,9 +754,21 @@ struct VoicePanelView: View {
                     if setUp { model.onOpenScreenSettings() }
                     else if p.statusClickable || model.showsSlim { model.onToggleWork() }
                 }) {
-                    StatusText(text: model.shownStatus, tone: model.shownTone, clickable: statusTaps,
-                               maxLines: 2)
-                        .id(model.shownStatus)
+                    Group {
+                        if model.orbAnswerDot && model.orbState != .working, model.orbReason != nil {
+                            // New answers read in the orb dot's calm blue.
+                            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                                Text(model.headerStatus).font(.system(size: 11.5, weight: .medium)).foregroundStyle(JobOrb.answerBlue).lineLimit(1)
+                                if p.statusClickable || model.showsSlim {
+                                    Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(.secondary)
+                                }
+                            }
+                        } else {
+                            StatusText(text: model.headerStatus, tone: model.headerTone, clickable: statusTaps,
+                                       maxLines: 2)
+                        }
+                    }
+                        .id(model.headerStatus)
                         .transition(.opacity)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
@@ -657,14 +776,20 @@ struct VoicePanelView: View {
                 .buttonStyle(.plain)
                 .disabled(!statusTaps)
                 .help(setUp ? "Open Settings to allow Screen Recording"
-                      : (p.statusClickable || model.showsSlim ? "\(model.shownStatus)\nShow tasks" : model.shownStatus))
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: model.shownStatus)
-                .accessibilityLabel(model.shownStatus)
+                      : (p.statusClickable || model.showsSlim ? "\(model.headerStatus)\nShow tasks" : model.headerStatus))
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: model.headerStatus)
+                .accessibilityLabel(model.headerStatus)
                 .accessibilityHint(setUp ? "Opens Speakeasy Settings to allow Screen Recording" : "")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .layoutPriority(1)
             // Quiet (silence the current reply) is intentionally not exposed in Speakeasy.
+            // Listening mode mid-conversation: pauses the call and listens; turning it off resumes it.
+            if model.roomOffered && model.room?.isOn != true
+                && (model.state.connection == .live || model.state.connection == .paused) {
+                ListenButton(blocked: model.roomBlocked, shortcutHint: model.roomShortcutHint, action: model.onToggleRoom)
+                    .fixedSize()
+            }
             if let label = p.pauseLabel {
                 PauseButton(label: label, enabled: p.pauseEnabled, shortcutHint: model.pauseShortcutHint,
                             action: model.onTogglePause)
@@ -676,11 +801,12 @@ struct VoicePanelView: View {
             }
             if !model.state.workOnly && model.state.connection.isOpen {
                 IconButton(symbol: model.slim ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left",
-                           help: model.slim ? "Full panel" : "Slim — just the controls",
+                           help: model.slim ? "Open the panel" : "Fold into the orb (the call keeps running)",
                            action: model.onToggleSlim)
                     .fixedSize()
             }
             if !model.state.connection.isOpen {
+                // While listening mode holds what it heard, Start asks about it in a new call.
                 StartButton(action: model.onStart)
                     .fixedSize()
             } else {
@@ -877,11 +1003,23 @@ struct TaskListView: View {
     @ObservedObject var model: VoicePanelModel
     /// Main panel: the last few rows, one line each.
     var compact: Bool
+    /// Main panel: how many finished tasks to show. Running or waiting tasks always show (up to
+    /// `compactRows`); older finished ones fold into "+N earlier", which opens the full list.
+    var maxSettled: Int = 2
     static let compactRows = 4
+
+    /// Newest-last, like `tasks`: every unfinished task (newest `compactRows`), plus the newest
+    /// `maxSettled` finished ones, within `compactRows` rows in all.
+    static func compactShown(_ tasks: [TaskItem], maxSettled: Int) -> [TaskItem] {
+        let open = Set(tasks.filter { !$0.isSettled }.suffix(compactRows).map(\.id))
+        let room = max(0, min(maxSettled, compactRows - open.count))
+        let done = Set(tasks.filter(\.isSettled).suffix(room).map(\.id))
+        return tasks.filter { open.contains($0.id) || done.contains($0.id) }
+    }
 
     var body: some View {
         let tasks = model.state.tasks
-        let shown = compact ? Array(tasks.suffix(Self.compactRows)) : tasks
+        let shown = compact ? Self.compactShown(tasks, maxSettled: maxSettled) : tasks
         VStack(alignment: .leading, spacing: compact ? 2 : 4) {
             if compact {
                 HStack(spacing: 6) {
@@ -889,7 +1027,12 @@ struct TaskListView: View {
                         .foregroundStyle(.tertiary)
                     Spacer()
                     if tasks.count > shown.count {
-                        Text("+\(tasks.count - shown.count) earlier").font(.system(size: 10)).foregroundStyle(.tertiary)
+                        Button(action: { model.onSelectTask(nil) }) {
+                            Text("+\(tasks.count - shown.count) earlier").font(.system(size: 10)).foregroundStyle(.tertiary)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show every task")
                     }
                     ClearDoneButton(model: model)
                 }
@@ -948,8 +1091,17 @@ struct TaskRow: View {
 
     var body: some View {
         let (status, tone) = taskStatusLine(task.info, now: now, assistantName: assistantName)
+        // A task that finished fine is one quiet line in the main panel; failures keep their reason.
+        let oneLine = compact && task.isSettled && task.info.status == "completed"
         HStack(alignment: .center, spacing: 8) {
             icon
+            if oneLine {
+                Text(task.name).font(.system(size: 11.5, weight: .medium))
+                    .lineLimit(1).truncationMode(.tail)
+                    .foregroundStyle(.primary.opacity(0.75))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help(status)
+            } else {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(task.name).font(.system(size: 11.5, weight: .medium))
@@ -965,6 +1117,7 @@ struct TaskRow: View {
                     .help(status)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if task.isActive, let live = task.info.liveImage, let run = task.info.runID, let loadLive {
                 LiveImageView(runID: run, live: live, height: compact ? 26 : 34, load: loadLive)
             }
@@ -994,9 +1147,9 @@ struct TaskRow: View {
             }
             Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 8).padding(.vertical, compact ? 4 : 6)
+        .padding(.horizontal, 8).padding(.vertical, oneLine ? 2 : compact ? 4 : 6)
         .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
-            .fill(Color.primary.opacity(hover ? 0.09 : 0.05)))
+            .fill(Color.primary.opacity(hover ? 0.09 : oneLine ? 0.03 : 0.05)))
         .contentShape(Rectangle())
         .onTapGesture(perform: onOpen)
         .onHover { hover = $0 }

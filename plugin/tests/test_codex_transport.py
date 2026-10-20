@@ -27,7 +27,7 @@ FAKE_CODEX = textwrap.dedent('''\
         sys.stdout.write(json.dumps(obj) + "\\n"); sys.stdout.flush()
     for line in sys.stdin:
         msg = json.loads(line)
-        log.write(json.dumps({{"method": msg.get("method"), "env": sorted(os.environ)}}) + "\\n"); log.flush()
+        log.write(json.dumps({{"method": msg.get("method"), "params": msg.get("params"), "env": sorted(os.environ)}}) + "\\n"); log.flush()
         method, mid = msg.get("method"), msg.get("id")
         if mid is None:
             continue
@@ -88,6 +88,8 @@ def test_transport_start_returns_answer_sdp_and_seeds_history(fake_codex, tmp_pa
     log = [json.loads(line) for line in (tmp_path / "fake-codex-log.jsonl").read_text().splitlines()]
     assert [e["method"] for e in log][:4] == ["initialize", "initialized", "thread/start", "thread/realtime/start"]
     assert all("API_SERVER_KEY" not in e["env"] and "OPENAI_API_KEY" not in e["env"] for e in log)
+    start = next(e for e in log if e["method"] == "thread/realtime/start")
+    assert start["params"]["delegationAckFiller"] is False  # no "mm-hm" filler on handoffs
 
 
 def test_handoff_starts_hermes_task_and_result_is_appended(fake_codex, tmp_path, service, hermes):
@@ -117,6 +119,30 @@ def test_handoff_starts_hermes_task_and_result_is_appended(fake_codex, tmp_path,
     wait_for(lambda: any("You have two meetings today." in a for a in appended), 10)
     transport.stop()
     assert done.wait(10)
+    from speakeasy.prompt import builder as P
+    assert appended[0].startswith("That request has been handed off")  # the voice is cued to ack right away
+    assert "calendar" in appended[0]  # with the request, so the ack can fit the task
+    assert "\u201cOn it.\u201d)" not in appended[0]  # no stock example phrase to parrot
+    assert not any("Work has started" == a[:16] for a in appended)  # quiet notes never go alone
+
+
+def test_a_repeated_handoff_is_ignored(service):
+    from speakeasy.calls import Interaction
+    worker = C.CodexSidebandWorker.__new__(C.CodexSidebandWorker)
+    from speakeasy.calls import SidebandWorker
+    SidebandWorker.__init__(worker, service.rt, Interaction("vi_" + "e" * 32, "live_e"))
+    sent, dispatched = [], []
+
+    async def fake_append(kind, delegation_id, content):
+        sent.append(content)
+    worker.append = fake_append  # type: ignore[method-assign]
+    worker.schedule_dispatch = lambda *a: dispatched.append(a)  # type: ignore[method-assign]
+    item = {"type": "handoff_request", "input_transcript": "How's my fantasy team looking?"}
+    asyncio.run(worker._handoff({**item, "handoff_id": "h_1"}))
+    asyncio.run(worker._handoff({**item, "handoff_id": "h_2"}))
+    assert len(dispatched) == 1 and len(sent) == 1
+    asyncio.run(worker._handoff({**item, "handoff_id": "h_3", "input_transcript": "And the weather?"}))
+    assert len(dispatched) == 2
 
 
 def test_transcripts_never_start_work(fake_codex, service):

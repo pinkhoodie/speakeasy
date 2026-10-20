@@ -364,6 +364,12 @@ public struct ServerStatus: Codable, Equatable, Sendable {
     public var tailscaleName: String?
     /// Whether Hermes reads pictures, and the attachment limits (plugin 0.2.48 on); nil from older plugins.
     public var attachments: AttachmentSupport?
+    /// The server accepts what listening mode heard with a new call (`room` on POST /voice/sessions).
+    /// Missing on older plugins, which reject unknown session fields: never send `room` then.
+    public var roomListening: Bool?
+    /// The server takes `room` with `resume_from` too (listening mode during a call pauses it, then
+    /// resumes it with what was heard). Missing on plugins from before that.
+    public var roomOnResume: Bool?
 
     enum CodingKeys: String, CodingKey {
         case assistantName = "assistant_name", provider, codexSignedIn = "codex_signed_in"
@@ -374,6 +380,7 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         case routingExplainer = "routing_explainer"
         case advertisedURL = "advertised_url", tailscaleName = "tailscale_name"
         case attachments
+        case roomListening = "room_listening", roomOnResume = "room_on_resume"
     }
 
     public init(assistantName: String? = nil, provider: String? = nil, codexSignedIn: Bool? = nil, apiKeySet: Bool? = nil,
@@ -403,6 +410,8 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         advertisedURL = try? c.decodeIfPresent(String.self, forKey: .advertisedURL)
         tailscaleName = try? c.decodeIfPresent(String.self, forKey: .tailscaleName)
         attachments = try? c.decodeIfPresent(AttachmentSupport.self, forKey: .attachments)
+        roomListening = try? c.decodeIfPresent(Bool.self, forKey: .roomListening)
+        roomOnResume = try? c.decodeIfPresent(Bool.self, forKey: .roomOnResume)
     }
 
     /// The screen button, drops and pastes are offered: the plugin takes attachments and Hermes can

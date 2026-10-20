@@ -28,7 +28,7 @@ def test_dead_mic_repair_is_logged_with_its_reason(server, caplog):
 
 def test_mic_report_only_takes_a_short_note(server):
     session = open_call(server, "req_mic_bad")
-    assert report(server, session, {"note": "x" * 201})[0] == 400
+    assert report(server, session, {"note": "x" * 401})[0] == 400
     assert report(server, session, {"note": "ok", "audio": "..."})[0] == 400
 
 

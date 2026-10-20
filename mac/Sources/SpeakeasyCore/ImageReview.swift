@@ -25,6 +25,22 @@ public struct ImageReview: Equatable, Sendable, Identifiable {
 }
 
 extension WorkInfo {
+    /// A written report this long is the answer on its own; anything shorter is a caption for pictures.
+    public static let reportTextMinimum = 200
+
+    /// The task's waiting pictures are incidental to an answer, not something to review: it
+    /// completed with a report of its own — a sorted shape, result cards, or a written report
+    /// (`reportTextMinimum`+ characters). Then the job is an answer and the pictures fold under it.
+    /// Without that (no text, or a caption like "Three takes on the landing page") the pictures are
+    /// the deliverable and still need the user. Drafts and questions always need the user.
+    public var reviewIsIncidental: Bool {
+        guard status == "completed", !reviewImages.isEmpty, let result, decision == nil, pendingDrafts.isEmpty else { return false }
+        if result.shape != nil { return true }
+        if result.views.contains(where: { $0.kind != "question" }) { return true }
+        let text = (result.full ?? result.spoken ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.count >= Self.reportTextMinimum
+    }
+
     /// The review card for this task, if its finished images still wait for the user.
     public func review(taskID: String, taskName: String) -> ImageReview? {
         guard status == "completed", let runID, !reviewImages.isEmpty else { return nil }

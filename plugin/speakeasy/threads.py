@@ -358,6 +358,100 @@ def session_activity(state_db: Path, session_id: str, after_id: int = 0) -> list
     return out
 
 
+def last_message_id(state_db: Path) -> int:
+    """The newest message row id in Hermes' state.db (ids are global), so a turn written after it can be told apart."""
+    try:
+        db = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return 0
+    try:
+        row = db.execute("SELECT MAX(id) FROM messages").fetchone()
+    except sqlite3.Error:
+        row = None
+    finally:
+        db.close()
+    return int(row[0] or 0) if row else 0
+
+
+def turn_answer(state_db: Path, session_id: str, after_id: int) -> str | None:
+    """The finished reply of a turn written after ``after_id``: the session's newest message is a plain
+    assistant message newer than that, with a user message in between (not the previous turn's reply)."""
+    try:
+        db = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = db.execute("SELECT role, content, tool_calls FROM messages WHERE session_id=? AND id>? "
+                          "AND role IN ('user', 'assistant', 'tool') ORDER BY id", (session_id, int(after_id))).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        db.close()
+    if not rows or not any(r[0] == "user" for r in rows):
+        return None
+    role, content, calls = rows[-1]
+    if role != "assistant" or (calls and calls not in ("[]", "null")) or not (content or "").strip():
+        return None
+    return content
+
+
+def wait_for_turn(state_db: Path, platform: str, thread_id: str, after_id: int, timeout_s: float,
+                  poll_s: float = 3.0, sleep: Callable[[float], None] = time.sleep,
+                  on_activity: Callable[[str, str], None] | None = None) -> str | None:
+    """Poll until the turn a message started in an existing thread finishes; None on timeout (the
+    reply still lands in the thread, only the call doesn't hear it)."""
+    waited, seen, heard = 0.0, int(after_id), set()
+    while waited <= timeout_s:
+        session_id = thread_session(state_db, platform, thread_id)
+        if session_id:
+            if on_activity:
+                for row_id, kind, text in session_activity(state_db, session_id, seen):
+                    seen = max(seen, row_id)
+                    fingerprint = hashlib.sha256(f"{kind}\0{text}".encode()).hexdigest()
+                    if kind != "other" and fingerprint not in heard:
+                        heard.add(fingerprint)
+                        try:
+                            on_activity(kind, text)
+                        except Exception:
+                            logger.debug("speakeasy: thread activity callback failed", exc_info=True)
+            answer = turn_answer(state_db, session_id, after_id)
+            if answer is not None:
+                return answer
+        sleep(poll_s)
+        waited += poll_s
+    return None
+
+
+def recent_steps(state_db: Path, session_id: str, limit: int = 30) -> list[tuple[str, str]]:
+    """The session's latest work, oldest first: ("tool", tool name) for each tool it called and
+    ("said", text) for what it wrote along the way. Read-only; [] when anything is off."""
+    try:
+        db = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = db.execute("SELECT coalesce(content,''), coalesce(tool_calls,'') FROM messages WHERE session_id=? "
+                          "AND role='assistant' ORDER BY id DESC LIMIT ?", (session_id, int(limit))).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        db.close()
+    out: list[tuple[str, str]] = []
+    for content, calls in reversed(rows):
+        try:
+            parsed = json.loads(calls) if calls else []
+        except ValueError:
+            parsed = []
+        if content.strip() and parsed and not content.lstrip().startswith("Voice:"):
+            out.append(("said", " ".join(content.split())))  # written while it kept working, not a final reply
+        for call in parsed if isinstance(parsed, list) else []:
+            fn = call.get("function") if isinstance(call, dict) else None
+            name = (fn or {}).get("name") if isinstance(fn, dict) else (call or {}).get("name") if isinstance(call, dict) else None
+            if isinstance(name, str) and name:
+                out.append(("tool", name))
+    return out
+
+
 # -- following the thread's first answer ---------------------------------------------------------
 
 def thread_session(state_db: Path, platform: str, thread_id: str) -> str | None:
@@ -519,6 +613,11 @@ class ThreadRunner:
              on_activity: Callable[[str, str], None] | None = None) -> str | None:
         return wait_for_answer(self.home / "state.db", opened, self.answer_timeout_s,
                                on_session=on_session, on_title=on_title, on_activity=on_activity)
+
+    def wait_turn(self, platform: str, thread_id: str, after_id: int,
+                  on_activity: Callable[[str, str], None] | None = None) -> str | None:
+        return wait_for_turn(self.home / "state.db", platform, thread_id, after_id, self.answer_timeout_s,
+                             on_activity=on_activity)
 
     def post(self, platform: str, thread_id: str, *, message: str, delivery_id: str) -> bool:
         """Put a message into an existing thread as if typed there. True only once Hermes accepted it."""

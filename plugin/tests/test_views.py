@@ -51,3 +51,17 @@ def test_stock_card_from_feed():
 def test_views_in_results():
     rs = [{"title": "a", "text": "b", "view": {"kind": "fact", "title": "Height", "value": "828 m"}}, {"title": "c", "text": "d"}]
     assert quick.views_in(rs) == [{"kind": "fact", "title": "Height", "value": "828 m"}]
+
+
+def test_task_prompt_asks_informational_answers_for_a_card_and_headline():
+    from speakeasy.prompt import builder as P
+    rule = P.VIEWS_RULE
+    assert "Answers count too" in rule and "at least one fitting card" in rule
+    assert "never invent" in rule and "skip the block when nothing is worth showing" in rule
+    assert "DONE label the answer itself" in rule
+    assert len(rule) < 4200, "keep the views rule short"
+    prompt = P.build_task_prompt(P.Names("Hermes", "Sam"), 1, "User: what's the weather this weekend")
+    assert "Answers count too" in prompt
+    # The headline it asks for still passes the DONE label check.
+    from speakeasy.text import valid_done_label
+    assert valid_done_label("Saturday is the drier day") == "Saturday is the drier day"

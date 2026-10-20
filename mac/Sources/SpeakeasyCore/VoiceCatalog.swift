@@ -27,6 +27,21 @@ public enum VoiceCatalog {
         .init(id: "vale", summary: "Mid-high and expressive; unhurried.", hasPreview: true),
         .init(id: "juniper", summary: "High and the most animated; unhurried.", hasPreview: true),
         .init(id: "maple", summary: "Highest and quickest.", hasPreview: true),
+        // Added with GPT-Live 1.1 (Codex 0.163). Previews and pitch notes not recorded yet.
+        .init(id: "bubbie", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "aube", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "rivage", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "haetsal", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "hanul", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "himari", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "miko", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "rindo", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "sonna", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "leher", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "neer", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "rio", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "tinta", summary: "New with GPT-Live 1.1.", hasPreview: false),
+        .init(id: "viola", summary: "New with GPT-Live 1.1.", hasPreview: false),
     ]
 
     /// API-key voices. No previews are bundled for these yet.

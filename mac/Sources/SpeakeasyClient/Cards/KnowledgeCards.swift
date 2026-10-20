@@ -280,7 +280,7 @@ struct ListCard: View {
                 }
             } else {
                 ForEach(Array(card["items"].array.prefix(16).enumerated()), id: \.offset) { _, item in
-                    HStack(alignment: .top, spacing: 8) {
+                    LinkedRow(url: item["url"].url) { HStack(alignment: .top, spacing: 8) {
                         Image(systemName: item["done"].bool == true ? "checkmark.circle.fill" : "circle")
                             .font(.system(size: 13)).foregroundStyle(item["done"].bool == true ? Color.green : Color.secondary)
                         VStack(alignment: .leading, spacing: 0) {
@@ -288,7 +288,8 @@ struct ListCard: View {
                                 .strikethrough(item["done"].bool == true).foregroundStyle(item["done"].bool == true ? .secondary : .primary)
                             if let d = item["detail"].string { Text(d).font(.system(size: 10.5)).foregroundStyle(.secondary) }
                         }
-                    }
+                        Spacer(minLength: 0)
+                    } }
                 }
             }
         }

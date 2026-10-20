@@ -382,6 +382,37 @@ def message_text(content: Any) -> str:
     return "\n".join(t for t in texts if isinstance(t, str) and t.strip())
 
 
+def refused(error: Any) -> bool:
+    """Hermes turned the turn away at the door: newer Hermes only lets API turns into sessions the
+    API itself started, so a Discord/Telegram conversation can't be written into from outside."""
+    return "permission_denied" in str(error or "")
+
+
+def recent_exchange(state_db: Path, session_id: str, limit: int = 16, max_chars: int = 4000) -> str:
+    """The conversation's last few user/assistant messages as plain lines, for a task that has to
+    run beside the conversation instead of inside it."""
+    try:
+        db = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return ""
+    try:
+        rows = db.execute("SELECT role, content FROM messages WHERE session_id=? AND role IN ('user','assistant') "
+                          "AND content IS NOT NULL AND content != '' ORDER BY id DESC LIMIT ?",
+                          (session_id, limit)).fetchall()
+    except sqlite3.Error:
+        return ""
+    finally:
+        db.close()
+    lines = []
+    for role, text in reversed(rows):
+        line = " ".join(message_text(text).split())
+        if not line or _MACHINE_LINE.match(line):
+            continue
+        lines.append(("User: " if role == "user" else "Assistant: ") + (line[:600] + "…" if len(line) > 600 else line))
+    out = "\n".join(lines)
+    return out[-max_chars:]
+
+
 def _snippets(db: sqlite3.Connection, session_id: str) -> tuple[str, ...]:
     rows = db.execute("SELECT content FROM messages WHERE session_id=? AND role='user' AND content IS NOT NULL "
                       "ORDER BY id DESC LIMIT 15", (session_id,)).fetchall()

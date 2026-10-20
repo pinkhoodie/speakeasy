@@ -20,7 +20,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .calls import SidebandWorker
+from .prompt import builder as P
 from .text import ID_RE, clean_transcript
+
+REPEAT_HANDOFF_S = 8.0  # the same words handed off again this soon are a repeat, not a new request
 
 CODEX_MODEL = "gpt-live-1-codex"
 _ENV_KEEP = ("HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "CODEX_HOME")
@@ -226,6 +229,9 @@ class CodexTransport:
             "threadId": self.thread_id, "version": "v3", "model": CODEX_MODEL, "voice": voice,
             "outputModality": "audio", "transport": {"type": "webrtc", "sdp": sdp},
             "includeStartupContext": False, "clientManagedHandoffs": True,
+            # No canned "mm-hm" filler while a handoff starts: the voice's own short acknowledgement
+            # is enough, and the filler repeats ("On it. Mm-hm. Mm-hm.").
+            "delegationAckFiller": False,
             "prompt": instructions + "\nOnly the Speakeasy server may execute tasks via Hermes. "
                                      "Do not claim a task was completed until the server supplies its result."}
         if initial:
@@ -278,6 +284,7 @@ class CodexTransport:
 
 class CodexSidebandWorker(SidebandWorker):
     """Reads app-server notifications; only a provider-owned `handoff_request` starts Hermes work."""
+    HOLD_QUIET_NOTES = True
 
     def __init__(self, rt, interaction, transport: CodexTransport):
         super().__init__(rt, interaction)
@@ -292,6 +299,7 @@ class CodexSidebandWorker(SidebandWorker):
 
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
+        self.connected_at = time.monotonic()  # the transport started during admission; events flow from here
         with self.interaction.lock:
             self.interaction.status = "listening"
         self.publish()
@@ -364,6 +372,15 @@ class CodexSidebandWorker(SidebandWorker):
                            handoff_id in self.delegations)
             return
         logger.info("speakeasy: Codex handoff received (%s chars)", len(request))
+        # The voice sometimes hands off the same words again when nothing came back quickly;
+        # that repeat would reach the running task as a duplicate follow-up.
+        said, now = clean_transcript(request).strip().lower(), time.monotonic()
+        last = getattr(self, "last_handoff", None)
+        self.last_handoff = (said, now)
+        if last and last[0] == said and now - last[1] < REPEAT_HANDOFF_S:
+            logger.info("speakeasy: ignored a repeated Codex handoff")
+            self.delegations.add(handoff_id)
+            return
         history = item.get("active_transcript")
         lines = []
         if isinstance(history, list):
@@ -381,6 +398,9 @@ class CodexSidebandWorker(SidebandWorker):
         context = "\n".join(lines)[-10000:]
         self.delegations.add(handoff_id)
         self.touch()
+        # Acknowledge right away: background notes are held on this voice (they'd draw "mm-hmm"),
+        # so without this cue the voice waits several seconds and may hand the words off again.
+        await self.append("session.thinking.append", None, P.ack_now_note(cleaned_request))
         self.schedule_dispatch(handoff_id, context, item.get("task_id") or item.get("follow_up_task_id"))
 
     async def _send(self, kind: str, delegation_id: str | None, content: str) -> None:

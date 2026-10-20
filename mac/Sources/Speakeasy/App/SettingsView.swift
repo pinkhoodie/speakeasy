@@ -76,10 +76,19 @@ private struct GeneralSettings: View {
     @AppStorage(Prefs.showPanelOnStart) private var showPanelOnStart = true
     @AppStorage(Prefs.followSystemAudio) private var followSystemAudio = true
     @AppStorage(Prefs.startSlim) private var startSlim = false
+    @AppStorage(Prefs.listeningBeta) private var listeningBeta = false
     @AppStorage(Prefs.showCaptions) private var showCaptions = true
     @AppStorage(Prefs.notifyWhenDone) private var notifyWhenDone = true
     @AppStorage(Prefs.panelOnAllSpaces) private var panelOnAllSpaces = true
     @AppStorage(Prefs.tourPending) private var tourPending = false
+    /// Why listening mode can't run here (nil when it can).
+    @State private var listeningUnavailable: String?
+
+    private static func listeningReason(app: AppModel) async -> String? {
+        if let reason = await RoomListener.unavailability() { return reason.message }
+        if app.status != nil && app.status?.roomListening != true { return RoomUnavailability.pluginTooOld.message }
+        return nil
+    }
 
     var body: some View {
         Form {
@@ -90,7 +99,7 @@ private struct GeneralSettings: View {
             ScreenSettingsSection()
             Section("Panel") {
                 Toggle("Show the panel when a call starts", isOn: $showPanelOnStart)
-                Toggle("Start calls in slim mode", isOn: $startSlim)
+                Toggle("Start calls folded into the orb", isOn: $startSlim)
                     .help("Just the controls and a one-line task summary; expand any time")
                 Toggle("Show live captions", isOn: $showCaptions)
                     .help("What you and the assistant say, as text in the panel")
@@ -100,6 +109,27 @@ private struct GeneralSettings: View {
             Section("After a call") {
                 Toggle("Notify me when work from a call finishes", isOn: $notifyWhenDone)
                     .help("A macOS notification when a task you started keeps running after you hang up and then finishes")
+            }
+            Section {
+                Toggle("Listening mode", isOn: $listeningBeta)
+            } header: {
+                Text("Beta")
+            } footer: {
+                Text("Pause a call to let Speakeasy transcribe the room, then ask about the conversation without repeating it.")
+            }
+            if listeningBeta {
+            Section {
+                LabeledContent("Listening mode") {
+                    if let reason = listeningUnavailable {
+                        Text(reason).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
+                    } else {
+                        Text("Ear button in the panel during a call, or the menu bar").foregroundStyle(.secondary)
+                    }
+                }
+            } footer: {
+                Text("During a call: pauses the call and transcribes the room on this Mac without answering, keeping the last 30 minutes as text. Turn it off and the call picks up again, knowing what was said. What it heard goes to the voice and to tasks from that call; Speakeasy keeps none of it, but Hermes keeps what its tasks receive in its own history. It stops when the call ends, after 2 hours, or when your Mac sleeps.")
+            }
+            .task { listeningUnavailable = await Self.listeningReason(app: app) }
             }
             Section("Tour") {
                 LabeledContent {
@@ -184,11 +214,18 @@ private struct ScreenSettingsSection: View {
 // MARK: Shortcuts
 
 private struct ShortcutSettings: View {
+    @AppStorage(Prefs.listeningBeta) private var listeningBeta = false
     @EnvironmentObject var app: AppModel
 
     private var mute: KeyShortcut? { AppModel.storedShortcut(Prefs.muteShortcut, default: .defaultMute) }
     private var pause: KeyShortcut? { AppModel.storedShortcut(Prefs.pauseShortcut, default: .defaultPause) }
     private var screen: KeyShortcut? { AppModel.storedShortcut(Prefs.screenShortcut, default: .defaultScreen) }
+    /// No default: nil until the user sets one.
+    private var listening: KeyShortcut? {
+        guard let raw = UserDefaults.standard.string(forKey: Prefs.listeningShortcut),
+              case .success(let s) = KeyShortcut.parse(raw, reserved: nil) else { return nil }
+        return s
+    }
 
     var body: some View {
         Form {
@@ -223,6 +260,20 @@ private struct ShortcutSettings: View {
                 if let problem = app.pauseShortcutProblem, pause != nil { Text(problem).foregroundStyle(.orange) }
             } footer: {
                 Text("A paused call stops listening and billing; tasks keep running.")
+            }
+            if RoomListener.isSupported && listeningBeta {
+                Section {
+                    LabeledContent("Listening mode on or off") {
+                        ShortcutRecorder(shortcut: listening, name: "Listening", defaultShortcut: .suggestedListening,
+                                         taken: [app.callShortcut] + [mute, pause].compactMap { $0 },
+                                         onTurnOff: { app.setExtraShortcut(Prefs.listeningShortcut, nil) }) {
+                            app.setExtraShortcut(Prefs.listeningShortcut, $0)
+                        }
+                    }
+                    if let problem = app.listeningShortcutProblem, listening != nil { Text(problem).foregroundStyle(.orange) }
+                } footer: {
+                    Text("Off until you set one. Works during a call: turns listening mode on (pausing the call) and off again (resuming it, knowing what was said). The call and pause shortcuts also turn it off while it's on.")
+                }
             }
             Section {
                 LabeledContent("Share screen or stop") {
@@ -320,7 +371,7 @@ private struct VoiceChooser: View {
         let chosen = option.id == effective
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Button {
-                selection = option.id == VoiceCatalog.defaultVoice(for: provider) ? "" : option.id
+                selection = option.id
             } label: {
                 Image(systemName: chosen ? "largecircle.fill.circle" : "circle")
                     .foregroundStyle(chosen ? Color.accentColor : Color.secondary)
@@ -333,7 +384,7 @@ private struct VoiceChooser: View {
                 if !option.summary.isEmpty { Text(option.summary).font(.caption).foregroundStyle(.secondary) }
             }
             .contentShape(Rectangle())
-            .onTapGesture { selection = option.id == VoiceCatalog.defaultVoice(for: provider) ? "" : option.id }
+            .onTapGesture { selection = option.id }
             Spacer(minLength: 12)
             if option.hasPreview {
                 let playing = player.playing == option.id

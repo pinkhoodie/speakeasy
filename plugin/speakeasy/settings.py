@@ -57,7 +57,11 @@ DEFAULT_VOICES = {"codex": "cove", "openai": "marin"}
 # Voices each provider accepts; they do not overlap (the ChatGPT-sign-in voice model rejects API
 # voice names). Keep in sync with mac/Sources/SpeakeasyCore/VoiceCatalog.swift.
 PROVIDER_VOICES = {
-    "codex": ("arbor", "ember", "cove", "spruce", "breeze", "sol", "vale", "juniper", "maple"),
+    # The first nine predate GPT-Live 1.1; the rest arrived with it (Codex 0.163) and each was
+    # verified on a live session. Porto and Selva are listed by Codex but the server refuses them.
+    "codex": ("arbor", "ember", "cove", "spruce", "breeze", "sol", "vale", "juniper", "maple",
+              "bubbie", "aube", "rivage", "haetsal", "hanul", "himari", "miko", "rindo", "sonna",
+              "leher", "neer", "rio", "tinta", "viola"),
     "openai": ("alloy", "ash", "ballad", "cedar", "coral", "echo", "marin", "sage", "shimmer", "verse"),
 }
 

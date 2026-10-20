@@ -34,6 +34,9 @@ used in the tests (timestamps and IDs will differ).
 | POST | `/voice/interactions/{id}/approval` | device | Answer a Hermes tool approval |
 | POST | `/voice/interactions/{id}/cancel-backend` | device | Stop a task's Hermes run |
 | POST | `/voice/interactions/{id}/skip-tour` | device | End the first-call tour |
+| POST | `/voice/interactions/{id}/early-request` | device | Words heard while the call connected: the first request (or, in a call from listening mode, "answer from the room") |
+| POST | `/voice/interactions/{id}/answer` | device | Answer a task's question card |
+| POST | `/voice/interactions/{id}/mic-check` | device | Log a mic repair (numbers only, no audio or words) |
 | POST | `/voice/interactions/{id}/screen` | device | Turn screen sharing on or off for this call |
 | POST | `/voice/interactions/{id}/captures/{capture_id}` | device | Report on a capture request |
 | POST | `/voice/interactions/{id}/attachments` | device | Upload a capture, picture or file (raw bytes) |
@@ -113,6 +116,24 @@ call's value; any other value is a 400.
 the voice walks the user through a real task, the controls and where results go, in its own
 words, and drops it the moment they say skip. Its value names the shortcuts to mention, all
 optional: `{"call": "⌃⌥Space", "mute": "⌃⌥M", "pause": "⌃⌥P"}` (`{}` for none).
+
+`room` (optional, plugin 0.2.51+, only when `GET /voice/status` has `room_listening: true`) is what
+listening mode heard: `[HH:MM] text` lines, at most 24,000 Unicode code points. The app sends it
+with `resume_from` when listening mode (turned on mid-call, which paused the call) is turned off:
+it's added to any room text the call already had (newest kept within the cap) and the voice may
+respond from the room once more. A new call can carry it too (a resume that fell back to a new
+call). A plain resume keeps the server's copy. `""` means no room. With a room, `tour` is ignored.
+The room is part of the idempotency fingerprint (a retry with the same key must send the same room).
+
+```json
+{"sdp": "v=0\r\n...", "room": "[14:02] Sam says the deadline is Friday the 14th.\n[14:03] Priya will send the deck by Wednesday."}
+```
+
+What happens to it: secret-looking lines and tokens are redacted on intake; the voice gets it as a
+fenced background block in its instructions (never as instructions); tasks started from that call
+get it in their Hermes input (not in posts to a chat thread). It is held in memory on this
+interaction only: never in the call log, recent voice, Tune or the task store. It moves to a resumed
+call, and is dropped when the call ends or 15 minutes after it was paused.
 `201`
 ```json
 {
@@ -130,8 +151,33 @@ optional: `{"call": "⌃⌥Space", "mute": "⌃⌥M", "pause": "⌃⌥P"}` (`{}`
 
 `voice_provider` is `codex` (default: the user's own `codex login`, via `codex app-server`) or
 `openai` (`SPEAKEASY_OPENAI_API_KEY` in the profile `.env`). A resumed call also carries
-`"resumed_from": "<old interaction_id>"`. Errors: 400 bad body, 409 the call was already resumed,
-502 the voice provider could not start (see `GET /voice/status` → `codex_message`).
+`"resumed_from": "<old interaction_id>"`. Errors: 400 bad body (including a `room` over the cap), 409 the call was already resumed or the Idempotency-Key was reused with a
+different SDP or room, 502 the voice provider could not start (see `GET /voice/status` →
+`codex_message`).
+
+## POST /voice/interactions/{id}/early-request
+
+Words the app transcribed on the device while the call was connecting. Body `{"text": "..."}`
+(at most 4,000 characters; the first 1,000 are used). Waits up to 8 s for the call to connect
+(409 if it doesn't). Returns `{"interaction_id", "task_id"}`.
+
+- Usually the text is the call's first request and is handled like any request (`task_id` is the
+  task it started, or `null` when the voice answers it itself).
+- In a call started from listening mode (one with a `room`): a question about what was said in the
+  room ("what did Sam say the deadline was?") is answered by the voice from the room, with no task.
+  An empty text means the user said nothing after turning listening off: the voice responds to the
+  conversation once, unless the user has already spoken in the call. Both return `task_id: null`.
+- An empty text in any other call does nothing.
+
+## POST /voice/interactions/{id}/answer
+
+A tap on a question card's option (or a typed answer). Body `{"task_id": "...", "text": "..."}`
+(text at most 400 characters); it goes back to that task as a follow-up.
+
+## POST /voice/interactions/{id}/mic-check
+
+The app found the call's mic wasn't getting through and reopened the connection. Body
+`{"note": "..."}` (at most 400 characters of numbers and state, no audio or words). Logged only.
 
 ## GET /voice/interactions/{id}
 
@@ -258,6 +304,25 @@ dismissal) and the recap of results that finished while no call was open (`away`
 `result` (`spoken`, `full`, optional `label`, optional `cards`) and `email_drafts`.
 Product and image cards appear as `result.cards`; image cards are fetched through
 `/voice/card-image/...`, never by path.
+
+Each task also has `job`: `{"id": "...", "name": "Night shift"}`. The id is the Hermes session
+the task runs in (else the session it continued, else the task's own key); tasks with the same id
+are one job, across calls and days. The name is 2-4 words from the job's first task (never a chat
+thread's title), set once and possibly refined by the titler; never empty.
+
+A question card (`result.question`, also the first of `result.views`) may carry `context`, `why`
+and `affects` strings, and each of its `options` is either a string or an object
+`{text, detail, tags[{text, tone}], risk (low|medium|high), reversible}` (tag tone: good, warn,
+bad, neutral). `approvable: true` is set by the plugin only, never taken from the model: the
+recommended option is low risk and reversible, and nothing in the question or that option spends
+money, speaks as the user, publishes or deletes. Answer with the option's `text`.
+
+View kinds for explaining a job (tone: good, warn, bad, info, neutral; an unknown tone is dropped):
+`lanes {title, start_label, end_label, ticks[≤6], lanes[≤6]{label, segments[≤8]{from, to, tone,
+label}}, note}` (from/to clamped to 0..1, a segment with to ≤ from is dropped);
+`before_after {title, before{label, text, image}, after{label, text, image}}` (image: an https URL
+or a card number for `/voice/card-image`); `flow {title, nodes[≤5]{label, detail, tone}}`;
+`devices {title, items[≤8]{name, value, detail, tone, history[≤6]}}`.
 
 A `failed` task also has `failure`: why it failed, in Speakeasy's own words (the provider's error
 text is never passed through). `kind` is `billing`, `auth`, `rate_limit`, `model_not_found`,
@@ -759,7 +824,7 @@ then marked edited, so auto-refresh leaves it alone). Calls are kept locally in 
 
 ## GET /voice/status
 
-Readiness. `voice_ready` is true when the chosen provider can start a call. When Codex is missing or signed out, `codex_message` says what to do. `threads_supported` reports whether this Hermes can open a new thread per task (its webhook platform must be on; `threads_reason` says why not). `routing_model` names the model task routing uses (`auxiliary.speakeasy_router`), `routing_hint` how to change it. `advertised_url` / `tailscale_name` are the address setup advertised (empty = local only).
+Readiness. `voice_ready` is true when the chosen provider can start a call. When Codex is missing or signed out, `codex_message` says what to do. `threads_supported` reports whether this Hermes can open a new thread per task (its webhook platform must be on; `threads_reason` says why not). `routing_model` names the model task routing uses (`auxiliary.speakeasy_router`), `routing_hint` how to change it. `advertised_url` / `tailscale_name` are the address setup advertised (empty = local only). `room_listening` (plugin 0.2.51+) is true when the server takes listening mode's `room` with `POST /voice/sessions`; missing on older plugins, which reject unknown session fields. `room_on_resume` is true when it also takes `room` with `resume_from`, which listening mode during a call needs (the app checks it before pausing the call for listening).
 `attachments` says whether runs can carry images (`images`) and how Hermes reads them (`vision`:
 `native` the main model sees them, `described` an auxiliary vision model describes them, `none`, or
 `unknown` until the first check), plus the Look at this limits. Apps hide screen sharing and refuse
@@ -792,6 +857,8 @@ drops when it's missing, `images` is false or `vision` is `none`.
   "tailscale_name": "",
   "attachments": {"images": true, "vision": "native", "max_attachments": 3, "max_image_bytes": 2500000,
                   "max_request_image_bytes": 6500000, "max_file_bytes": 10000000},
+  "room_listening": true,
+  "room_on_resume": true,
   "version": "0.2.0"
 }
 ```

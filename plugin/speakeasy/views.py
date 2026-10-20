@@ -16,10 +16,10 @@ import re
 from typing import Any
 
 MAX_VIEWS = 6
-S, N, B, URL, ANY_LIST = "str", "num", "bool", "url", "list"
+S, N, B, URL, ANY_LIST, IMG = "str", "num", "bool", "url", "list", "img"
 
 # Row shapes reused by several kinds.
-EVENT = {"start": S, "end": S, "title": S, "place": S, "all_day": B, "color": S}
+EVENT = {"start": S, "end": S, "title": S, "place": S, "all_day": B, "color": S, "url": URL}
 GAME_SIDE = {"name": S, "abbr": S, "score": S, "logo_url": URL, "winner": B, "home": B, "record": S}
 DAY = {"label": S, "high": N, "low": N, "rain": N, "condition": S, "icon": S}
 HOUR = {"label": S, "temp": N, "rain": N, "icon": S}
@@ -81,7 +81,7 @@ CATALOG: dict[str, dict[str, Any]] = {
     "nutrition": {"title": S, "serving": S, "calories": N, "rows": (ROW_KV, 10)},
     # Comparing and lists
     "comparison": {"title": S, "columns": (S, 4), "rows": ({"label": S, "values": (S, 4)}, 10), "winner": S},
-    "list": {"title": S, "items": ({"text": S, "done": B, "detail": S}, 20)},
+    "list": {"title": S, "items": ({"text": S, "done": B, "detail": S, "url": URL}, 20)},
     "steps": {"title": S, "items": (S, 12)},
     "stats": {"title": S, "items": ({"label": S, "value": S, "delta": S, "good": B}, 8)},
     "chart": {"title": S, "style": S, "unit": S, "labels": (S, 60), "series": ({"name": S, "values": (N, 60)}, 4)},
@@ -92,9 +92,41 @@ CATALOG: dict[str, dict[str, Any]] = {
                                        "entity_id": S}, 16)},
     "thermostat": {"name": S, "current": N, "target": N, "mode": S, "unit": S, "humidity": N},
     "camera": {"name": S, "image_url": URL, "when": S},
+    # Explaining a job: what ran when, what changed, where things go, how a fleet is doing.
+    "lanes": {"title": S, "start_label": S, "end_label": S, "ticks": (S, 6), "note": S,
+              "lanes": ({"label": S, "segments": ({"from": N, "to": N, "tone": S, "label": S}, 8)}, 6)},
+    "before_after": {"title": S, "before": {"label": S, "text": S, "image": IMG},
+                     "after": {"label": S, "text": S, "image": IMG}},
+    "flow": {"title": S, "nodes": ({"label": S, "detail": S, "tone": S}, 5)},
+    "devices": {"title": S, "items": ({"name": S, "value": S, "detail": S, "tone": S, "history": (S, 6)}, 8)},
     # A decision the task needs from the user; the app shows numbered answers (tap, 1-4, or say it).
-    "question": {"question": S, "options": (S, 4), "recommended": N, "task_id": S, "images": (N, 4)},
+    # Options are strings, or objects (OPTION below) when the model explained them; checked in clean_options.
+    "question": {"question": S, "recommended": N, "task_id": S, "images": (N, 4),
+                 "context": S, "why": S, "affects": S},
 }
+
+TONES = {"good", "warn", "bad", "info", "neutral"}
+TAG_TONES = {"good", "warn", "bad", "neutral"}
+RISKS = {"low", "medium", "high"}
+OPTION = {"text": S, "detail": S, "tags": ({"text": S, "tone": S}, 4), "risk": S, "reversible": B}
+
+# A decision is one-tap "Approve" only when nothing in it spends money, speaks for the user,
+# publishes, or deletes. Plain words, checked on the question and the recommended option; a false
+# alarm only costs the user a look at the options.
+APPROVE_GUARD = {
+    "money": r"[$€£¥]\s?\d|\b(?:pay|paid|payment|purchase|buy|bought|order|checkout|charge|refund|invoice|"
+             r"subscri\w*|price|cost|fee|dollars?|euros?|card|wire|transfer|billing|spend|spent|deposit|"
+             r"withdraw|trade|sell|sold|donate|tip)(?:s|es|ed|ing)?\b",
+    "speaking as the user": r"\b(?:send|sends|sending|sent)\s+(?:(?:it|this|that|the|an?|your|my|our|them)\s+)?"
+                            r"(?:email|e-mail|message|reply|note|invite|text|dm|letter|post|tweet)|"
+                            r"\b(?:email|e-mail|reply|replies|message|messages|dm|tweet|rsvp|invite)\b|"
+                            r"on your behalf|in your name|as you\b|from your (?:account|address|number)",
+    "publishing": r"\b(?:publish|post|share|public|announce|launch|release|deploy|go live|push|merge|ship)"
+                  r"(?:s|es|ed|ing|d)?\b",
+    "deleting": r"\b(?:delete|remove|erase|wipe|destroy|purge|uninstall|overwrite|discard|cancel|unsubscribe|"
+                r"revoke|drop)(?:s|es|ed|ing|d|ped|ping)?\b",
+}
+APPROVE_GUARD_RE = re.compile("(?i)" + "|".join(f"(?:{p})" for p in APPROVE_GUARD.values()))
 
 
 def _str(value: Any, limit: int = 240) -> str | None:
@@ -121,6 +153,17 @@ def _url(value: Any) -> str | None:
     return text
 
 
+def _image(value: Any) -> Any:
+    """A picture on a card: a result image's card number, an https URL, or a file path the task
+    made (split_result vets that path like any result image and swaps in its card number)."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value if value >= 1 else None
+    text = _str(value, 600)
+    if text and (text.startswith("https://") or text.startswith("/") or text.startswith("~/")) and "\n" not in text:
+        return text
+    return None
+
+
 def _field(shape: Any, value: Any) -> Any:
     if shape == S:
         return _str(value, 1200)
@@ -130,6 +173,10 @@ def _field(shape: Any, value: Any) -> Any:
         return value if isinstance(value, bool) else None
     if shape == URL:
         return _url(value)
+    if shape == IMG:
+        return _image(value)
+    if isinstance(shape, dict):
+        return _object(shape, value) or None
     if isinstance(shape, tuple) and isinstance(value, list):
         row, cap = shape
         out = []
@@ -161,8 +208,71 @@ def clean(raw: Any) -> dict[str, Any] | None:
     shape = CATALOG.get(kind) if isinstance(kind, str) else None
     if shape is None:
         return None
-    body = _object(shape, raw)
+    body = _tidy(kind, _object(shape, raw))
     return {"kind": kind, **body} if body else None
+
+
+def _tone(row: dict[str, Any], allowed: set[str] = TONES) -> dict[str, Any]:
+    """Drop a tone the apps don't draw (they show a missing tone as neutral)."""
+    if "tone" in row and str(row["tone"]).lower() not in allowed:
+        row.pop("tone")
+    elif "tone" in row:
+        row["tone"] = str(row["tone"]).lower()
+    return row
+
+
+def _segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Lane segments sit on a 0..1 timeline: clamp both ends, drop empty or backwards ones."""
+    out = []
+    for seg in segments:
+        if "from" not in seg or "to" not in seg:
+            continue
+        start, end = min(max(seg["from"], 0.0), 1.0), min(max(seg["to"], 0.0), 1.0)
+        if end <= start:
+            continue
+        out.append(_tone({**seg, "from": start, "to": end}))
+    return out
+
+
+def _tidy(kind: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Rules a field shape can't say: allowed tones, and lane segments on a 0..1 timeline."""
+    if kind == "lanes":
+        lanes = [{**lane, "segments": _segments(lane.get("segments") or [])} for lane in body.get("lanes") or []]
+        lanes = [lane if lane["segments"] else {k: v for k, v in lane.items() if k != "segments"} for lane in lanes]
+        lanes = [lane for lane in lanes if lane.get("segments") or lane.get("label")]
+        body.pop("lanes", None)
+        if lanes:
+            body["lanes"] = lanes
+    for rows in ("nodes", "items"):
+        if kind in ("flow", "devices") and body.get(rows):
+            body[rows] = [_tone(row) for row in body[rows]]
+    if kind == "before_after" and not ("before" in body or "after" in body):
+        return {}
+    return body
+
+
+def view_images(views: list[dict[str, Any]]) -> list[str]:
+    """Every file path a before/after card named, in order (they go through the result-image vetting)."""
+    return [v[side]["image"] for v in views if v.get("kind") == "before_after"
+            for side in ("before", "after") if _is_path((v.get(side) or {}).get("image"))]
+
+
+def _is_path(value: Any) -> bool:
+    return isinstance(value, str) and not value.startswith("https://")
+
+
+def number_view_images(views: list[dict[str, Any]], number: Any) -> None:
+    """Swap each before/after file path for its card number (``number(path)`` -> int, 0 when the
+    image was rejected). A rejected path is dropped, so no server path ever reaches a client."""
+    for v in views:
+        for side in ("before", "after") if v.get("kind") == "before_after" else ():
+            part = v.get(side) or {}
+            if _is_path(part.get("image")):
+                n = number(part["image"])
+                if n:
+                    part["image"] = n
+                else:
+                    part.pop("image")
 
 
 def clean_all(raw: Any) -> list[dict[str, Any]]:
@@ -182,8 +292,49 @@ def extract(output: str) -> tuple[str, list[dict[str, Any]]]:
     return (output[:match.start()] + output[match.end():]).strip(), views
 
 
+def clean_option(raw: Any) -> str | dict[str, Any] | None:
+    """One answer: a short string, or an object {text, detail, tags, risk, reversible} when the task
+    explained it. An object without text is dropped; one with only text stays a plain string."""
+    if not isinstance(raw, dict):
+        return _str(raw, 1200)
+    opt = _object(OPTION, raw)
+    if not opt.get("text"):
+        return None
+    if "tags" in opt:
+        opt["tags"] = [_tone(t, TAG_TONES) for t in opt["tags"] if t.get("text")] or None
+        if opt["tags"] is None:
+            opt.pop("tags")
+    if str(opt.get("risk", "")).lower() in RISKS:
+        opt["risk"] = str(opt["risk"]).lower()
+    else:
+        opt.pop("risk", None)
+    return opt if len(opt) > 1 else opt["text"]
+
+
+def option_text(option: Any) -> str:
+    """The words of an answer, whichever form it came in (answers are sent back as this text)."""
+    return option.get("text", "") if isinstance(option, dict) else str(option or "")
+
+
+def approvable(view: dict[str, Any]) -> bool:
+    """One-tap Approve, decided here and never by the model: the recommended answer must be low risk
+    and reversible, and nothing in the question or that answer may spend money, speak for the user,
+    publish, or delete."""
+    rec = view.get("recommended")
+    if not isinstance(rec, int):
+        return False
+    option = view["options"][rec]
+    if not isinstance(option, dict) or option.get("risk") != "low" or option.get("reversible") is not True:
+        return False
+    words = " ".join([view.get("question", ""), view.get("affects", ""), option_text(option), option.get("detail", ""),
+                      *(t.get("text", "") for t in option.get("tags") or [])])
+    return not APPROVE_GUARD_RE.search(words)
+
+
 def extract_question(output: str) -> tuple[str, dict[str, Any] | None]:
-    """Strip an optional ```speakeasy-question block: {"question", "options": [2-4], "recommended": i}."""
+    """Strip an optional ```speakeasy-question block: {"question", "options": [2-4], "recommended": i}.
+    Options are strings or objects (text, detail, tags, risk, reversible, image); the question can
+    carry context, why and affects. ``approvable`` is always computed here."""
     match = re.search(r"(?s)\n?```speakeasy-question\s*\n(.*?)\n```", output or "")
     if not match:
         return output, None
@@ -194,26 +345,33 @@ def extract_question(output: str) -> tuple[str, dict[str, Any] | None]:
         return rest, None
     if not isinstance(raw, dict):
         return rest, None
-    # Options are short strings, or {"text", "image"} when the choice is something to look at.
-    opts = raw.get("options") if isinstance(raw.get("options"), list) else []
-    images = [(o.get("image") or "").strip() if isinstance(o, dict) else "" for o in opts[:4]]
-    raw = {**raw, "options": [o.get("text") if isinstance(o, dict) else o for o in opts]}
-    view = clean({**raw, "kind": "question"})
-    if not view or not view.get("question") or len(view.get("options") or []) < 2:
+    view = clean({**raw, "kind": "question"}) or {"kind": "question"}
+    pairs = []   # (clean option, raw image) for each answer that survived
+    for opt in (raw.get("options") if isinstance(raw.get("options"), list) else [])[:4]:
+        cleaned = clean_option(opt)
+        if cleaned:
+            image = opt.get("image") if isinstance(opt, dict) and isinstance(opt.get("image"), str) else ""
+            pairs.append((cleaned, image.strip()))
+    if not view.get("question") or len(pairs) < 2:
         return rest, None
+    view["options"] = [o for o, _ in pairs]
+    images = [i for _, i in pairs]
     if any(images):
-        view["_option_images"] = images[:len(view["options"])]
+        view["_option_images"] = images
     rec = view.get("recommended")
     if isinstance(rec, (int, float)) and 0 <= int(rec) < len(view["options"]):
         view["recommended"] = int(rec)
     else:
         view.pop("recommended", None)
+    view.pop("approvable", None)
+    if approvable(view):
+        view["approvable"] = True
     return rest, view
 
 
 def spoken_question(view: dict[str, Any]) -> str:
     """How the voice reads a question card: the question, the options, and the suggestion."""
-    opts = [o.rstrip(".") for o in view["options"]]
+    opts = [option_text(o).rstrip(".") for o in view["options"]]
     said = view["question"].rstrip()
     if not said.endswith("?"):
         said = said.rstrip(".") + "?"

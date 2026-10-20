@@ -10,6 +10,10 @@ final class VoicePanel: NSPanel {
     var onEscape: (() -> Void)?
     /// Left/right arrow: returns true when it stepped through images (then the key is consumed).
     var onArrow: ((Int) -> Bool)?
+    /// Board and job-view keys (key code, characters); true = handled.
+    var onKey: ((UInt16, String) -> Bool)?
+    /// False while the panel is folded into the orb: no edge resizing.
+    var allowsResize: (() -> Bool)?
     /// True while arrow keys or ⌘V would do something (a review card's images; a call that takes
     /// pictures and files): a click then makes the panel key so they reach it. Otherwise the panel
     /// stays non-key on click and never takes typing away from other apps.
@@ -80,6 +84,18 @@ final class VoicePanel: NSPanel {
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, !(firstResponder is NSText),
+           event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
+           onKey?(event.keyCode, event.charactersIgnoringModifiers ?? "") == true {
+            return
+        }
+        // Page Up/Down, Space (Shift+Space up), Home/End scroll the board or job view.
+        if event.type == .keyDown, !(firstResponder is NSText),
+           event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
+           let key = Self.pageKey(event.keyCode, shift: event.modifierFlags.contains(.shift)),
+           let target = mainScrollView(), target.page(key) {
+            return
+        }
+        if event.type == .keyDown, !(firstResponder is NSText),
            let delta = ImageReviewLayout.arrowStep(keyCode: event.keyCode,
                                                    commandOptionControl: !event.modifierFlags.intersection([.command, .option, .control]).isEmpty),
            onArrow?(delta) == true {
@@ -90,7 +106,7 @@ final class VoicePanel: NSPanel {
             if !isKeyWindow, wantsKeysOnClick?() == true { makeKey() }
             isDraggingPanel = false
             isResizingPanel = false
-            var edges = resizeEdges(at: event.locationInWindow)
+            var edges = allowsResize?() == false ? [] : resizeEdges(at: event.locationInWindow)
             if edges.isEmpty && startsOnTranscriptGrip(event.locationInWindow) { edges = [.bottom, .transcript] }
             press = Press(pointer: convertPoint(toScreen: event.locationInWindow), origin: frame.origin,
                           eligible: !startsInScrollableContent(event.locationInWindow), edges: edges)
@@ -141,6 +157,25 @@ final class VoicePanel: NSPanel {
             break
         }
         super.sendEvent(event)
+    }
+
+    static func pageKey(_ code: UInt16, shift: Bool) -> PanelNSScrollView.PageKey? {
+        switch code {
+        case 116: return .up            // Page Up
+        case 121: return .down          // Page Down
+        case 115: return .top           // Home
+        case 119: return .bottom        // End
+        case 49: return shift ? .up : .down   // Space
+        default: return nil
+        }
+    }
+
+    /// The scroll area that holds the board or the open job: the tallest one that can scroll.
+    func mainScrollView() -> PanelNSScrollView? {
+        guard let root = contentView else { return nil }
+        func walk(_ v: NSView) -> [PanelNSScrollView] { ((v as? PanelNSScrollView).map { [$0] } ?? []) + v.subviews.flatMap(walk) }
+        return walk(root).filter { !$0.isHiddenOrHasHiddenAncestor && $0.scrollMaxY > 0.5 }
+            .max { $0.frame.height < $1.frame.height }
     }
 
     private func hitView(_ point: NSPoint) -> NSView? {
@@ -357,16 +392,19 @@ final class VoicePanelController {
         }
         panel.onMoved = { [weak self] in self?.panelDidMove() }
         panel.onArrow = { [weak model] delta in model?.stepOpenReview(by: delta) ?? false }
-        // Arrow keys for a review card's images, and ⌘V during a call that takes pictures and files.
+        // Arrow keys for a review card's images and the board, and ⌘V during a call that takes pictures and files.
         panel.wantsKeysOnClick = { [weak model] in
             guard let model else { return false }
-            return model.steppableReview != nil || PanelAttachments.accepting(model)
+            return model.steppableReview != nil || model.showsBoard || model.selectedJobID != nil
+                || PanelAttachments.accepting(model)
         }
         panel.onPaste = { [weak model] in
             guard let model, PanelAttachments.accepting(model) else { return false }
             PanelAttachments.take(from: .general, into: model, imageName: "Pasted image")
             return true
         }
+        panel.onKey = { [weak model] code, chars in model?.handleKey(code: code, characters: chars) ?? false }
+        panel.allowsResize = { [weak model] in !(model?.showsSlim ?? false) }
         if let saved = UserDefaults.standard.string(forKey: Self.sizeKey) {
             let s = NSSizeFromString(saved)
             model.panelWidth = Self.clampWidth(s.width == 0 ? Tokens.width : s.width)
@@ -535,7 +573,7 @@ final class VoicePanelController {
     }
 
     private func resize(animated: Bool) {
-        let width = model.panelWidth
+        let width = model.displayWidth
         let fitting = measurer.sizeThatFits(in: NSSize(width: width, height: 2000))
         let height = max(56, ceil(fitting.height))
         let frame = Self.placement(height: height, width: width, userTopLeft: userTopLeft,

@@ -18,6 +18,9 @@ enum PanelSmoke {
     static func run(config: AppConfig, snapshotDir: String?) {
         let client = NativeVoiceClient(config: config)
         retained = client
+        // A remembered orb-mode preference (from a preview run) would fold every check below.
+        let savedOrb = client.model.slim
+        client.model.slim = false
         Task { @MainActor in
             await workScroll(client)
             await workStatusWraps(client)
@@ -26,6 +29,7 @@ enum PanelSmoke {
             await endedPanel(client)
             await lookAtThis(client, dir: snapshotDir)
             if let dir = snapshotDir { await snapshots(client, dir: dir) }
+            client.model.slim = savedOrb
             print("panel-smoke " + (ok ? "ok" : "FAILED"))
             log.forEach { print("  " + $0) }
             exit(ok ? 0 : 1)
@@ -322,8 +326,9 @@ enum PanelSmoke {
 
     static func snapshots(_ c: NativeVoiceClient, dir: String) async {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        for (name, badge) in [("menubar-glyph", false), ("menubar-glyph-badge", true)] {
-            let image = BrandGlyph.menuBarImage(badge: badge, height: 128)
+        for (name, badge, listening) in [("menubar-glyph", false, false), ("menubar-glyph-badge", true, false),
+                                         ("menubar-glyph-listening", false, true), ("menubar-glyph-badge-listening", true, true)] {
+            let image = BrandGlyph.menuBarImage(badge: badge, listening: listening, height: 128)
             if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
                let png = rep.representation(using: .png, properties: [:]) {
                 try? png.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
@@ -335,6 +340,7 @@ enum PanelSmoke {
         do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/work-long-status.png")); record("snapshot \(dir)/work-long-status.png") }
         catch { fail("snapshot failed: \(error)") }
         await longStrings(c, dir: dir)
+        await roomListening(c, dir: dir)
         await slim(c, dir: dir)
         // Screens for the website: the task list, a card result, and an approval.
         for name in ["tasklist", "products", "approval", "detail", "home"] {
@@ -344,13 +350,23 @@ enum PanelSmoke {
             do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/site-\(name).png")); record("snapshot \(dir)/site-\(name).png") }
             catch { fail("snapshot failed: \(error)") }
         }
+        await busyPanel(c, dir: dir)
+        await jobViews(c, dir: dir)
         await failedTask(c, dir: dir)
         await designReview(c, dir: dir)
+        await declutter(c, dir: dir)
+        await incidentalPictures(c, dir: dir)
         await lookingAt(c, dir: dir)
         if let (draft, _) = PreviewFixtures.state("email-draft") {
             c.showPreview(draft, workExpanded: false)
             await settle()
-            check(!c.model.pinnedDrafts.isEmpty, "email draft: pinned in the call panel")
+            check(!c.model.pinnedDrafts.isEmpty, "email draft: waiting in the call")
+            check(c.model.showsBoard && VoicePanelView.looseCards(c.model).count == 0,
+                  "email draft: on the board as its job's tile, not pinned under it")
+            if let job = c.model.jobs.first { c.model.onOpenJob(job.id) }
+            await settle()
+            check(c.model.selectedJob.map { JobCards.items($0, model: c.model).contains { $0.key.hasPrefix("draft:") } } == true,
+                  "email draft: shows inside its job's view")
             do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/email-draft.png")); record("snapshot \(dir)/email-draft.png") }
             catch { fail("snapshot failed: \(error)") }
             // "Show all": the body grows, but the card's Show less / Send row must stay inside the screen.
@@ -361,6 +377,7 @@ enum PanelSmoke {
                     var t = t; t.info.emailDrafts = t.info.emailDrafts.map { d in var d = d; d.body = longBody; return d }; return t }
                 if var w = long.workInfo { w.emailDrafts = w.emailDrafts.map { d in var d = d; d.body = longBody; return d }; long.workInfo = w }
                 c.showPreview(long, workExpanded: false)
+                if let job = c.model.jobs.first { c.model.onOpenJob(job.id) }
                 c.model.expandedDraftIDs.insert(first.id)
                 await settle()
                 let win = c.panel.window; let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
@@ -369,6 +386,218 @@ enum PanelSmoke {
                 do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/email-draft-expanded.png")) } catch { fail("snapshot failed: \(error)") }
             }
         }
+    }
+
+    // MARK: A busy call: finished tasks fold away so a question stays in view
+
+    static func busyPanel(_ c: NativeVoiceClient, dir: String) async {
+        guard let (state, _) = PreviewFixtures.state("busy") else { fail("busy panel: fixture missing"); return }
+        c.showPreview(state, workExpanded: false)
+        await settle()
+        check(c.model.pinnedViews?.taskID == "b3", "busy panel: the question card is pinned")
+        let shown = TaskListView.compactShown(state.tasks, maxSettled: 1)
+        check(shown.map(\.id) == ["b3"], "busy panel: with a question up, one finished task shows (got \(shown.map(\.id)))")
+        let calm = TaskListView.compactShown(state.tasks, maxSettled: 2)
+        check(calm.map(\.id) == ["b2", "b3"], "busy panel: otherwise the newest two finished tasks show")
+        var mixed = state.tasks
+        for i in 0..<2 { mixed[i].info.status = "working" }
+        let withOpen = TaskListView.compactShown(mixed, maxSettled: 1)
+        check(Set(withOpen.map(\.id)) == ["b0", "b1", "b3"], "busy panel: running tasks always show (got \(withOpen.map(\.id)))")
+        let win = c.panel.window; let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        record("busy panel: \(Int(win.frame.height))pt tall, screen \(Int(visible.height))pt")
+        do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/busy.png")); record("snapshot \(dir)/busy.png") }
+        catch { fail("snapshot failed: \(error)") }
+    }
+
+    // MARK: Jobs: the orb, the board and the job view
+
+    static func jobViews(_ c: NativeVoiceClient, dir: String) async {
+        func onScreen(_ label: String) {
+            let win = c.panel.window; let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+            record("\(label): panel \(Int(win.frame.width))x\(Int(win.frame.height))pt, screen \(Int(visible.height))pt")
+            check(visible.contains(win.frame), "\(label): panel stays on screen")
+        }
+        func snap(_ name: String) {
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/\(name).png")); record("snapshot \(dir)/\(name).png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
+        let savedSeen = c.model.seenAnswers
+        // Orb states. The header orb of the open panel must draw the same state as the folded orb.
+        let expected: [(String, OrbState, Bool)] = [("orb-idle", .idle, false), ("orb-talking", .talking, false),
+                                                    ("orb-working", .working, false), ("orb-needs", .needsYou(2), false),
+                                                    ("orb-failed", .failed(needs: 0), false), ("orb-answers", .idle, true)]
+        for (name, state, dot) in expected {
+            JobOrb.drawn = [:]
+            guard PreviewFixtures.showJobFixture(name, on: c) else { fail("\(name): fixture missing"); continue }
+            await settle(0.9)
+            check(c.model.showsSlim, "\(name): folded into the orb")
+            check(c.model.orbState == state, "\(name): orb shows \(state) (got \(c.model.orbState))")
+            check(c.model.orbAnswerDot == dot, "\(name): answer dot \(dot ? "shown" : "hidden") (unread \(c.model.unreadAnswers))")
+            check(c.panel.window.frame.width <= VoicePanelModel.orbWidth + 1, "\(name): the orb panel is small (\(Int(c.panel.window.frame.width))pt)")
+            let folded = JobOrb.drawn["folded"]
+            check(folded == JobOrb.Drawn(state: state, answerDot: dot), "\(name): the folded orb draws \(state) (got \(String(describing: folded)))")
+            onScreen(name)
+            snap(name)
+            // Unfold: the header orb is the same orb, same state.
+            JobOrb.drawn["header"] = nil
+            c.model.slim = false
+            await settle(0.7)
+            check(!c.model.showsSlim, "\(name): unfolded")
+            check(c.model.orbState == state, "\(name): header orb state equals the folded orb (got \(c.model.orbState))")
+            let header = JobOrb.drawn["header"]
+            check(header == folded, "\(name): the header orb draws what the folded orb drew (got \(String(describing: header)))")
+            let reason = c.model.orbReason?.text
+            let want: String? = ["orb-needs": "2 need you", "orb-failed": "1 failed", "orb-working": "1 running",
+                                 "orb-answers": "1 new answer"][name]
+            check(reason == want, "\(name): the header says why the orb looks like that (got \(reason ?? "the live status"))")
+            snap("header-" + name)
+        }
+        if PreviewFixtures.showJobFixture("orb-needs", on: c) {
+            await settle(0.4)
+            check(c.model.unreadAnswers > 0 && !c.model.orbAnswerDot && c.model.orbState.badge == 2,
+                  "orb-needs: amber wins over an unread answer")
+        }
+        // Board.
+        guard PreviewFixtures.showJobFixture("jobs-board", on: c) else { fail("board: fixture missing"); return }
+        await settle(1.0)
+        let sections = c.model.boardSections
+        check(c.model.showsBoard, "board: shown instead of the task list")
+        check(sections.needsYou.map(\.name) == ["Release v2.4", "App rollout", "Nightly jobs", "Router setting"],
+              "board: decisions first, newest first (got \(sections.needsYou.map(\.name)))")
+        check(Set(sections.running.map(\.name)) == ["Docs refresh", "Search index rebuild"], "board: running jobs (got \(sections.running.map(\.name)))")
+        check(sections.doneToday.map(\.name).contains("Meeting notes"), "board: done today")
+        check(c.model.jobs.first { $0.name == "Release v2.4" }?.tasks.count == 2, "board: tasks of one job group into one tile")
+        check(c.model.orbState == .needsYou(4), "board: the orb counts what needs you (got \(c.model.orbState))")
+        onScreen("board")
+        snap("jobs-board")
+        // Keys: down moves the focus, Return opens, Escape goes back to the board.
+        let win = c.panel.window
+        func key(_ code: UInt16, _ chars: String = "") {
+            if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: win.windowNumber,
+                                        context: nil, characters: chars, charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code) {
+                win.sendEvent(e)
+            }
+        }
+        key(125); key(125)
+        await settle(0.2)
+        check(c.model.boardFocusID == sections.all[1].id, "board: down arrow moves to the second tile")
+        key(36)
+        await settle(0.6)
+        check(c.model.selectedJobID == sections.all[1].id, "board: Return opens the focused job")
+        check(c.focusedTaskID == sections.all[1].newest.id, "board: opening a job puts its newest task in focus")
+        key(53)
+        await settle(0.6)
+        check(c.model.selectedJobID == nil && !c.model.workExpanded, "job view: Escape returns to the board")
+        check(c.focusedTaskID == nil, "job view: leaving the job clears the focus")
+        // Picking with a number key answers the focused decision.
+        var picked: String?
+        let saved = c.model.onAnswer
+        c.model.onAnswer = { _, text in picked = text }
+        c.model.boardFocusID = c.model.jobs.first { $0.name == "Router setting" }?.id
+        key(19, "2")
+        await settle(0.3)
+        check(picked == "After 3 errors, for 30 seconds", "board: 2 picks the second option (got \(picked ?? "nothing"))")
+        c.model.onAnswer = saved
+        c.model.answers["router_q"] = nil
+        // "Not needed" (N on the focused tile): sets the question aside without answering it. It
+        // leaves Needs you for Done today, labeled "Set aside", and the orb's count drops.
+        let needsBefore = c.model.boardSections.needsYou.count
+        let orbBefore = c.model.orbState.badge ?? 0
+        var asideRun: String?
+        let savedAside = c.model.onSetAside
+        c.model.onSetAside = { asideRun = $0 }
+        let routerJob = c.model.jobs.first { $0.name == "Router setting" }
+        check(routerJob.flatMap { c.model.setAsideTarget($0) }?.id == "router_q", "not needed: the router question can be set aside")
+        check(c.model.jobs.first { $0.name == "Release v2.4" }.flatMap { c.model.setAsideTarget($0) } != nil,
+              "not needed: offered on every decision")
+        check(c.model.jobs.filter { $0.stage == .running }.allSatisfy { c.model.setAsideTarget($0) == nil },
+              "not needed: never on running work")
+        c.model.boardFocusID = routerJob?.id
+        key(45, "n")
+        await settle(0.4)
+        check(asideRun == "run_router_q", "not needed: N sets the focused question aside (got \(asideRun ?? "nothing"))")
+        let asideSections = c.model.boardSections
+        check(!asideSections.needsYou.contains { $0.name == "Router setting" }, "not needed: it leaves Needs you")
+        check(asideSections.doneToday.contains { $0.name == "Router setting" && $0.setAside }, "not needed: it lands in Done today as set aside")
+        check(asideSections.needsYou.count == needsBefore - 1 && (c.model.orbState.badge ?? 0) == orbBefore - 1,
+              "not needed: the needs-you count drops (\(needsBefore)→\(asideSections.needsYou.count), orb \(orbBefore)→\(c.model.orbState.badge ?? 0))")
+        check(c.model.answers["router_q"] == nil, "not needed: it isn't an answer")
+        c.model.onSetAside = savedAside
+        c.model.setAsideTasks = []
+        for name in ["jobs-set-aside", "job-set-aside"] {
+            guard PreviewFixtures.showJobFixture(name, on: c) else { fail("\(name): fixture missing"); continue }
+            await settle(1.0)
+            if name == "job-set-aside" {
+                guard let job = c.model.selectedJob else { fail("\(name): no job open"); continue }
+                check(job.setAside && job.stage == .done && job.decision == nil, "\(name): set aside, nothing to decide")
+                check(JobDetailBody.stageLine(job) == "Set aside", "\(name): the header says Set aside")
+            } else {
+                check(c.model.boardSections.doneToday.contains { $0.name == "Router setting" && $0.setAside },
+                      "\(name): the set-aside job sits in Done today")
+            }
+            onScreen(name)
+            snap(name)
+        }
+        c.model.setAsideTasks = []
+        // Job views, before and after the pick.
+        for name in ["job-release", "job-release-after", "job-nightly", "job-nightly-after", "job-rollout", "job-rollout-after"] {
+            guard PreviewFixtures.showJobFixture(name, on: c) else { fail("\(name): fixture missing"); continue }
+            await settle(1.0)
+            guard let job = c.model.selectedJob else { fail("\(name): no job open"); continue }
+            check(c.model.workExpanded, "\(name): job view open")
+            let after = name.hasSuffix("-after")
+            check((job.decision != nil) == !after, "\(name): decision \(after ? "answered" : "waiting")")
+            check(c.focusedTaskID == job.newest.id, "\(name): the job's newest task is in focus")
+            onScreen(name)
+            snap(name)
+        }
+        // New answers: their own section between Needs you and Running; opening one reads it.
+        if PreviewFixtures.showJobFixture("jobs-answers", on: c) {
+            await settle(1.0)
+            let s = c.model.boardSections
+            check(s.newAnswers.map(\.name) == ["Two laptops compared", "Weekend weather", "Nightly jobs this week"],
+                  "answers: the section lists the unread answers (got \(s.newAnswers.map(\.name)))")
+            check(s.needsYou.map(\.name) == ["Router setting"] && s.running.count == 2, "answers: needs you and running stay put")
+            check(s.all.map(\.id).firstIndex(of: s.newAnswers[0].id) == 1, "answers: between Needs you and Running")
+            check(s.doneToday.map(\.name) == ["Meeting notes"], "answers: read work stays in Done today")
+            check(c.model.orbState == .needsYou(1) && !c.model.orbAnswerDot, "answers: amber still wins on the orb")
+            onScreen("jobs-answers")
+            snap("jobs-answers")
+            let wx = s.newAnswers.first { $0.name == "Weekend weather" }!
+            c.model.onOpenJob(wx.id)
+            await settle(0.6)
+            check(c.model.seenAnswers.contains("run_ans_wx"), "answers: opening marks it seen")
+            c.model.onOpenJob(nil)
+            await settle(0.5)
+            let after = c.model.boardSections
+            check(!after.newAnswers.contains { $0.id == wx.id } && after.doneToday.contains { $0.id == wx.id },
+                  "answers: a read answer drops to Done today")
+            check(UserDefaults.standard.stringArray(forKey: "speakeasy.seenAnswers")?.contains("run_ans_wx") == true,
+                  "answers: seen answers are remembered")
+            // Dismiss (the x): it leaves New answers without opening the job.
+            if let laptops = after.newAnswers.first(where: { $0.name == "Two laptops compared" }) {
+                c.model.dismissAnswer(laptops)
+                await settle(0.5)
+                let dismissed = c.model.boardSections
+                check(c.model.selectedJobID == nil, "answers: dismissing doesn't open the job")
+                check(!dismissed.newAnswers.contains { $0.id == laptops.id } && dismissed.doneToday.contains { $0.id == laptops.id },
+                      "answers: a dismissed answer drops to Done today")
+                snap("jobs-answers-dismissed")
+            } else { fail("answers: no laptops answer left to dismiss") }
+        } else { fail("jobs-answers: fixture missing") }
+        for name in ["answer-weather", "answer-nightly", "answer-laptops"] {
+            guard PreviewFixtures.showJobFixture(name, on: c) else { fail("\(name): fixture missing"); continue }
+            await settle(1.0)
+            guard let job = c.model.selectedJob else { fail("\(name): no job open"); continue }
+            check(job.answerTask != nil && job.decision == nil, "\(name): an answer, nothing to decide")
+            check(c.focusedTaskID == job.newest.id, "\(name): talking to the answer's job")
+            onScreen(name)
+            snap(name)
+        }
+        c.model.seenAnswers = savedSeen
+        c.model.slim = false
+        c.model.onOpenJob(nil)
+        for id in PreviewFixtures.jobQuestionTasks { c.model.answers[id] = nil }
     }
 
     // MARK: A finished design pops up for review, pages through, and dismisses
@@ -381,7 +610,11 @@ enum PanelSmoke {
         c.showPreview(state, workExpanded: false)
         await settle(1.2)
         check(c.model.pinnedReviews.count == 1 && c.model.pinnedReviews.first?.images.count == 3,
-              "design review: finished images pinned in the call panel without opening the task")
+              "design review: finished images wait for review without opening the task")
+        check(c.model.showsBoard && VoicePanelView.looseCards(c.model).count == 0 && c.model.jobs.first?.stage == .needsYou(.review),
+              "design review: a Needs-you tile on the board, nothing pinned under it")
+        if let job = c.model.jobs.first { c.model.onOpenJob(job.id) }
+        await settle(1.0)
         let win = c.panel.window; let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
         record("design review: panel \(Int(win.frame.height))pt tall, screen \(Int(visible.height))pt")
         check(visible.contains(win.frame), "design review: card stays on screen")
@@ -415,9 +648,10 @@ enum PanelSmoke {
             return TaskItem(id: "design_\(i)", info: info)
         }
         c.showPreview(many, workExpanded: false)
+        c.model.onOpenJob(nil)
         await settle(1.2)
         check(c.model.pinnedReviews.map(\.runID) == ["run_design_2", "run_design_3", "run_design_4"],
-              "design review: only the three most recent reviews are pinned")
+              "design review: only the three most recent reviews wait")
         record("design review x3: panel \(Int(win.frame.height))pt tall, inside=\(visible.contains(win.frame))")
         check(visible.contains(win.frame), "design review: three cards stay on screen")
         check(win.frame.height < visible.height - 40, "design review: three cards fit without running off the screen")
@@ -432,6 +666,266 @@ enum PanelSmoke {
         await settle(0.6)
         check(c.model.pinnedReviews.isEmpty, "design review: Dismiss hides the card")
         check(c.model.state.tasks.first?.info.images.count == 3, "design review: images stay in the task after Dismiss")
+    }
+
+    // MARK: A finished report that brought a picture along is an answer, not a review
+
+    static func incidentalPictures(_ c: NativeVoiceClient, dir: String) async {
+        let savedLoader = c.model.loadProductImage
+        c.model.loadProductImage = { _, n in PreviewFixtures.sampleDesign(variant: n) }
+        let savedSeen = c.model.seenAnswers
+        defer { c.model.loadProductImage = savedLoader; c.model.seenAnswers = savedSeen; c.model.onOpenJob(nil); c.model.cardOpen = [:] }
+        func snap(_ name: String) {
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/\(name).png")); record("snapshot \(dir)/\(name).png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
+        let win = c.panel.window
+        let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+
+        guard PreviewFixtures.showJobFixture("events-board", on: c) else { fail("events: fixture missing"); return }
+        await settle(1.0)
+        let s = c.model.boardSections
+        let job = c.model.jobs.first { $0.id == "job:wevents" }
+        check(c.model.pinnedReviews.contains { $0.taskID == "w_events" }, "events: the server's picture review is there")
+        check(job?.stage == .done && job?.answerTask?.id == "w_events",
+              "events: a finished report with an incidental picture is an answer, not Needs you (got \(String(describing: job?.stage)))")
+        check(!s.needsYou.contains { $0.id == "job:wevents" } && s.newAnswers.map(\.id) == ["job:wevents"],
+              "events: the job sits in New answers, nothing needs you (got \(s.needsYou.map(\.name)) / \(s.newAnswers.map(\.name)))")
+        check(c.model.unreadAnswers == 1 && c.model.orbState.showsAnswerDot(unread: c.model.unreadAnswers)
+              && !c.model.jobs.contains { $0.stage == .needsYou(.review) },
+              "events: blue dot for one new answer, no review waiting")
+        onScreenCheck(win, visible, "events board")
+        snap("events-board")
+
+        guard PreviewFixtures.showJobFixture("answer-events", on: c) else { fail("answer-events: fixture missing"); return }
+        await settle(1.2)
+        guard let open = c.model.selectedJob else { fail("answer-events: no job open"); return }
+        check(open.answerTask != nil && !open.stage.needsYou, "answer-events: the job view is an answer view")
+        let blocks = JobCards.answerBlocks(open, model: c.model)
+        check(blocks.firstIndex(of: .report).map { r in blocks.firstIndex(of: .pictures).map { r < $0 } ?? false } ?? false,
+              "answer-events: the report comes before the pictures (\(blocks))")
+        check(JobCards.items(open, model: c.model).allSatisfy { if case .review = $0.content { return false }; return true },
+              "answer-events: the picture isn't a review card at the top")
+        check(!c.model.isPicturesOpen(job: open.id, run: "run_w_events"), "answer-events: the picture row is folded by default")
+        // On screen: the report's sections are drawn above the folded picture row.
+        // On screen: the report is drawn above the folded picture row (SwiftUI layout, y grows down).
+        let report = LayoutProbe.frames["answer.report"], pictures = LayoutProbe.frames["answer.pictures"]
+        record("answer-events: report at y=\(report.map { Int($0.minY) } ?? -1)–\(report.map { Int($0.maxY) } ?? -1), picture row at y=\(pictures.map { Int($0.minY) } ?? -1), \(pictures.map { Int($0.height) } ?? -1)pt tall")
+        check(report != nil && pictures != nil && report!.maxY <= pictures!.minY + 1,
+              "answer-events: the report renders above the picture row on screen")
+        check((pictures?.height ?? 999) <= 40, "answer-events: the picture row is one folded line, not a big picture")
+        check(JobCards.items(open, model: c.model).isEmpty && !open.stage.needsYou,
+              "answer-events: no 'Waiting for you to look' line or review card (the headline leads)")
+        onScreenCheck(win, visible, "answer-events")
+        snap("answer-events")
+        c.model.togglePictures(job: open.id, run: "run_w_events")
+        await settle(1.0)
+        check(c.model.isPicturesOpen(job: open.id, run: "run_w_events") && (LayoutProbe.frames["answer.pictures"]?.height ?? 0) > 100,
+              "answer-events: unfolding the row shows the capped picture (\(Int(LayoutProbe.frames["answer.pictures"]?.height ?? -1))pt)")
+        onScreenCheck(win, visible, "answer-events open")
+        snap("answer-events-picture")
+
+        guard PreviewFixtures.showJobFixture("answer-matchup", on: c) else { fail("answer-matchup: fixture missing"); return }
+        await settle(1.2)
+        guard let matchJob = c.model.selectedJob else { fail("answer-matchup: no job open"); return }
+        check(matchJob.answerTask != nil && !matchJob.stage.needsYou, "answer-matchup: a drawn matchup with a screenshot is an answer")
+        let mblocks = JobCards.answerBlocks(matchJob, model: c.model)
+        check(mblocks.firstIndex(of: .pictures).map { p in mblocks.firstIndex(where: { $0 != .pictures }).map { $0 < p } ?? false } ?? false,
+              "answer-matchup: the picture comes after the answer (\(mblocks))")
+        onScreenCheck(win, visible, "answer-matchup")
+        snap("answer-matchup")
+    }
+
+    static func onScreenCheck(_ win: NSWindow, _ visible: NSRect, _ label: String) {
+        check(visible.contains(win.frame), "\(label): panel stays on screen")
+    }
+
+    // MARK: Declutter: cards live in their job, never piled under the board
+
+    /// The crowded call from real use: a review that needs you (one big picture) and a weather
+    /// answer with the whole forecast. The board shows only tiles; each card opens in its job.
+    static func declutter(_ c: NativeVoiceClient, dir: String) async {
+        let savedLoader = c.model.loadProductImage
+        c.model.loadProductImage = { _, n in PreviewFixtures.sampleDesign(variant: n + 1) }
+        defer { c.model.loadProductImage = savedLoader; c.model.onOpenJob(nil); c.model.cardOpen = [:] }
+        let savedSeen = c.model.seenAnswers
+        defer { c.model.seenAnswers = savedSeen }
+        func snap(_ name: String) {
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/\(name).png")); record("snapshot \(dir)/\(name).png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
+        let win = c.panel.window
+        let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+
+        // Board home: tiles only.
+        guard PreviewFixtures.showJobFixture("declutter-board", on: c) else { fail("declutter: fixture missing"); return }
+        await settle(1.0)
+        let s = c.model.boardSections
+        check(c.model.showsBoard, "declutter: the board is home")
+        check(s.needsYou.map(\.name) == ["Cool events this weekend"] && s.newAnswers.map(\.name) == ["Weekend weather forecast"],
+              "declutter: a review Needs you, the weather is a New answer (got \(s.needsYou.map(\.name)) / \(s.newAnswers.map(\.name)))")
+        check(c.model.hasTaskCards && VoicePanelView.looseCards(c.model).count == 0,
+              "declutter: no cards render under the board (review, weather, drafts all inside their jobs)")
+        let boardHeight = win.frame.height
+        record("declutter board: panel \(Int(win.frame.width))x\(Int(boardHeight))pt")
+        check(boardHeight < 420, "declutter: the board is short, not a long scroll of cards (\(Int(boardHeight))pt)")
+        check(win.frame.width <= Tokens.width + 1, "declutter: the panel keeps its narrow width")
+        snap("declutter-board")
+
+        // Scrolling never closes, folds or leaves anything.
+        for sv in scrollViews(c) {
+            await scroll(c, over: sv, dy: 400, times: 6)    // wheel up, far past the top
+            await scroll(c, over: sv, dy: -400, times: 6)
+        }
+        check(c.panelVisible && !c.model.showsSlim && c.model.showsBoard && c.model.selectedJobID == nil,
+              "declutter: scrolling the board up and down never closes or folds the panel")
+
+        // A card arriving while on the board updates its tile, and nothing opens.
+        var st = c.model.state
+        if let i = st.tasks.firstIndex(where: { $0.id == "d_wx" }) {
+            var more = st.tasks[i]
+            more.info.result?.views.append(ViewCard(kind: "list", number: 2, data: ["title": "What to bring", "items": [["text": "Sunscreen"]]]))
+            st.tasks[i] = more
+        }
+        c.model.state = st
+        await settle(0.6)
+        check(c.model.selectedJobID == nil && !c.model.workExpanded && VoicePanelView.looseCards(c.model).count == 0,
+              "declutter: a card arriving on the board doesn't open or pin anything")
+
+        // Weather answer: the full forecast, inside its view.
+        let wx = c.model.jobs.first { $0.id == "job:dwx" }
+        c.model.onOpenJob("job:dwx")
+        await settle(1.0)
+        let wxItems = wx.map { _ in c.model.selectedJob.map { JobCards.items($0, model: c.model) } ?? [] } ?? []
+        check(c.model.selectedJobID == "job:dwx" && wxItems.first?.key == "view:d_wx:1",
+              "declutter: the weather card opens in its answer view")
+        check(wxItems.count == 2 && c.model.isCardOpen(job: "job:dwx", key: wxItems[0].key, index: 0)
+              && !c.model.isCardOpen(job: "job:dwx", key: wxItems[1].key, index: 1),
+              "declutter: the card that arrived mid-view shows folded under the open one")
+        check(visible.contains(win.frame), "declutter weather: panel stays on screen")
+        // The real "‹ All jobs" control, clicked through the window.
+        // (Top-left of the job view, just under the header: 49pt in, 88pt down.)
+        let back = NSPoint(x: 49, y: win.frame.height - 88)
+        await click(win, at: back)
+        if c.model.selectedJobID != nil { record("declutter: first synthetic click absorbed (harness limit); clicking again"); await click(win, at: back) }
+        check(c.model.selectedJobID == nil && !c.model.workExpanded, "declutter: clicking ‹ All jobs returns to the board")
+        c.model.state = PreviewFixtures.jobState("declutter-weather")!.0
+        c.model.onOpenJob("job:dwx")
+        await settle(1.0)
+        snap("declutter-weather")
+
+        // Events job: the review inside the job, picture capped.
+        guard PreviewFixtures.showJobFixture("declutter-events", on: c) else { fail("declutter-events: fixture missing"); return }
+        await settle(1.4)
+        let ev = c.model.selectedJob.map { JobCards.items($0, model: c.model) } ?? []
+        check(ev.count == 1 && ev.first?.key == "review:run_d_events", "declutter: the review shows inside its job's view")
+        check(JobCardStack.imageCap <= 180, "declutter: pictures in a job view are capped (\(Int(JobCardStack.imageCap))pt, click for full size)")
+        check(win.frame.height < visible.height - 40, "declutter events: the job view fits on screen (\(Int(win.frame.height))pt)")
+        // A decision key still reaches the review job; Esc goes back.
+        c.model.state.tasks.append(TaskItem(json: ["task_id": "d_other", "run_id": "run_d_other", "status": "completed", "title": "Other",
+                                                   "job": ["id": "dother", "name": "Other"],
+                                                   "result": ["spoken": "x", "views": [["kind": "fact", "title": "Other", "value": "1"]]]])!)
+        await settle(0.5)
+        check(c.model.selectedJobID == "job:devents", "declutter: a card arriving for another job never takes over the open view")
+        snap("declutter-events")
+        for sv in scrollViews(c) {
+            await scroll(c, over: sv, dy: 400, times: 6)
+            await scroll(c, over: sv, dy: -400, times: 6)
+        }
+        check(c.panelVisible && c.model.selectedJobID == "job:devents", "declutter: scrolling a job view never closes it or the panel")
+        if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: win.windowNumber,
+                                    context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 53) {
+            win.sendEvent(e)
+        }
+        await settle(0.6)
+        check(c.model.selectedJobID == nil && c.model.showsBoard, "declutter: Esc goes back to the board")
+
+        // Three cards: the most relevant open, two one-line rows; rows toggle.
+        guard PreviewFixtures.showJobFixture("declutter-three", on: c) else { fail("declutter-three: fixture missing"); return }
+        c.model.cardOpen = [:]
+        await settle(1.2)
+        let three = c.model.selectedJob.map { JobCards.items($0, model: c.model) } ?? []
+        let job = "job:dplan"
+        let opened = three.enumerated().map { c.model.isCardOpen(job: job, key: $0.element.key, index: $0.offset) }
+        check(three.count == 3 && opened == [true, false, false], "declutter: 3 cards → 1 open, 2 folded (got \(opened))")
+        check(win.frame.height < visible.height - 40, "declutter three: the job view fits on screen (\(Int(win.frame.height))pt)")
+        snap("declutter-three")
+        let foldedHeight = win.frame.height
+        if three.count == 3 {
+            // Click the second card's row (a real click on its header).
+            // The second row sits 374pt down in this fixture (see declutter-three.png).
+            let row = NSPoint(x: 160, y: win.frame.height - 374)
+            await click(win, at: row)
+            if !c.model.isCardOpen(job: job, key: three[1].key, index: 1) { await click(win, at: row) }
+            if !c.model.isCardOpen(job: job, key: three[1].key, index: 1) {
+                record("declutter: synthetic row click didn't land; toggling through the model")
+                c.model.toggleCard(job: job, key: three[1].key, index: 1)
+            }
+            await settle(0.6)
+            check(c.model.isCardOpen(job: job, key: three[1].key, index: 1), "declutter: clicking a folded row opens its card")
+            check(win.frame.height > foldedHeight + 30, "declutter: the opened card really draws (\(Int(foldedHeight)) -> \(Int(win.frame.height))pt)")
+            c.model.toggleCard(job: job, key: three[0].key, index: 0)
+            await settle(0.6)
+            check(!c.model.isCardOpen(job: job, key: three[0].key, index: 0), "declutter: clicking an open card's row folds it")
+            snap("declutter-three-toggled")
+        }
+
+        // Taller than the panel: every card open. The panel caps at the screen and the job view
+        // scrolls inside it, all the way to the last line, by wheel and by keys.
+        for (i, item) in three.enumerated() where !c.model.isCardOpen(job: job, key: item.key, index: i) {
+            c.model.toggleCard(job: job, key: item.key, index: i)
+        }
+        await settle(1.0)
+        check(visible.contains(win.frame), "tall job: the panel is capped on screen (\(Int(win.frame.height))pt of \(Int(visible.height))pt)")
+        guard let sv = (c.panel.window as? VoicePanel)?.mainScrollView() else { fail("tall job: nothing scrolls"); return }
+        let doc = sv.documentView?.frame.height ?? 0
+        record("tall job: viewport \(Int(sv.contentView.bounds.height))pt, content \(Int(doc))pt")
+        check(doc > sv.contentView.bounds.height + 40, "tall job: content is taller than the viewport")
+        // Wheel over the cards themselves (not an empty gap) until the end.
+        let over = NSPoint(x: sv.bounds.midX, y: sv.bounds.midY)
+        record("tall job: wheel over \(String(describing: sv.hitTest(sv.convert(over, to: sv.superview)).map { type(of: $0) }))")
+        await scroll(c, over: sv, dy: -400, times: 12)
+        let end = sv.contentView.bounds
+        let lastVisible = end.maxY >= doc - 2
+        record("tall job: after wheel down clip \(Int(end.minY))–\(Int(end.maxY)) of \(Int(doc))")
+        check(lastVisible, "tall job: the wheel scrolls to the very end; the last line is in view")
+        await scroll(c, over: sv, dy: 400, times: 12)
+        check(sv.contentView.bounds.minY < 1, "tall job: the wheel scrolls back to the top")
+        func key(_ code: UInt16, _ chars: String = "", shift: Bool = false) {
+            if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: shift ? [.shift] : [], timestamp: 0,
+                                        windowNumber: win.windowNumber, context: nil, characters: chars,
+                                        charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code) { win.sendEvent(e) }
+        }
+        key(121); await settle(0.3)
+        let paged = sv.contentView.bounds.minY
+        check(paged > 40, "tall job: Page Down scrolls the job view (\(Int(paged))pt)")
+        key(49, " "); await settle(0.3)
+        check(sv.contentView.bounds.minY > paged + 1 || sv.contentView.bounds.maxY >= doc - 2, "tall job: Space pages further")
+        key(119); await settle(0.3)
+        check(sv.contentView.bounds.maxY >= doc - 2, "tall job: End reaches the last line")
+        key(116); key(115); await settle(0.3)
+        check(sv.contentView.bounds.minY < 1, "tall job: Page Up / Home go back to the top")
+        snap("declutter-tall-bottom-check")
+
+        // A board taller than the panel: ↓ moves the focus and scrolls the focused tile into view.
+        guard PreviewFixtures.showJobFixture("declutter-many", on: c) else { fail("declutter-many: fixture missing"); return }
+        await settle(1.2)
+        check(visible.contains(win.frame), "tall board: the panel is capped on screen (\(Int(win.frame.height))pt)")
+        guard let bsv = (c.panel.window as? VoicePanel)?.mainScrollView() else { fail("tall board: the board doesn't scroll"); return }
+        let all = c.model.boardSections.all
+        record("tall board: \(all.count) tiles, viewport \(Int(bsv.contentView.bounds.height))pt, content \(Int(bsv.documentView?.frame.height ?? 0))pt")
+        snap("declutter-many-top")
+        for _ in 0..<all.count { key(125); await settle(0.15) }
+        await settle(0.5)
+        check(c.model.boardFocusID == all.last?.id, "tall board: ↓ reaches the last tile")
+        let bdoc = bsv.documentView?.frame.height ?? 0
+        check(bsv.contentView.bounds.maxY >= bdoc - 40, "tall board: the focused last tile scrolled into view (clip ends \(Int(bsv.contentView.bounds.maxY)) of \(Int(bdoc)))")
+        snap("declutter-many-bottom")
+        for _ in 0..<all.count { key(126); await settle(0.1) }
+        await settle(0.5)
+        check(bsv.contentView.bounds.minY < 1, "tall board: ↑ back to the first tile scrolls back to the top")
+        await scroll(c, over: bsv, dy: -400, times: 10)
+        check(bsv.contentView.bounds.maxY >= bdoc - 2, "tall board: the wheel scrolls the board to the end")
     }
 
     // MARK: A running task shows what it's looking at (list thumbnail + detail)
@@ -526,6 +1020,74 @@ enum PanelSmoke {
         do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/orb-loud.png")); record("snapshot \(dir)/orb-loud.png") }
         catch { fail("snapshot failed: \(error)") }
         c.model.orbLevel = 0
+    }
+
+    // MARK: Listening mode (during a call): the ear button, the strip in each state, and notes
+
+    static func roomListening(_ c: NativeVoiceClient, dir: String) async {
+        guard let (live, _) = PreviewFixtures.state("listening"), let (paused, _) = PreviewFixtures.state("paused") else {
+            fail("listening mode: fixtures missing"); return
+        }
+        func snap(_ name: String) {
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/\(name).png")); record("snapshot \(dir)/\(name).png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
+        // No call: no ear button (listening mode exists only during a call).
+        c.showPreview(VoiceState(), workExpanded: false)
+        c.model.roomOffered = true
+        await settle()
+        snap("room-idle-no-button")
+        // A live call: the ear button sits with the call's controls.
+        c.showPreview(live, workExpanded: false)
+        await settle()
+        snap("room-offered-in-call")
+        // Turned on: the call is paused and the strip shows what listening mode is doing.
+        c.showPreview(paused, workExpanded: false)
+        await settle()
+        let pausedHeight = c.panel.window.frame.height
+        let now = Date()
+        let since = now.addingTimeInterval(-12 * 60 - 4)
+        let states: [(String, RoomListeningState, Set<RoomWarning>, String?)] = [
+            ("room-preparing", .preparing(.downloadingModel(fraction: 0.4)), [], nil),
+            ("room-listening", .listening(since: since), [], nil),
+            ("room-warnings", .listening(since: since), [.bluetoothInput, .speechRecognitionDenied], nil),
+            ("room-not-hearing", .notHearing(since: since), [], nil),
+            ("room-failed", .failed(.transcriberStopped), [], nil),
+        ]
+        for (name, state, warnings, notice) in states {
+            c.model.room = presentRoom(state, now: now, heardWords: true, warnings: warnings)
+            c.model.roomNotice = notice
+            c.surface.setNeedsResize()
+            await settle()
+            if state.isOn { check(c.panel.window.frame.height > pausedHeight, "\(name): the listening strip adds height") }
+            snap(name)
+        }
+        // The call didn't come back after listening was turned off: what was heard is kept to ask about.
+        c.showPreview(VoiceState(), workExpanded: false)
+        c.model.room = RoomPresentation(title: "Listening mode kept what it heard", detail: "The call didn't come back",
+                                        hint: "Ask about it (starts a call) or discard it · kept for 30 minutes",
+                                        tone: .warning, isOn: false)
+        c.model.roomCanAsk = true
+        c.model.roomNotice = nil
+        c.surface.setNeedsResize()
+        await settle()
+        snap("room-held")
+        c.model.roomCanAsk = false
+        // The call ended while listening: a note says it stopped.
+        c.model.room = nil
+        c.model.roomNotice = "The call ended, so listening mode stopped · what it heard was discarded"
+        c.surface.setNeedsResize()
+        await settle()
+        snap("room-notice")
+        // Back in the live call the strip is gone.
+        c.model.room = presentRoom(.listening(since: since), now: now, heardWords: true)
+        c.model.roomNotice = nil
+        c.showPreview(live, workExpanded: false)
+        await settle()
+        snap("room-hidden-in-call")
+        c.model.room = nil
+        c.model.roomOffered = false
+        c.surface.setNeedsResize()
     }
 
     // MARK: Slim mode shrinks a busy panel to the controls, and comes back

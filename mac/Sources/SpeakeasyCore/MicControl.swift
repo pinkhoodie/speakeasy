@@ -33,6 +33,9 @@ public struct KeyShortcut: Equatable, Sendable {
     /// Default screen-sharing on/off shortcut: Control–Option–S. Like Mute, registered only while
     /// a call that can share its screen is open (and not paused).
     public static let defaultScreen = KeyShortcut(keyCode: 0x01, modifiers: control | option, keyName: "S")
+    /// Suggested listening mode shortcut: Control–Option–L. Off until the user sets one (Settings ›
+    /// Shortcuts); Delete in the recorder picks this.
+    public static let suggestedListening = KeyShortcut(keyCode: 0x25, modifiers: control | option, keyName: "L")
 
     /// ANSI virtual key codes (kVK_ANSI_*), cross-checked against Carbon in tests.
     public static let keyCodes: [String: UInt32] = [

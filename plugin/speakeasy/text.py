@@ -66,26 +66,76 @@ HEADS_UP_RE = re.compile(
     r"may (?:have )?(?:changed|broken)|instead)\b")
 
 
+# A sentence that leans on one before it ("Its one repeat error...", "That ended...") makes no sense
+# read alone, so the spoken summary never lifts it out of its paragraph.
+LEANS_BACK_RE = re.compile(
+    r"(?i)^(?:it|its|it's|this|that|these|those|they|their|them|he|his|she|her|also|but|and|so|then|which|"
+    r"if|or|otherwise|here|there's|both|either|neither|the other|another|same)\b")
+# Soft heads-up words ("instead", "note that") only count in the opening paragraph; further down they
+# are usually side notes, not warnings.
+STRONG_HEADS_UP_RE = re.compile(
+    r"(?i)\b(?:broke|broken|failed|failing|couldn't|could not|unable|didn't work|not working|"
+    r"stopped working|expired|heads up|warning|needs? your|waiting (?:for|on) you|approve|confirm)\b")
+
+
+def _sentences(full: str) -> list[tuple[int, str]]:
+    """Plain sentences with the paragraph each sits in. Bullets and markdown read as plain sentences;
+    a blank line or a heading starts a new paragraph."""
+    text = re.sub(r"https?://\S*[^\s.,;:!?)]|[`*_>]+", "", full)
+    out, para, gap = [], 0, False
+    for raw in text.splitlines():
+        line = re.sub(r"^\s*(?:[-•]|\d+[.)])\s+", "", raw).strip()
+        if not line or line.startswith("#") or line.endswith(":"):
+            gap = True
+            line = line.lstrip("#").strip() if line.startswith("#") else ""
+            if not line:
+                continue
+        if gap and out:
+            para += 1
+        gap = False
+        for x in re.split(r"(?<=[.!?])\s+", line):
+            x = x.strip()
+            if x:
+                out.append((para, x if re.search(r"[.!?]$", x) else x + "."))
+    return out
+
+
 def spoken_from(full: str, limit: int = 3) -> str:
     """What to say aloud when the task gave no SPOKEN line: the opening sentence, then the first
-    sentences that carry a problem or a heads-up, so a warning is never cut off. Bullets and
-    markdown read as separate plain sentences."""
-    text = re.sub(r"https?://\S*[^\s.,;:!?)]|[`*_#>]+", "", full)
-    lines = [re.sub(r"^\s*(?:[-•]|\d+[.)])\s+", "", l).strip() for l in text.splitlines()]
-    sentences = []
-    for line in lines:
-        if line:
-            sentences += [x.strip() for x in re.split(r"(?<=[.!?])\s+", line) if x.strip()]
-    sentences = [x if re.search(r"[.!?]$", x) else x + "." for x in sentences]
+    sentences that carry a problem or a heads-up, so a warning is never cut off. A heads-up further
+    down is only picked when it stands on its own, and no sentence is said twice."""
+    sentences = _sentences(full)
     if not sentences:
         return ""
-    picked = [0]
-    flagged = [i for i, x in enumerate(sentences[1:], 1) if HEADS_UP_RE.search(x)]
-    picked += flagged[: limit - 1]
-    if len(picked) == 1 and len(sentences) > 1:
+    picked, seen = [0], {sentences[0][1].lower()}
+    for i, (para, x) in enumerate(sentences[1:], 1):
+        if len(picked) >= limit:
+            break
+        if x.lower() in seen:
+            continue
+        lead = para == 0
+        if (HEADS_UP_RE.search(x) if lead else STRONG_HEADS_UP_RE.search(x) and not LEANS_BACK_RE.match(x)):
+            picked.append(i)
+            seen.add(x.lower())
+    if len(picked) == 1 and len(sentences) > 1 and sentences[1][1].lower() not in seen:
         picked.append(1)
-    out = " ".join(sentences[i] for i in sorted(picked))
+    out = " ".join(sentences[i][1] for i in sorted(picked))
     return re.sub(r"\s+([.,;:!?])", r"\1", re.sub(r"\s+", " ", out)).strip()
+
+
+def said_once(text: str) -> str:
+    """The reply once, when it arrived as the same text twice in a row (a conversation turn's final
+    message has come back with its body repeated); anything else is returned unchanged."""
+    body = text.strip()
+    if len(body) < 80:
+        return text
+    head = body[:60]
+    at = body.find(head, 1)
+    while at != -1:
+        if body[:at].strip() == body[at:].strip():
+            return body[:at].strip()
+        at = body.find(head, at + 1)
+    return text
 
 
 def safe_user_text(value: Any, limit: int = 500) -> str | None:
@@ -263,6 +313,46 @@ def safe_full_text(value: Any) -> str | None:
         lines.append("[redacted]" if SENSITIVE_TEXT_RE.search(line) else line)
     text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
     return text[:MAX_RESULT_FULL] or None
+
+
+# Listening mode: what the Mac transcribed in the room before a call, as "[HH:MM] text" lines.
+MAX_ROOM_CHARS = 24_000  # Unicode code points, as sent (about 6,000 tokens)
+ROOM_STAMP_RE = re.compile(r"^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*")
+# A secret said out loud has no "password:" syntax: "the password is hunter2", "my PIN's 4412".
+SPOKEN_SECRET_RE = re.compile(
+    r"(?i)\b(?:pass(?:word|code|phrase)|pin(?:\s+(?:code|number))?|api\s+key|secret\s+key|"
+    r"access\s+(?:code|key|token)|security\s+code|token|cvv|cvc|(?:card|account|routing|social\s+security)\s+number|ssn)"
+    r"(?:\s*['’]s\b|\s*[:,=]|\s+(?:is|was|will\s+be|should\s+be)\b)"
+    # "use password hunter2", "enter the pin 4321"
+    r"|(?i:\b(?:use|try|enter|type)\s+(?:the\s+|my\s+|our\s+)?(?:pass(?:word|code)|pin)\s+\S)")
+# Numbers that are secrets on their own, said out loud: a card-length run of digits ("4111 1111 1111
+# 1111"; phone numbers, dates and [HH:MM] stamps are too short), a US social security number, and a
+# card's security code.
+SPOKEN_NUMBER_SECRET_RE = re.compile(
+    r"(?<![\d:])(?:\d[ -]?){12,18}\d(?![\d:])"
+    r"|\b\d{3}-\d{2}-\d{4}\b"
+    r"|(?i:\b(?:cvv|cvc|security\s+code)\W{0,3}\d{3,4}\b)")
+
+
+def safe_room_text(value: str) -> str:
+    """Listening mode's room transcript, made safe to hand to the voice and Hermes.
+
+    Like ``safe_full_text``: control characters go, and a line that looks like it holds a secret
+    (a key, "password: …", a password, PIN or card number said out loud, a card-length number or a
+    social security number) becomes "[redacted]"
+    behind its time stamp. A long opaque token anywhere in a line is redacted on its own. Never
+    shortened here: MAX_RESULT_FULL would cut a full room transcript to a third; the caller checks
+    MAX_ROOM_CHARS instead."""
+    lines = []
+    for line in value.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", line).rstrip()
+        if SENSITIVE_TEXT_RE.search(line) or SPOKEN_SECRET_RE.search(line) or SPOKEN_NUMBER_SECRET_RE.search(line):
+            stamp = ROOM_STAMP_RE.match(line)
+            line = (stamp.group(0) if stamp else "") + "[redacted]"
+        else:
+            line = OPAQUE_RE.sub("[redacted]", line)
+        lines.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
 def valid_done_label(value: Any) -> str | None:
@@ -487,6 +577,36 @@ def delivery_text(result: dict[str, Any] | None) -> str:
     return "\n\n".join([text, *(f"MEDIA:{tag}" for tag in missing)]).strip() if missing else text
 
 
+_MD_LINK_RE = re.compile(r"\[([^\]\n]{1,120})\]\((https://[^\s)]{4,500})\)")
+_BARE_URL_RE = re.compile(r"(?<![\w(\[/])(https://[^\s<>()\[\]\"']{4,500})")
+MAX_LINKS = 6
+
+
+def links_in(text: str) -> list[dict[str, str]]:
+    """The https links an answer gives (markdown [name](url) or bare), in order, deduped, for the app's
+    tappable "Links" row. Only links the agent wrote; nothing is looked up or guessed."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(title: str, url: str) -> None:
+        url = url.rstrip(".,;:!?")
+        if url in seen or len(out) >= MAX_LINKS:
+            return
+        seen.add(url)
+        host = re.sub(r"^www\.", "", url.split("/")[2]) if url.count("/") >= 2 else url
+        out.append({"title": " ".join(title.split())[:80] or host, "url": url, "host": host})
+
+    spans = []
+    for m in _MD_LINK_RE.finditer(text):
+        spans.append((m.start(), m.group(1), m.group(2)))
+    stripped = _MD_LINK_RE.sub(" ", text)
+    for m in _BARE_URL_RE.finditer(stripped):
+        spans.append((len(text) + m.start(), "", m.group(1)))
+    for _, title, url in sorted(spans):
+        add(title, url)
+    return out
+
+
 def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: str = "Done. The details are in the app.") -> dict[str, Any] | None:
     """Split a final answer into the spoken register and the full display register.
 
@@ -496,6 +616,7 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
 
     if not isinstance(output, str) or not output.strip():
         return None
+    output = said_once(output)
     label = None
     done = list(re.finditer(r"(?im)^[ \t]*DONE:[ \t]*(.+?)[ \t]*$", output))
     if done:
@@ -511,26 +632,28 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
     output, cards = product_cards(output)
     from .views import extract as extract_views
     output, views = extract_views(output)
-    from .views import extract_question, spoken_question
+    from .views import extract_question, number_view_images, option_text, spoken_question, view_images
     output, question = extract_question(output)
     option_images = question.pop("_option_images", []) if question else []
-    for raw in option_images:
+    for raw in option_images + view_images(views):
         if raw and raw not in output:
-            output += f"\nMEDIA:{raw}"   # one picture per option, through the same vetting as any result image
+            output += f"\nMEDIA:{raw}"   # pictures on cards go through the same vetting as any result image
     output, images, media_tags = media_images(output, image_roots)
     cards = (cards + images)[:MAX_CARDS]
-    if question and any(option_images):
-        def number(raw: str) -> int:
-            if not raw:
-                return 0
-            want = raw if raw.startswith("https://") else str(Path(raw).expanduser().resolve())
-            for i, card in enumerate(cards):
-                if card.get("image_url") == want or card.get("path") == want:
-                    return i + 1
+
+    def number(raw: str) -> int:
+        if not raw:
             return 0
+        want = raw if raw.startswith("https://") else str(Path(raw).expanduser().resolve())
+        for i, card in enumerate(cards):
+            if card.get("image_url") == want or card.get("path") == want:
+                return i + 1
+        return 0
+    number_view_images(views, number)   # card numbers, fetched by the app from /voice/card-image
+    if question and any(option_images):
         numbers = [number(r) for r in option_images]
         if any(numbers):
-            question["images"] = numbers   # card numbers, fetched by the app from /voice/card-image
+            question["images"] = numbers
     full = safe_full_text(output)
     spoken = safe_user_text(spoken_raw, 500) if spoken_raw else None
     if not spoken and full:
@@ -550,7 +673,7 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
         views = [question] + [v for v in views if v.get("kind") != "question"]
     if question:
         # The written answer (chat, task details) keeps the question so it can be answered there too.
-        listed = "\n".join(f"{i + 1}. {o}" + (" (recommended)" if question.get("recommended") == i else "")
+        listed = "\n".join(f"{i + 1}. {option_text(o)}" + (" (recommended)" if question.get("recommended") == i else "")
                            for i, o in enumerate(question["options"]))
         full = ((full or "") + f"\n\n**{question['question']}**\n{listed}").strip()
     result: dict[str, Any] = {"spoken": spoken, "full": full or spoken}
@@ -560,6 +683,9 @@ def split_result(output: Any, image_roots: tuple[Path, ...], fallback_spoken: st
         result["cards"] = cards
     if views:
         result["views"] = views
+    found_links = links_in(full or "")
+    if found_links:
+        result["links"] = found_links
     if media_tags:
         result["_media"] = media_tags[:MAX_CARDS]
     if drafts:

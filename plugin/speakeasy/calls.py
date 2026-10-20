@@ -23,7 +23,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
-from . import channels, continuity, failures, router
+from . import channels, continuity, failures, router, threads
 from . import home_control as home_control_mod
 from . import instant as instant_mod
 from . import jev as jev_mod
@@ -50,13 +50,18 @@ GREETING_RE = re.compile(
 SETTLE_S = 1.5         # wait this long after a handoff for the user to keep going
 SETTLE_MAX_S = 6.0     # and never longer than this in total
 ABSORB_WINDOW_S = 15.0 # a handoff of words already folded into an earlier task is dropped
+ECHO_WINDOW_S = 8.0    # a second handoff this soon that only repeats the last request's words is dropped
 
 
 def _same_words(fragment: str, request: str) -> bool:
     """The transcript of words already in the request (it often lands just after the handoff)."""
-    norm = lambda t: " ".join(re.findall(r"[a-z0-9']+", t.lower()))  # noqa: E731
-    f = norm(fragment)
-    return not f or f in norm(request)
+    f = _words(fragment)
+    return not f or f in _words(request)
+
+
+def _words(text: str) -> str:
+    """Just the words, lowercased: to tell whether the same thing was said again."""
+    return " ".join(re.findall(r"[a-z0-9']+", (text or "").lower()))
 
 
 def is_greeting(request: str) -> bool:
@@ -79,8 +84,8 @@ def whole_request(context: str) -> str:
             break
     if not picked:
         return ""
-    if len(picked[0].split()) > 4:
-        return picked[0]
+    if len(picked[0].split()) > 4 or router.is_status_question(picked[0]):
+        return picked[0]  # "how's that coming along" is its own question, never the end of the last ask
     return " ".join(reversed(picked)).strip()
 
 TASK_SESSION_PREFIX = "speakeasy_task_"
@@ -135,6 +140,8 @@ class Runtime:
     # The spoken request as clean written text (None = the title model; returns None when unavailable).
     polish_call: Callable[[str], str | None] | None = None
     status_call: Callable[[str], str | None] | None = None
+    plan_call: Callable[[str], list[str] | None] | None = None
+    shape_call: Callable[[str, str], dict[str, Any] | None] | None = None
     progress_call: Callable[..., str | None] | None = None
     # Instant home control (home_control.HomeControl); None or turned off = every request goes to Hermes.
     home: Any = None
@@ -178,7 +185,7 @@ class Runtime:
 
     def route(self, request: str, tasks: list[router.OpenTask], marked: Any,
               chats: list[router.Chat] | None = None, call_so_far: str = "",
-              replied_task_id: str | None = None) -> router.Decision:
+              replied_task_id: str | None = None, focus: router.Focus | None = None) -> router.Decision:
         settings = self.routable()
         topics = ([router.Topic(c.label, c.topic) for c in channels.opted_in(settings)]
                   if channels.mode(settings) == "topic" else [])
@@ -188,7 +195,7 @@ class Runtime:
             from . import jev
             place = functools.partial(jev.placement, self.hermes_home, provider)
         return router.decide(request, tasks, marked, topics, self.route_call, chats=chats, call_so_far=call_so_far,
-                             replied_task_id=replied_task_id, jev_place=place)
+                             replied_task_id=replied_task_id, jev_place=place, focus=focus)
 
     def explicit_channel(self, request: str) -> channels.Choice | None:
         return channels.explicit(request, self.routable(), P.clarify_channel)
@@ -266,6 +273,10 @@ class BackendRun:
 class Interaction:
     interaction_id: str
     live_session_id: str
+    talking_only: bool = False  # "just talk to me": hold work until they ask for some
+    # Vision Pro: the task the user is facing or holding, and what part of it ("day two of the draft").
+    focus_task_id: str | None = None
+    focus_detail: str = ""
     status: str = "connecting"
     revision: int = 0
     finalization: str = "open"
@@ -280,6 +291,12 @@ class Interaction:
     history: list[dict[str, str]] = dataclasses.field(default_factory=list)
     resumed_from: str | None = None
     device_id: str = ""
+    # Listening mode: what the Mac heard in the room before this call (cleaned "[HH:MM] text" lines).
+    # Memory only, never in history, logs or reprs; it moves to a resumed call and is cleared when
+    # the call ends (or a pause runs out). Empty = an ordinary call.
+    room: str = dataclasses.field(default="", repr=False)
+    # Listening mode: the voice already responded from the room on this call (any leg of it).
+    room_nudged: bool = False
     last_activity: float = dataclasses.field(default_factory=time.monotonic)
     successor: "Interaction | None" = dataclasses.field(default=None, repr=False)
     worker: Any = dataclasses.field(default=None, repr=False)
@@ -568,6 +585,10 @@ class Notices:
 # -- the sideband worker ------------------------------------------------------------------------
 
 class SidebandWorker:
+    # Codex's voice protocol delivers every appended note as something to say, so a "don't say
+    # this" note still gets a spoken reply: "Mm-hmm." Quiet notes are held and ride along with the
+    # next message the voice is meant to answer.
+    HOLD_QUIET_NOTES = False
     """Base worker. Subclasses read provider events in ``run()`` and write in ``_send()``."""
 
     def __init__(self, rt: Runtime, interaction: Interaction):
@@ -575,11 +596,16 @@ class SidebandWorker:
         self.notices = rt.notices
         self.fragments: deque[dict[str, Any]] = deque(maxlen=512)
         self.absorbed: list[tuple[str, float]] = []  # words folded into an earlier task by settle()
+        self.recent_requests: list[tuple[str, float]] = []  # requests started this call, for echo checks
+        self.recent_answers: dict[tuple[str, str], tuple[str, float]] = {}  # tapped answers, for double sends
         self.handoff_at: dict[str, float] = {}   # delegation id -> when the handoff arrived (monotonic)
+        self.quiet_notes: dict[str, str] = {}    # held background notes, newest per kind
         self.show_pending: set[str] = set()      # task keys asked for a screenshot by "show me"
         # Home control: the question just asked (original request, question, when) and answers given
         # on this call, so "the thermostat" means the den until hang-up once they've said so.
         self.home_question: tuple[str, str, float] | None = None
+        # Tasks whose question the user set aside on this call (never asked again).
+        self.set_aside_tasks: set[str] = set()
         self.home_notes: list[str] = []
         self.home_tasks: set[str] = set()        # task ids that were instant home commands
         self.replied_task: str | None = None     # the task the voice last spoke an answer from
@@ -610,6 +636,16 @@ class SidebandWorker:
         self.dispatch_tasks: set[asyncio.Task[Any]] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.connected = False
+        # When this call's voice session came up (monotonic): the worker is made right after the
+        # provider admitted the session, and the provider's worker updates it once its channel attaches.
+        self.connected_at = time.monotonic()
+        # Listening mode (a call with room text): room questions the voice was told to answer itself
+        # (normalized words), so the same question handed off again goes on to Hermes; and the room
+        # text each handoff was made with, so work asked for just before hang-up still gets it after
+        # the call drops the room (removed when that handoff's work ends). Whether the voice already
+        # responded from the room lives on the Interaction, so a resumed call never does it twice.
+        self.room_answered: set[str] = set()
+        self.handoff_rooms: dict[str, str] = {}
         interaction.worker = self
 
     # -- plumbing -------------------------------------------------------------------------
@@ -627,12 +663,17 @@ class SidebandWorker:
         titler = self.rt.title_call or router.smart_title
         polisher = self.rt.polish_call or router.polish_request
         statuser = self.rt.status_call or router.working_status
+        planner = self.rt.plan_call or router.plan_steps
 
         async def upgrade() -> None:
-            title, polished, status = await asyncio.gather(asyncio.to_thread(titler, request),
-                                                           asyncio.to_thread(polisher, request),
-                                                           asyncio.to_thread(statuser, request))
+            title, polished, status, plan = await asyncio.gather(asyncio.to_thread(titler, request),
+                                                                 asyncio.to_thread(polisher, request),
+                                                                 asyncio.to_thread(statuser, request),
+                                                                 asyncio.to_thread(planner, request))
             changed = False
+            if plan:
+                self.store.set_plan(idem, plan)
+                changed = True
             if status:
                 handed = polished or request
                 changed = self.store.handoff_status(
@@ -644,6 +685,48 @@ class SidebandWorker:
                 self.store.set_title(idem, None, summary=polished)
                 changed = True
             if changed:
+                self.publish()
+
+        task = asyncio.get_running_loop().create_task(upgrade())
+        self.dispatch_tasks.add(task)
+        task.add_done_callback(self.dispatch_tasks.discard)
+
+    def shape_result(self, idem: str, report: str) -> None:
+        """Sort a long finished report into its parts (checks, shipped, open, sections) in the background,
+        so apps can lay it out; the answer itself is already delivered and never waits on this."""
+        shaper = self.rt.shape_call or router.result_shape
+        request = self.store.request_text(idem) or ""
+
+        async def run() -> None:
+            shape = await asyncio.to_thread(shaper, request, report)
+            if not shape:
+                return
+            visual = shape.pop("_visual", None)
+            changed = self.store.add_shape(idem, shape) if any(
+                shape.get(k) for k in ("checks", "shipped", "open", "sections")) else False
+            # A picture of the answer's data for agents that didn't draw one (thread tasks never can).
+            if visual and self.store.add_view(idem, visual):
+                changed = True
+            if changed:
+                self.publish()
+
+        task = asyncio.get_running_loop().create_task(run())
+        self.dispatch_tasks.add(task)
+        task.add_done_callback(self.dispatch_tasks.discard)
+
+    def retitle(self, idem: str, request: str | None, earlier: str | None = None) -> None:
+        """Rename a task for what it has become: the titler sees the first ask and the newest one,
+        and its name replaces the current one unless something else renamed it meanwhile."""
+        current = self.store.title(idem)
+        if not request:
+            return
+        titler = self.rt.title_call or router.smart_title
+        prompt = f"{earlier}\nThen: {request}" if earlier and earlier.strip() != request.strip() else request
+
+        async def upgrade() -> None:
+            title = await asyncio.to_thread(titler, prompt)
+            if title and title != current and self.store.title(idem) == current:
+                self.store.set_title(idem, title)
                 self.publish()
 
         task = asyncio.get_running_loop().create_task(upgrade())
@@ -691,7 +774,8 @@ class SidebandWorker:
     def call_closed(self) -> None:
         """Once per call: persist the end time, keep recent turns, notify about work in flight.
 
-        A paused call keeps its transcript for Resume and defers the "Still working" notices.
+        A paused call keeps its transcript (and listening mode's room text) for Resume and defers the
+        "Still working" notices. An ended call drops its room text: it never outlives the call.
         """
         with self.interaction.lock:
             if self.interaction.call_closed:
@@ -700,6 +784,8 @@ class SidebandWorker:
             self.interaction.history = (self.interaction.history + self.turns())[-400:]
             paused = self.interaction.paused
             history = list(self.interaction.history)
+            if not paused:
+                self.interaction.room = ""
         try:
             if history:
                 self.store.set_meta("recent_voice", json.dumps(history[-30:]))
@@ -788,6 +874,9 @@ class SidebandWorker:
         with self.interaction.lock:
             self.interaction.revision += 1
             revision = self.interaction.revision
+            if self.interaction.room:
+                # Asked during a room call: the work gets the room even if the call ends first.
+                self.handoff_rooms[delegation_id] = self.interaction.room
         task = asyncio.get_running_loop().create_task(self.dispatch(delegation_id, revision, context, marked))
         self.dispatch_tasks.add(task)
         task.add_done_callback(self.dispatch_tasks.discard)
@@ -814,6 +903,24 @@ class SidebandWorker:
             text = f"Earlier in this call, before it was paused:\n{before}\n\nAfter resuming:\n{text}"
         return text[-MAX_TRANSCRIPT:]
 
+    async def quiet(self, key: str, delegation_id: str | None, content: str) -> None:
+        """Background the voice should know but never answer out loud (work started, where a task
+        went, status, what's on screen). Held when the transport would make the voice reply to it."""
+        if not self.HOLD_QUIET_NOTES:
+            await self.append("session.thinking.append", delegation_id, content)
+            return
+        self.quiet_notes.pop(key, None)
+        self.quiet_notes[key] = content
+        while len(self.quiet_notes) > 8:
+            self.quiet_notes.pop(next(iter(self.quiet_notes)))
+
+    def take_quiet_notes(self) -> str:
+        notes, self.quiet_notes = list(self.quiet_notes.values()), {}
+        if not notes:
+            return ""
+        return ("Background since you last spoke (context only, never read it out): "
+                + " | ".join(notes))[:1400] + "\n\n"
+
     async def append(self, kind: str, delegation_id: str | None, content: str) -> None:
         """Send context to the live call. After Pause/Resume, results of runs started in an earlier
         call go to the resumed call as session-wide context."""
@@ -823,6 +930,12 @@ class SidebandWorker:
             return
         if delegation_id and delegation_id.startswith(EARLY_PREFIX):
             delegation_id = None  # the provider never issued this handoff: say it session-wide
+        if kind == "session.thinking.append" and self.quiet_notes:
+            held = self.take_quiet_notes()
+            if len(held) + len(content) <= 2000:
+                content = held + content
+            else:
+                await self.append(kind, None, held.strip())
         if target is not self:
             content = "(Update on a task from before the pause.) " + content
             await target.send_on_own_loop(kind, None, content)
@@ -837,7 +950,17 @@ class SidebandWorker:
             known = task_id in self.interaction.runs
         if not text or not known:
             return None
+        # A double tap, or a tap plus the same answer said aloud, must reach the task once.
+        key, now = (task_id, _words(text)), time.monotonic()
+        answers = getattr(self, "recent_answers", None)
+        if answers is None:
+            answers = self.recent_answers = {}
+        previous = answers.get(key)
+        if previous and now - previous[1] < ECHO_WINDOW_S:
+            logger.info("speakeasy: same answer sent again for one task; passed on once")
+            return previous[0]
         delegation_id = "answer_" + secrets.token_hex(8)
+        answers[key] = (delegation_id, now)
         self.delegations.add(delegation_id)
         self.touch()
         self.fragments.append({"speaker": "user", "text": text, "at": time.monotonic(), "start_ms": 0, "end_ms": 0})
@@ -846,12 +969,120 @@ class SidebandWorker:
         await self.follow_up(delegation_id, 0, f"User: {text}", router.Part("follow_up", text, task_id))
         return delegation_id
 
+    def waiting_on_user(self) -> list[str]:
+        """This call's tasks waiting on the user, oldest first: an approval, or a finished task's
+        question nobody answered or set aside yet (the newest task of its job, so an answered one,
+        which went on as a follow-up, no longer counts)."""
+        with self.interaction.lock:
+            runs = [(r.delegation_id, r.idem_key, r.status) for r in self.interaction.runs.values()]
+        newest: dict[str, str] = {}
+        asking: list[tuple[str, str]] = []
+        for task_id, key, status in runs:
+            work = self.store.work(idem_key=key) or {}
+            job = (work.get("job") or {}).get("id") or key
+            newest[job] = task_id
+            if work.get("set_aside") or task_id in self.set_aside_tasks:
+                continue
+            if status == "waiting_for_approval" or (
+                    status == "completed" and (work.get("result") or {}).get("question")):
+                asking.append((task_id, job))
+        return [t for t, job in asking if newest.get(job) == t]
+
+    async def set_aside(self, task_id: str, by_voice: bool = False) -> bool:
+        """The user set a waiting question, decision or approval aside: already handled, or not
+        needed. It settles as no longer needed (not failed); a run still waiting on the answer is
+        told so and wraps up; the voice hears it quietly so it never asks again. A finished task's
+        question starts no new work."""
+        with self.interaction.lock:
+            run = self.interaction.runs.get(task_id)
+            if run is None:
+                return False
+            key, run_id, status, approval = run.idem_key, run.run_id, run.status, run.approval
+            if status == "waiting_for_approval":
+                run.approval, run.status = None, "resolving_approval"
+        if not self.store.set_aside(key) and status != "waiting_for_approval":
+            return False
+        self.set_aside_tasks.add(task_id)
+        self.store.progress(key, "milestone", "Set aside")
+        if status == "waiting_for_approval" and run_id:
+            answer = P.set_aside_answer(self.names)
+            try:
+                if approval and approval.get("request_id"):
+                    await asyncio.to_thread(self.hermes.approve, run_id, approval["request_id"], "deny")
+                await asyncio.to_thread(self.hermes.steer, run_id, P.steer_text(self.names, answer))
+            except Exception as exc:  # the run may already be gone; it is closed here either way
+                logger.warning("speakeasy: set-aside could not reach the run (%s)", type(exc).__name__)
+            with self.interaction.lock:
+                if run.status == "resolving_approval":
+                    run.status = "working"
+        self.publish()
+        if self.call_connected():
+            name = self.store.title(key) or self.store.request_text(key) or ""
+            await self.append("session.thinking.append", None, P.set_aside_note(name, by_voice))
+        return True
+
+    def focus_job(self, task_id: str) -> str:
+        """The name of the job a focused task belongs to (what the user sees on the job view)."""
+        with self.interaction.lock:
+            run = self.interaction.runs.get(task_id)
+            key = run.idem_key if run else None
+        work = self.store.work(idem_key=key) if key else None
+        return ((work or {}).get("job") or {}).get("name") or ""
+
+    def focus(self) -> tuple[str | None, str]:
+        """The task the user is facing in the headset, if it's one of this call's open tasks."""
+        with self.interaction.lock:
+            task_id, detail = self.interaction.focus_task_id, self.interaction.focus_detail
+        if not task_id or not any(t.task_id == task_id for t in self.open_tasks()):
+            return None, ""
+        return task_id, detail
+
+    async def focus_changed(self) -> None:
+        """Tell the voice what the user is looking at, so "what is this?" is answered on the spot."""
+        task_id, detail = self.focus()
+        if not self.call_connected():
+            return
+        if task_id is None:
+            await self.quiet("focus", None, P.focus_cleared_note(self.names))
+            return
+        name = next((t.request for t in self.open_tasks() if t.task_id == task_id), "")
+        await self.quiet("focus", None, P.focus_note(self.names, name, detail))
+
+    def in_room_call(self) -> bool:
+        """This call was started by turning listening mode off and still has the room text."""
+        with self.interaction.lock:
+            return bool(self.interaction.room)
+
+    def room_handoff_text(self, task_id: str) -> str:
+        """The room text for work started by a handoff: what it was made with (kept even after the
+        call ends), else the call's own while it lasts (a question-card answer on a live call)."""
+        if task_id in self.handoff_rooms:
+            return self.handoff_rooms[task_id]
+        with self.interaction.lock:
+            return self.interaction.room
+
     async def early_request(self, text: str) -> str | None:
         """Words the app heard while the call was still connecting (transcribed on the device).
         They become the call's first request, handled like any handoff, and the voice is told so it
-        acknowledges them instead of greeting the user or asking them to repeat it."""
+        acknowledges them instead of greeting the user or asking them to repeat it.
+
+        In a call started from listening mode, a question about the room is answered by the voice
+        (no task), and no words at all mean the voice waits quietly with the room as context. Outside
+        listening mode, no words start nothing, as before."""
         text = clean_transcript(text or "").strip()[:EARLY_MAX_CHARS]
         if not text:
+            if self.in_room_call():
+                await self.room_nudge()
+            return None
+        if self.in_room_call() and router.asks_about_room(text):
+            self.touch()
+            # The user's turn, like any early words; the voice never heard it, so the note quotes it.
+            self.fragments.append({"speaker": "user", "text": text, "at": time.monotonic(), "start_ms": 0, "end_ms": 0})
+            self.room_answered.add(_words(text))
+            logger.info("speakeasy: question about the room heard while connecting (%d words); answered by the voice",
+                        len(text.split()))
+            # Spoken now, with no handoff waiting on it: a commentary append (a thinking note isn't spoken).
+            await self.append("session.commentary.append", None, P.room_answer_note(self.names, text))
             return None
         delegation_id = EARLY_PREFIX + secrets.token_hex(8)
         self.delegations.add(delegation_id)
@@ -862,6 +1093,16 @@ class SidebandWorker:
         await self.append("session.thinking.append", None, P.early_request_note(self.names, text))
         self.schedule_dispatch(delegation_id, f"User: {text}")
         return delegation_id
+
+    async def room_nudge(self) -> None:
+        """Listening mode was turned off and nothing was said. The voice stays quiet: it keeps what
+        the room said and waits for a request. It can't know what the user wants, so it never offers
+        something on its own. (Older Mac apps still send this after ~2 s of silence.)"""
+        with self.interaction.lock:
+            if self.interaction.room_nudged:
+                return
+            self.interaction.room_nudged = True
+        logger.info("speakeasy: room call opened in silence; waiting for a request")
 
     async def send_on_own_loop(self, kind: str, delegation_id: str | None, content: str) -> None:
         loop, current = self.loop, asyncio.get_running_loop()
@@ -897,7 +1138,7 @@ class SidebandWorker:
         if line and named:
             await self.append("session.commentary.append", delegation_id, line)
         elif place:
-            await self.append("session.thinking.append", delegation_id, P.where_note(place))
+            await self.quiet("where:" + delegation_id, delegation_id, P.where_note(place))
 
     def record_timing(self, task_id: str, idem: str) -> None:
         ms = self.route_timings.pop(task_id, None)
@@ -912,7 +1153,7 @@ class SidebandWorker:
             if last and now - last < STATUS_NOTE_EVERY_S:
                 return
             backend.noted_at = now
-        await self.append("session.thinking.append", backend.say_id, P.status_note(detail))
+        await self.quiet("status:" + str(backend.say_id), backend.say_id, P.status_note(detail))
 
     def record_activity(self, backend: BackendRun, detail: str | None) -> None:
         """Remember what the task is concretely doing, so spoken updates can say it."""
@@ -997,6 +1238,8 @@ class SidebandWorker:
             logger.warning("speakeasy: handoff failed before the task started (%s: %s)",
                            type(exc).__name__, str(exc)[:200])
             await self._handoff_failed(delegation_id, revision, exc)
+        finally:
+            self.handoff_rooms.pop(delegation_id, None)  # this handoff's work is over (or never started)
 
     async def settle(self, request: str) -> str:
         """Wait SETTLE_S after the handoff; every new user turn in that time restarts the wait (up to
@@ -1019,12 +1262,98 @@ class SidebandWorker:
         logger.info("speakeasy: kept listening, added %d more words to the request", len(more.split()))
         return f"{request.rstrip()} {more}"
 
+    def _echoes_recent(self, request: str) -> bool:
+        """The voice sometimes hands off one sentence twice: the whole thing, then a scrap of its tail
+        a second or two later ("...task failing"), which whole_request() joins back onto the sentence.
+        If every word of the new request was already in a request started moments ago, it's an echo."""
+        now = time.monotonic()
+        recent = getattr(self, "recent_requests", None)
+        if recent is None:
+            recent = self.recent_requests = []
+        recent[:] = [(w, at) for w, at in recent if now - at < ECHO_WINDOW_S]
+        want = _words(request).split()
+        if len(want) < 3:
+            return False  # "yes", "the lamp": short replies are real turns, never echoes
+        return any(set(want) <= set(words.split()) for words, _ in recent)
+
+    def _remember_request(self, request: str) -> None:
+        if getattr(self, "recent_requests", None) is None:
+            self.recent_requests = []
+        self.recent_requests.append((_words(request), time.monotonic()))
+
     def _already_absorbed(self, request: str) -> bool:
-        norm = lambda t: " ".join(re.findall(r"[a-z0-9']+", t.lower()))  # noqa: E731
+        norm = _words
         want = norm(request)
         now = time.monotonic()
         return bool(want) and any(now - at < ABSORB_WINDOW_S and (want in norm(t) or norm(t) in want)
                                   for t, at in self.absorbed)
+
+    async def _talk_not_work(self, delegation_id: str, revision: int, request: str, context: str) -> bool:
+        """Ideas, opinions and reactions are conversation: the voice answers them, no task starts.
+        "Just talk to me" holds all work until the user asks for something. In a call started from
+        listening mode, a question about what was said in the room is the voice's to answer too."""
+        if self.in_room_call() and router.asks_about_room(request):
+            if _words(request) in self.room_answered:
+                # The voice was already told to answer this from the room and handed it off anyway:
+                # it needs real work. Hermes gets it, with the room as background.
+                logger.info("speakeasy: room question handed off again; starting it as work")
+            else:
+                self.room_answered.add(_words(request))
+                logger.info("speakeasy: question about the room, answered by the voice (no task)")
+                await self._drop(delegation_id, revision, "Answered from the room", None)
+                await self.append("session.thinking.append", delegation_id, P.room_answer_note(self.names))
+                return True
+        last_said = next((l for l in reversed(context.splitlines()) if l.startswith("Assistant: ")), "")
+        offered = last_said.rstrip().endswith("?")  # "Want me to dig into that?" "Yeah" is a go-ahead
+        if router.starts_talk_mode(request):
+            with self.interaction.lock:
+                self.interaction.talking_only = True
+            logger.info("speakeasy: talk-only mode on; holding work until asked")
+            await self._drop(delegation_id, revision, "Just talking", None)
+            await self.append("session.thinking.append", delegation_id, P.talk_mode_note(self.names))
+            return True
+        with self.interaction.lock:
+            talking_only = self.interaction.talking_only
+        if talking_only and (router.asks_for_work(request) or offered):
+            with self.interaction.lock:
+                self.interaction.talking_only = False
+            logger.info("speakeasy: talk-only mode off; asked for work")
+            return False
+        if router.is_reaction(request) and not offered:
+            logger.info("speakeasy: reaction, no task started")
+            await self._drop(delegation_id, revision, "Just a reaction", None)
+            await self.append("session.thinking.append", delegation_id, P.reaction_note(self.names))
+            return True
+        if talking_only or (router.is_conversation(request) and not offered):
+            logger.info("speakeasy: conversation, answered by the voice (no task)")
+            await self._drop(delegation_id, revision, "Talked it through", None)
+            await self.append("session.thinking.append", delegation_id, P.talk_note(self.names))
+            return True
+        return False
+
+    async def _set_aside_by_voice(self, delegation_id: str, revision: int, kind: str, marked: Any = None) -> bool:
+        """"It's already handled", "never mind that one": set aside the question waiting on the
+        user instead of starting work. A plain "never mind" counts only when the waiting question
+        is the newest thing on the call (otherwise it stops the request just made)."""
+        pending = self.home_question
+        if pending and time.monotonic() - pending[2] <= home_control_mod.ASK_WINDOW_S:
+            self.home_question = None
+            await self._drop(delegation_id, revision, "Set aside", None)
+            await self.append("session.thinking.append", delegation_id, P.set_aside_note(pending[0], by_voice=True))
+            return True
+        waiting = self.waiting_on_user()
+        if not waiting:
+            return False
+        focused, _ = self.focus()
+        target = next((t for t in (marked, focused) if isinstance(t, str) and t in waiting), waiting[-1])
+        if kind == "weak":
+            with self.interaction.lock:
+                live = [r.delegation_id for r in self.interaction.runs.values() if r.status != "rejected"]
+            if not live or live[-1] != target:
+                return False
+        logger.info("speakeasy: question set aside by voice")
+        await self._drop(delegation_id, revision, "Set aside", None)
+        return await self.set_aside(target, by_voice=True)
 
     async def _drop(self, delegation_id: str, revision: int, reason: str, spoken: str | None) -> None:
         """A handoff that should never become a task. It ends visibly (no lingering "Waiting for")."""
@@ -1077,6 +1406,15 @@ class SidebandWorker:
             logger.info("speakeasy: greeting, no task started")
             await self._drop(delegation_id, revision, "Just a greeting", P.GREETING_SPOKEN)
             return
+        aside = router.set_aside_kind(last_request)
+        if aside and await self._set_aside_by_voice(delegation_id, revision, aside, marked):
+            return
+        if not marked and await self._talk_not_work(delegation_id, revision, last_request, context):
+            return
+        offer = next((l[len("Assistant: "):] for l in reversed(context.splitlines()) if l.startswith("Assistant: ")), "")
+        if not marked and router.is_reaction(last_request) and offer.rstrip().endswith("?"):
+            # "Yeah" to "Want me to look up what they charge?": the yes carries the offer with it.
+            last_request = f"{last_request.rstrip('.!')}: {offer.strip()}"
         if self._already_absorbed(last_request):
             logger.info("speakeasy: handoff already folded into the task before it; not started twice")
             await self._drop(delegation_id, revision, "Added to the previous request", None)
@@ -1104,6 +1442,12 @@ class SidebandWorker:
             self.handoff_at.pop(delegation_id, None)
             await self._drop(delegation_id, revision, "Already on its way with your screen", None)
             return
+        if not marked and self._echoes_recent(last_request):
+            logger.info("speakeasy: handoff repeats a request started seconds ago; not started twice")
+            await self._drop(delegation_id, revision, "Added to the previous request", None)
+            return
+        if not marked:
+            self._remember_request(last_request)
         self.end_hold("superseded")  # a newer request ends one waiting for the screen
         # Pointing at their own screen, or with pictures waiting on the panel, "show me this" is about
         # what they're showing; only "show me what you're looking at" still means a task's own view.
@@ -1113,6 +1457,12 @@ class SidebandWorker:
         if (router.is_show_me(last_request) and (not showing or router.about_task_view(last_request))
                 and await self.show_me(delegation_id, last_request)):
             return
+        if router.is_status_question(last_request):
+            running = [t for t in self.open_tasks() if t.status not in TERMINAL]
+            if running:
+                target = next((t for t in running if marked and t.task_id == marked), running[-1])
+                await self.answer_status(delegation_id, target.task_id)
+                return
         with self.interaction.lock:
             device = self.interaction.device_id
         logger.info("speakeasy: request on device %s (%d words)", (device or "unknown")[:8], len(last_request.split()))
@@ -1147,6 +1497,13 @@ class SidebandWorker:
             return
         if not marked and not showing and await self.quick_answer(delegation_id, revision, last_request):
             return
+        focus = None
+        if not marked:
+            focused, detail = self.focus()
+            if focused and not router.wants_new(last_request):
+                # The task on screen (or in the headset) is a strong prior for the routing model, not
+                # an order: an unrelated request still goes elsewhere.
+                focus = router.Focus(focused, self.focus_job(focused), detail)
         candidates = await self.conversation_candidates(last_request)
         now = time.time()
         chats = [router.Chat(f"c{i + 1}", c.conv.where, c.snippets, c.voice_request,
@@ -1155,12 +1512,19 @@ class SidebandWorker:
         earlier = "\n".join(line for line in context.splitlines()[:-1] if line.startswith(("User: ", "Assistant: ")))
         try:
             decision = await asyncio.to_thread(self.rt.route, last_request, self.open_tasks(), marked, chats,
-                                               earlier[-1200:], replied_task_id=self.replied_task)
+                                               earlier[-1200:], replied_task_id=self.replied_task,
+                                               **({"focus": focus} if focus else {}))
         except Exception as exc:  # routing is a nicety: without it the request still becomes new work
             logger.warning("speakeasy: routing failed, starting as new work (%s)", type(exc).__name__)
             decision = router.fallback_decision(last_request)
         self.route_timings[delegation_id] = decision.latency_ms
         part = decision.parts[0]
+        if focus is not None:
+            went = "to the focused task" if part.task_id == focus.task_id else "elsewhere"
+            logger.info("speakeasy: focused request routed %s (%s)", went, decision.source)
+            if part.task_id == focus.task_id and focus.detail:
+                part = router.Part(part.kind, f"{part.request}\n\n({self.names.user} is looking at: {focus.detail})",
+                                   part.task_id)
         if part.kind == router.IGNORE:
             self.handoff_at.pop(delegation_id, None)
             if delegation_id.startswith(EARLY_PREFIX):
@@ -1216,11 +1580,30 @@ class SidebandWorker:
         if not steps and work:
             steps = [e.get("text", "") for e in (work.get("events") or []) if e.get("kind") in {"milestone", "tool"}][-4:]
         result = notice_text(((work or {}).get("result") or {}).get("spoken"), 300) if status == "completed" else None
+        live: list[str] = []
+        session = (work or {}).get("session_id") or ((work or {}).get("job") or {}).get("id")
+        if status not in TERMINAL and isinstance(session, str) and session:
+            live = await asyncio.to_thread(self.live_steps, session)
         self.handoff_at.pop(delegation_id, None)
         self.replied_task = task_id
         logger.info("speakeasy: status answered from %d steps (%s)", len(steps), status or "unknown")
         await self.append("session.commentary.append", delegation_id,
-                          P.status_answer(name or "that task", status, steps, time.monotonic() - started, result))
+                          P.status_answer(name or "that task", status, steps, time.monotonic() - started, result,
+                                          live))
+
+    def live_steps(self, session_id: str) -> list[str]:
+        """What the task's Hermes session has done lately, in plain words, newest last: the voice's
+        answer to "how's it going?" comes from the work itself, not only what the task chose to report."""
+        try:
+            rows = threads.recent_steps(self.rt.state_db, session_id)
+        except Exception:
+            return []
+        out: list[str] = []
+        for kind, text in rows:
+            line = notice_text(text, 160) if kind == "said" else P.tool_step(text)
+            if line and (not out or out[-1] != line):
+                out.append(line)
+        return out[-5:]
 
     async def home_control(self, delegation_id: str, revision: int, request: str) -> bool:
         """A request that is only device commands, done straight through Home Assistant (opt-in).
@@ -1271,6 +1654,9 @@ class SidebandWorker:
             self.store.update_run(idem, None, backend.status)
             self.store.set_result(idem, split_result(reply.spoken, ()))
             self.store.progress(idem, "result", reply.spoken)
+            if reply.ok:
+                # "Lights off" -> "Done": heard on the call, nothing to read, so no new-answer badge.
+                self.store.mark_seen(idem)
         except Exception:
             logger.warning("speakeasy: could not record the home-control card")
         self.handoff_at.pop(delegation_id, None)
@@ -1340,6 +1726,7 @@ class SidebandWorker:
         try:
             self.store.reserve_run(idem, self.interaction.interaction_id, delegation_id, revision)
             self.store.set_title(idem, short_title(request) or "Quick answer")
+            self.retitle(idem, request)
             self.store.progress(idem, "request", request)
             self.store.update_run(idem, None, "completed")
             result = split_result(spoken, ()) or {"spoken": spoken, "full": spoken}
@@ -2114,7 +2501,7 @@ class SidebandWorker:
                       if r.delegation_id != task_id and r.status in ACTIVE_RUN_STATES]
         parallel = [r for r in (notice_text(self.store.request_text(k), 80) for k in others[-4:]) if r]
         if voice_id is None:
-            await self.append("session.thinking.append", delegation_id, P.work_started_note(parallel))
+            await self.quiet("started", delegation_id, P.work_started_note(parallel))
             if deliver_to and not replaces:
                 await self.say_where(delegation_id, ack, place=ack_place, named=named)
             else:
@@ -2128,7 +2515,8 @@ class SidebandWorker:
             self.store.add_shared(idem, items)
             self.publish()
         prompt = P.build_task_prompt(self.names, revision, context, focus, label, shared=self.shared_prompt(
-            items, bool(images), session_id if continuing else None, shared.capture is not None))
+            items, bool(images), session_id if continuing else None, shared.capture is not None),
+            room=self.room_handoff_text(voice_id or task_id))
         try:
             run_id = await asyncio.to_thread(self.hermes.start_run, prompt, idem, session_id,
                                              **({"images": images} if images else {}))
@@ -2222,7 +2610,7 @@ class SidebandWorker:
             self.store.hide_key(idem)
         self.publish()
         if joins is None:
-            await self.append("session.thinking.append", delegation_id, P.continuing_in_note(where))
+            await self.quiet("continuing:" + delegation_id, delegation_id, P.continuing_in_note(where))
             self.handoff_at.pop(delegation_id, None)
         # Taken now, while it's what the user was looking at, even if this turn waits for another.
         shared = await self.collect_shared(task_id, idem) if conv.private else Shared()
@@ -2242,8 +2630,11 @@ class SidebandWorker:
                     self.store.dismiss_key(replaced_key)
                 self.store.set_title(idem, self.store.title(joins.idem_key) or short_title(request))
                 self.publish()
+                # The task grew: name it for what it is now, not just the first ask.
+                self.retitle(idem, request, self.store.request_text(joins.idem_key))
                 joins = None
                 break
+            self.store.touch(joins.idem_key)
             await asyncio.sleep(CONTINUITY_POLL_S)
             waited += CONTINUITY_POLL_S
         waited = 0
@@ -2253,13 +2644,15 @@ class SidebandWorker:
                 self.publish()
             if waited >= CONTINUITY_WAIT_S:
                 break
+            self.store.touch(idem)  # verifiably queued: never "Status unconfirmed" while it waits its turn
             await asyncio.sleep(CONTINUITY_POLL_S)
             waited += CONTINUITY_POLL_S
         try:
             asked = request + (P.SHOW_IT_FOCUS if self._take_show(task_id, idem) else "")
             note = self.shared_prompt(items, bool(images), conv.session_id, shared.capture is not None)
             message = P.continuation_message(self.names, asked + (f"\n\n{note}" if note else ""),
-                                             notice_text(request, 200) or "voice request")
+                                             notice_text(request, 200) or "voice request",
+                                             room=self.room_handoff_text(task_id))
             content = user_content(message, images) if images else message
             loop = asyncio.get_running_loop()
             final: dict[str, Any] = {}
@@ -2271,10 +2664,15 @@ class SidebandWorker:
                     with self.interaction.lock:
                         backend.run_id, backend.status = run_id, "running"
                     asyncio.run_coroutine_threadsafe(self._publish_async(), loop)
-                elif name in {"tool.started", "assistant.commentary"}:
-                    event = {"event": "tool.started" if name == "tool.started" else "message.interim",
-                             "tool": payload.get("tool_name"), "preview": payload.get("preview"),
-                             "text": payload.get("text")}
+                elif name == "assistant.commentary" and isinstance(payload.get("text"), str):
+                    # What Hermes writes while it works ("Ratings are in, now checking fares") is the
+                    # task's live status, read the same way as a thread task's. Only accepting strict
+                    # STATUS: lines here left a continued task silent for its whole run.
+                    text = payload["text"]
+                    asyncio.run_coroutine_threadsafe(self.thread_activity(
+                        backend, "commentary", text, {"event": "message.interim", "text": text}), loop).result()
+                elif name == "tool.started":
+                    event = {"event": "tool.started", "tool": payload.get("tool_name"), "preview": payload.get("preview")}
                     asyncio.run_coroutine_threadsafe(self.handle_hermes_event(backend, event), loop).result()
                 elif name == "assistant.completed":
                     final["text"] = payload.get("content") or ""
@@ -2286,11 +2684,30 @@ class SidebandWorker:
                                                conv, content, on_event)
             status = final.get("status") or ("completed" if terminal and final.get("text") else "ambiguous")
             output = P.without_voice_header(final.get("text", ""))
+            if status == "ambiguous" and backend.run_id:
+                # Real Hermes ends a refused turn's stream without a run.* event; the refusal is only
+                # on the run itself. Read it so a refused chat still gets the request another way.
+                try:
+                    run = await asyncio.to_thread(self.hermes.get_run, backend.run_id)
+                except Exception:
+                    run = {}
+                if run.get("status") == "failed" and continuity.refused(run.get("error")) and not str(run.get("output") or "").strip():
+                    status, final["error"] = "failed", run.get("error")
             if status == "ambiguous":
                 if backend.run_id:
                     await self.reconcile_stream_end(backend)
                     return
                 raise ServiceError(502, "conversation stream ended without a result")
+            if status == "failed" and continuity.refused(final.get("error")) and not output.strip():
+                # Newer Hermes won't take an API turn into a chat's session. Say it in the thread
+                # itself, through Hermes' webhook platform, exactly as if typed there; without a
+                # thread (or the webhook platform), run it beside the chat with the chat's context.
+                self.store.forget_run_id(idem)
+                with self.interaction.lock:
+                    backend.run_id = None
+                if not await self.continue_in_thread(backend, conv, message, where):
+                    await self.run_beside_conversation(backend, revision, context, asked, conv, where)
+                return
             # The turn ran in the conversation's own session (its history), over the local API. Post
             # the answer into that chat ourselves, like any routed answer; Hermes config is untouched.
             if valid_delivery_target(conv.target):
@@ -2303,6 +2720,84 @@ class SidebandWorker:
             said = failures.reason_text(failed_as) and failures.voice_text(failed_as)
             await self.append("session.commentary.append", delegation_id,
                               P.failed_because(said) if said else P.continuing_failed_note(where))
+
+    async def continue_in_thread(self, backend: "BackendRun", conv: continuity.Conversation, message: str,
+                                 where: str) -> bool:
+        """Put the request into the chat thread as if typed there, so the agent works inside that
+        thread with its whole history and Hermes replies there itself; the call hears the reply.
+        False when it can't be delivered that way (no thread, webhook platform off)."""
+        runner = self.rt.threads
+        thread_id = conv.thread_id or (conv.chat_id if conv.chat_type == "thread" else "")
+        if runner is None or not hasattr(runner, "post") or not hasattr(runner, "wait_turn") or not thread_id:
+            return False
+        idem = backend.idem_key
+        after = await asyncio.to_thread(threads.last_message_id, self.rt.state_db)
+        delivered = await asyncio.to_thread(runner.post, conv.platform, str(thread_id), message=message,
+                                            delivery_id=f"{idem[:40]}-{secrets.token_hex(4)}")
+        if not delivered:
+            return False
+        logger.info("speakeasy: continued a chat by messaging its thread")
+        backend.deliver_to = None  # Hermes answers in the thread itself; posting it too would double it
+        self.store.progress(idem, "milestone", f"Sent into {where}")
+        self.publish()
+        loop = asyncio.get_running_loop()
+
+        def on_activity(kind: str, text: str) -> None:
+            event = {"event": "message.interim" if kind == "commentary" else "tool.completed", "text": text}
+            asyncio.run_coroutine_threadsafe(self.thread_activity(backend, kind, text, event), loop).result()
+        answer = await asyncio.to_thread(runner.wait_turn, conv.platform, str(thread_id), after, on_activity)
+        if answer is None:
+            self.store.progress(idem, "result", f"Still going in {where}; the answer will land there")
+            await self.handle_hermes_event(backend, {"event": "run.completed",
+                                                     "output": f"Still working on it in {where}. The answer will land there.",
+                                                     "continued": True})
+            return True
+        await self.handle_hermes_event(backend, {"event": "run.completed", "output": P.without_voice_header(answer),
+                                                 "continued": True})
+        return True
+
+    async def run_beside_conversation(self, backend: "BackendRun", revision: int, context: str, request: str,
+                                      conv: continuity.Conversation, where: str) -> None:
+        """Hermes refused a turn inside the conversation's own session (newer Hermes only admits API
+        turns into sessions the API started). Run the request as its own task, carrying the
+        conversation's recent messages, and still post the answer into that chat."""
+        idem = backend.idem_key
+        logger.info("speakeasy: %s doesn't take outside turns; running the request as its own task", where)
+        excerpt = await asyncio.to_thread(continuity.recent_exchange, self.rt.state_db, conv.session_id)
+        focus = request + (f" (This picks up the conversation in {where}. Its most recent messages, for context:\n"
+                           f"{excerpt}\n)" if excerpt else f" (This picks up the conversation in {where}.)")
+        session_id = TASK_SESSION_PREFIX + hashlib.sha256(idem.encode()).hexdigest()[:24]
+        if valid_delivery_target(conv.target):
+            backend.deliver_to = conv.target
+        prompt = P.build_task_prompt(self.names, revision, context, focus, where)
+        self.store.set_session(idem, session_id)
+        self.store.progress(idem, "milestone", f"Working on it here; the answer goes to {where}")
+        with self.interaction.lock:
+            backend.run_id, backend.status = None, "running"
+        self.publish()
+        try:
+            run_id = await asyncio.to_thread(self.hermes.start_run, prompt, idem, session_id)
+            self.store.update_run(idem, run_id, "running")
+            with self.interaction.lock:
+                backend.run_id = run_id
+            self.publish()
+            loop = asyncio.get_running_loop()
+            terminal_seen = await asyncio.to_thread(
+                self.hermes.events, run_id,
+                lambda event: asyncio.run_coroutine_threadsafe(self.handle_hermes_event(backend, event), loop).result())
+            if not terminal_seen:
+                await self.reconcile_stream_end(backend)
+        except Exception as exc:
+            if backend.run_id:
+                try:
+                    await self.reconcile_stream_end(backend, exc)
+                    return
+                except Exception as reconcile_exc:
+                    exc = reconcile_exc
+            failed_as = self._record_start_failure(backend, exc, "task beside a conversation")
+            said = failures.reason_text(failed_as) and failures.voice_text(failed_as)
+            await self.append("session.commentary.append", backend.say_id,
+                              P.failed_because(said) if said else P.FAILED_SPOKEN)
 
     async def start_thread_task(self, task_id: str, revision: int, context: str, request: str,
                                 channel: channels.Channel, named: bool = False) -> None:
@@ -2347,8 +2842,9 @@ class SidebandWorker:
             self.store.set_continued(idem, session_id, f"a thread in {channel.label}")
 
         def on_title(title: str) -> None:
-            # Hermes names the thread after its first turn; show the same name in the panel.
-            self.store.set_title(idem, title)
+            # Hermes names the thread after its first turn; show the same name in the panel (the job
+            # keeps the name from the work itself).
+            self.store.set_title(idem, title, thread=True)
             self.publish()
 
         loop = asyncio.get_running_loop()
@@ -2553,6 +3049,10 @@ class SidebandWorker:
             with self.interaction.lock:
                 backend.status, backend.approval = status, None
             stored_drafts = [self.store.add_draft(idem, self.store.session_for(idem), d) for d in drafts]
+            # Long reports get sorted into parts; any answer with numbers in it may also get a picture.
+            if status == "completed" and result and (len(result.get("full") or "") >= 400 or (
+                    not result.get("views") and len(re.findall(r"\d", result.get("full") or "")) >= 4)):
+                self.shape_result(idem, result["full"])
             with self.interaction.lock:
                 wanted = idem in self.show_pending
                 self.show_pending.discard(idem)
@@ -2580,17 +3080,28 @@ class SidebandWorker:
                     self.notices.draft_waiting(draft["draft_id"], draft.get("subject"))
             if status == "completed":
                 spoken = result["spoken"] if result else "Done."
-                for note in P.result_notes(self.store.title(idem) or self.store.request_text(idem),
-                                           result.get("full") if result else None, spoken):
-                    await self.append("session.thinking.append", delegation_id, note)
+                notes = list(P.result_notes(self.store.title(idem) or self.store.request_text(idem),
+                                            result.get("full") if result else None, spoken))
                 # The answer text says "here's the building" either way; tell the voice what the user
                 # can actually see, so it never claims a picture is up when none reached the app.
                 pictures = len(((self.store.work(idem_key=idem) or {}).get("review") or {}).get("images") or [])
-                await self.append("session.thinking.append", delegation_id, P.pictures_note(pictures))
+                notes.append(P.pictures_note(pictures))
                 if stored_drafts:
                     d = stored_drafts[-1]
-                    await self.append("session.thinking.append", delegation_id,
-                                      P.draft_waiting_note(self.names, d.get("subject"), d.get("to") or []))
+                    notes.append(P.draft_waiting_note(self.names, d.get("subject"), d.get("to") or []))
+                if self.HOLD_QUIET_NOTES:
+                    # One message, not several: each appended note can draw its own spoken reply.
+                    packed: list[str] = []
+                    for note in notes:
+                        if packed and len(packed[-1]) + 2 + len(note) <= 1900:
+                            packed[-1] += "\n\n" + note
+                        else:
+                            packed.append(note)
+                    for message in packed:
+                        await self.append("session.thinking.append", delegation_id, message)
+                else:
+                    for note in notes:
+                        await self.append("session.thinking.append", delegation_id, note)
                 self.replied_task = backend.delegation_id
                 asked = notice_text(self.store.request_text(idem), 140) or "an earlier request"
                 moved_on = self.user_spoke_since(time.monotonic() - LATE_RESULT_S) and \

@@ -39,6 +39,12 @@ TITLE_TIMEOUT_S = 15.0
 _EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="speakeasy-router")
 NEW = "new"
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# "New thing", "something else", "separately": not about whatever the user is facing.
+_WANTS_NEW = re.compile(r"(?i)\b(?:new (?:thing|task|one|idea)|something (?:else|new)|separate(?:ly)?|start (?:a )?(?:fresh|new)|another thing)\b")
+
+
+def wants_new(request: str) -> bool:
+    return bool(_WANTS_NEW.search(request or ""))
 
 _FOLLOW_UP_CUE = re.compile(
     r"(?i)^(?:and |also |oh,? |actually,? |wait,? |no,? |okay,? |ok,? )*(?:"
@@ -602,6 +608,24 @@ class Decision:
     show: bool = False             # the user wants to SEE something (what it looks like), not just hear it
 
 
+@dataclasses.dataclass(frozen=True)
+class Focus:
+    """The task (and job) on the user's screen or in their hands: a strong hint, not an order."""
+    task_id: str
+    job: str = ""        # the job's short name, as the user sees it
+    detail: str = ""     # what part of it they are looking at, when the app says
+
+
+def focus_line(focus: Focus | None, tasks: list[OpenTask]) -> str:
+    """The routing model's hint about what the user is looking at, or "" when there's nothing open."""
+    if focus is None or not any(t.task_id == focus.task_id for t in tasks):
+        return ""
+    name = f" ({focus.job})" if focus.job else ""
+    seen = f", looking at: {focus.detail[:200]}" if focus.detail else ""
+    return (f"The user is looking at task {focus.task_id}{name}{seen}. Send the request there "
+            f"(follow_up_task_id) unless it is clearly unrelated to that task.\n\n")
+
+
 def _ago(seconds: float | None) -> str:
     if seconds is None:
         return ""
@@ -625,7 +649,7 @@ def chat_lines(chats: list[Chat]) -> str:
 
 def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
                    chats: list[Chat] | None = None, call_so_far: str = "",
-                   replied_task_id: str | None = None) -> list[dict[str, str]]:
+                   replied_task_id: str | None = None, focus: Focus | None = None) -> list[dict[str, str]]:
     open_lines = "\n".join(f"- {t.task_id}: {t.request[:200]} ({t.status}"
                            + (f", started {int(t.age_s)}s ago" if t.age_s is not None else "") + ")"
                            + (f"\n    the assistant's last spoken answer came from this task: \"{t.result[:300]}\""
@@ -636,10 +660,13 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
     return [
         {"role": "system", "content":
             "You route one spoken request for a voice assistant. Reply with strict JSON only, no prose: "
-            '{"follow_up_task_id": string or null, "conversation": string or null, "parts": [strings], '
-            '"channel": string or null, "show": true or false}. '
+            '{"status_task_id": string or null, "follow_up_task_id": string or null, "conversation": string or null, '
+            '"parts": [strings], "channel": string or null, "show": true or false}. '
+            "status_task_id: the id of an open task when the request only asks how that task is going, whether "
+            "it's stuck, done or still working, or what it's doing now, with no new instruction (\"how's that coming "
+            "along\", \"you seem stuck\", \"what's it doing?\"); else null. "
             "follow_up_task_id: the id of an open task ONLY when the request clearly adds to, changes, corrects "
-            "or asks about that task; else null. A reply to what the assistant just said (agreeing, disagreeing, "
+            "or asks about that task (not just how it is going); else null. A reply to what the assistant just said (agreeing, disagreeing, "
             "correcting it, pushing back, answering its question: \"no, Hermes can\", \"you're missing a couple\", "
             "\"that's wrong\") is a follow-up to the task that answer came from, never a new task or conversation. "
             "A request that points back at something a task told the user (\"fix that script you found\", \"do the "
@@ -671,6 +698,7 @@ def route_messages(request: str, tasks: list[OpenTask], topics: list[Topic],
                                     f"Existing conversations:\n{chat_lines(chats or [])}\n\n"
                                     + (f"The call so far (for what 'that', 'it', 'the X one' refer to):\n"
                                        f"{call_so_far[-1200:]}\n\n" if call_so_far and (chats or tasks) else "")
+                                    + focus_line(focus, tasks[-MAX_OPEN_TASKS:])
                                     + f"Request: {request[:1500]}"},
     ]
 
@@ -693,6 +721,9 @@ def parse_decision(text: Any, request: str, tasks: list[OpenTask], topics: list[
         return None
     channel = labels.get((raw_channel or "").lower().lstrip("#")) if raw_channel else None
     show = data.get("show") is True
+    asked = data.get("status_task_id")
+    if isinstance(asked, str) and any(t.task_id == asked for t in tasks[-MAX_OPEN_TASKS:]):
+        return Decision([Part(STATUS, request, asked)], None, "model")
     follow = data.get("follow_up_task_id")
     if follow is not None:
         if not isinstance(follow, str) or not any(t.task_id == follow for t in tasks[-MAX_OPEN_TASKS:]):
@@ -834,6 +865,174 @@ def working_status(request: str, timeout: float = TITLE_TIMEOUT_S) -> str | None
     return clean_status(raw)
 
 
+_PLAN_PROMPT = (
+    "You lay out the plan for a task a user just handed to their AI assistant, as the short steps a person "
+    "would see on a progress line. Give 3 to 5 steps in order, each 2 to 4 words, starting with a verb "
+    "(\"Find the cause\", \"Fix and test\", \"Deploy\", \"Compare options\"). The last step is the hand-back "
+    "to the user (\"Your review\", \"Try it\", \"Pick one\"). Plain words, no numbering, no punctuation at the "
+    "end, nothing the request doesn't need. Reply with JSON only: {\"steps\": [\"...\"]}"
+)
+
+
+def clean_plan(raw: str | None) -> list[str] | None:
+    """Model output as 3-5 short steps, or None when it isn't usable."""
+    text = str(raw or "").strip()
+    match = re.search(r"\{.*\}", text, re.S)
+    if not match:
+        return None
+    try:
+        steps = json.loads(match.group(0)).get("steps")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(steps, list):
+        return None
+    out = []
+    for step in steps:
+        words = " ".join(str(step).split()).strip(" .;:-")
+        if words and len(words) <= 40 and len(words.split()) <= 6:
+            out.append(words[0].upper() + words[1:])
+    return out[:5] if len(out) >= 3 else None
+
+
+def plan_steps(request: str, timeout: float = TITLE_TIMEOUT_S) -> list[str] | None:
+    """The steps a handed-off task will go through, for the progress line. Same model as Hermes'
+    session titles (task ``title_generation``). None when unavailable or unusable."""
+    text = " ".join(str(request or "").split())
+    if not text:
+        return None
+    try:
+        from agent.auxiliary_client import call_llm  # type: ignore
+    except Exception:
+        return None
+    try:
+        with _profile_scope():
+            response = call_llm(task="title_generation",
+                                messages=[{"role": "system", "content": _PLAN_PROMPT},
+                                          {"role": "user", "content": text[:1200]}],
+                                max_tokens=120, temperature=None, timeout=timeout,
+                                reasoning_config={"enabled": False})
+        raw = (response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.info("speakeasy: task plan unavailable (%s)", type(exc).__name__)
+        return None
+    return clean_plan(raw)
+
+
+SHAPE_TYPES = ("build", "research", "ideas", "setup", "answer")
+_SHAPE_PROMPT = (
+    "You read the final report an AI agent wrote for its user and pull out its structure, so an app can lay it "
+    "out as panels instead of a wall of text. Never add facts that aren't in the report; copy numbers exactly. "
+    "type: build (code/apps/features written, fixed, shipped or deployed), setup (machines, installs, accounts, "
+    "configuration), research (findings, comparisons, evidence, reviews), ideas (options, designs, "
+    "brainstorms, plans), answer (anything else). "
+    "headline: the outcome in under 12 words. "
+    "checks: only tests, verifications or measurements the agent actually ran (tests passed, live check, "
+    "benchmark), never specs, prices or facts; each {\"label\": 2-4 words, \"value\": \"15/15\" or \"passed\" or a number, "
+    "\"good\": true/false}; at most 4. "
+    "shipped: what is now live, released, merged, installed or changed, each under 10 words; at most 5. "
+    "open: what is still unfinished, blocked, or waiting on the user, each under 12 words; at most 4. "
+    "sections: the report's main parts in order, each {\"title\": 1-4 words, \"points\": [up to 4 points, each "
+    "under 16 words]}; at most 5. For research and ideas, each option or finding is a section. "
+    "undo: true only if the report says the change can be rolled back. "
+    "visual: the one picture that best shows the report's key data at a glance on a small screen, drawn only from "
+    "numbers and names in the report, or null when nothing is worth drawing (plain prose, advice, a single fact). "
+    "Pick the kind that fits what the report contains, never a format tied to a topic: "
+    "two sides with scores or points (any matchup, game, race, projection) -> {\"kind\": \"game\", \"league\": short "
+    "context, \"status\": \"live\"|\"final\"|\"projected\", \"detail\": one short line, \"teams\": [{\"name\", "
+    "\"score\": as text, \"winner\": true/false, \"record\": optional}]}; "
+    "two to four things compared on the same attributes -> {\"kind\": \"comparison\", \"title\", \"columns\": [names], "
+    "\"rows\": [{\"label\", \"values\": [...]}], \"winner\": name}; "
+    "a few headline numbers -> {\"kind\": \"stats\", \"title\", \"items\": [{\"label\", \"value\", \"delta\", "
+    "\"good\": true/false}]} (at most 6); "
+    "a trend over time or a ranking with numbers -> {\"kind\": \"chart\", \"title\", \"style\": \"bar\"|\"line\", "
+    "\"unit\", \"labels\": [...], \"series\": [{\"name\", \"values\": [numbers]}]}; "
+    "a short set of picks or to-dos -> {\"kind\": \"list\", \"title\", \"items\": [{\"text\", \"detail\"}]} (at most 8). "
+    "Leave a field empty when the report has nothing for it. Reply with JSON only: {\"type\": ..., \"headline\": ..., "
+    "\"checks\": [], \"shipped\": [], \"open\": [], \"sections\": [], \"undo\": false, \"visual\": null}"
+)
+VISUAL_KINDS = ("game", "comparison", "stats", "chart", "list")
+
+
+def _short(value: Any, words: int, chars: int = 140) -> str | None:
+    text = " ".join(str(value or "").split()).strip(" -•*")
+    if not text or len(text.split()) > words + 4:
+        return None
+    return text[:chars]
+
+
+def clean_shape(raw: str | None) -> dict[str, Any] | None:
+    """Model output as a validated result shape, or None when it isn't usable."""
+    match = re.search(r"\{.*\}", str(raw or ""), re.S)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("type") not in SHAPE_TYPES:
+        return None
+
+    def strings(key: str, words: int, cap: int) -> list[str]:
+        items = data.get(key) if isinstance(data.get(key), list) else []
+        return [s for s in (_short(x, words) for x in items) if s][:cap]
+
+    checks = []
+    for c in data.get("checks") if isinstance(data.get("checks"), list) else []:
+        if isinstance(c, dict) and (label := _short(c.get("label"), 5, 40)) and (value := _short(c.get("value"), 3, 24)):
+            checks.append({"label": label, "value": value, "good": bool(c.get("good", True))})
+    sections = []
+    for s in data.get("sections") if isinstance(data.get("sections"), list) else []:
+        if not isinstance(s, dict) or not (title := _short(s.get("title"), 5, 48)):
+            continue
+        points = [p for p in (_short(x, 18, 160) for x in (s.get("points") or [])[:6]) if p][:4]
+        sections.append({"title": title, "points": points})
+    shape = {"type": data["type"], "headline": _short(data.get("headline"), 14, 120) or "",
+             "checks": checks[:4], "shipped": strings("shipped", 12, 5), "open": strings("open", 14, 4),
+             "sections": sections[:5], "undo": bool(data.get("undo"))}
+    visual = clean_visual(data.get("visual"))
+    if visual:
+        shape["_visual"] = visual  # moved into the result's views by the caller, never stored on the shape
+    return shape if any(shape[k] for k in ("checks", "shipped", "open", "sections")) or visual else None
+
+
+def clean_visual(raw: Any) -> dict[str, Any] | None:
+    """The shaper's one picture of the report, validated like any view card; only data kinds."""
+    from . import views
+    if not isinstance(raw, dict) or raw.get("kind") not in VISUAL_KINDS:
+        return None
+    if raw.get("kind") == "game":
+        status = str(raw.get("status") or "").lower()
+        raw = {**raw, "status": status if status in ("live", "final") else "projected"}
+        if len([t for t in raw.get("teams") or [] if isinstance(t, dict) and t.get("name")]) != 2:
+            return None
+    view = views.clean(raw)
+    return view if view and len(view) > 1 else None
+
+
+def result_shape(request: str, report: str, timeout: float = 12.0) -> dict[str, Any] | None:
+    """The structure of a long finished report (type, checks, shipped, open, sections) for spatial and
+    card layouts. Same model as Hermes' session titles. None when unavailable or unusable."""
+    text = str(report or "").strip()
+    if len(text) < 400:
+        return None
+    try:
+        from agent.auxiliary_client import call_llm  # type: ignore
+    except Exception:
+        return None
+    try:
+        with _profile_scope():
+            response = call_llm(task="title_generation",
+                                messages=[{"role": "system", "content": _SHAPE_PROMPT},
+                                          {"role": "user", "content": f"Request: {str(request or '')[:400]}\n\nReport:\n{text[:9000]}"}],
+                                max_tokens=2400, temperature=None, timeout=timeout,
+                                reasoning_config={"enabled": False})
+        raw = (response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.info("speakeasy: result shape unavailable (%s)", type(exc).__name__)
+        return None
+    return clean_shape(raw)
+
+
 _PROGRESS_PROMPT = (
     "You write one short spoken progress update for a voice assistant whose background agent is working on "
     "a task for the user. You get the user's request, the agent's recent steps (newest last) and updates "
@@ -942,8 +1141,11 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
            call: Callable[[list[dict[str, str]]], str | None] | None = None,
            timeout: float = ROUTE_TIMEOUT_S, chats: list[Chat] | None = None,
            call_so_far: str = "", replied_task_id: str | None = None,
-           jev_place: Callable[..., dict[str, Any] | None] | None = None) -> Decision:
-    """Route one handoff. A task id the voice model marked wins outright (no model call)."""
+           jev_place: Callable[..., dict[str, Any] | None] | None = None,
+           focus: Focus | None = None) -> Decision:
+    """Route one handoff. A task id the voice model marked wins outright (no model call). A focused
+    task is a strong prior: the model is told the user is looking at it and sends the request there
+    unless it is clearly unrelated; without a model answer the request goes to the focused task."""
     request = (request or "").strip()
     topics = topics or []
     open_tasks = tasks[-MAX_OPEN_TASKS:]
@@ -952,6 +1154,10 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
         return Decision([quick], None, "quick")
     if isinstance(marked_task_id, str) and any(t.task_id == marked_task_id for t in open_tasks):
         return Decision([Part("follow_up", request, marked_task_id)], None, "marked")
+    if focus is not None and any(t.task_id == focus.task_id for t in open_tasks):
+        budget = max(timeout, CHAT_ROUTE_TIMEOUT_S) if chats else timeout
+        return _decide_with_focus(request, open_tasks, topics, call, budget, chats, call_so_far, replied_task_id,
+                                  focus)
     if quick is not None:
         return Decision([quick], None, "quick")
     tail = continues_newest(request, open_tasks)
@@ -991,6 +1197,27 @@ def decide(request: str, tasks: list[OpenTask], marked_task_id: Any = None, topi
     return dataclasses.replace(decision, latency_ms=latency)
 
 
+def _decide_with_focus(request: str, open_tasks: list[OpenTask], topics: list[Topic],
+                       call: Callable[[list[dict[str, str]]], str | None] | None, timeout: float,
+                       chats: list[Chat] | None, call_so_far: str, replied_task_id: str | None,
+                       focus: Focus) -> Decision:
+    """Ask the routing model with the focused task highlighted; it may still send an unrelated
+    request elsewhere. No answer (no model, a timeout, bad JSON) keeps the old rule: the focus."""
+    started = time.monotonic()
+    decision = None
+    model_call = call or functools.partial(aux_call, timeout=timeout)
+    future = _EXECUTOR.submit(model_call, route_messages(request, open_tasks, topics, chats, call_so_far,
+                                                         replied_task_id, focus))
+    try:
+        decision = parse_decision(future.result(timeout=timeout), request, open_tasks, topics, chats)
+    except Exception as exc:
+        logger.info("speakeasy: routing model unavailable, request goes to the focused task (%s)", type(exc).__name__)
+    latency = int((time.monotonic() - started) * 1000)
+    if decision is None:
+        return Decision([Part("follow_up", request, focus.task_id)], None, "focus", latency)
+    return dataclasses.replace(decision, latency_ms=latency)
+
+
 def routing_model(config: dict[str, Any] | None = None) -> str:
     """Which model routing uses, for display: auxiliary.speakeasy_router in the user's config."""
     if config is None:
@@ -1009,3 +1236,142 @@ def routing_model(config: dict[str, Any] | None = None) -> str:
     from .routing_choice import thinking_on
     text = f"{provider} · {model}" if model else provider
     return text if thinking_on(block) else f"{text} (thinking off)"
+
+
+# "You working on that?", "where are you at", "how's it going", "any update", "is it done yet".
+_STATUS_Q = re.compile(
+    r"(?i)^\W*(?:(?:hey|yo|so|okay|ok|and|um+|uh+|hmm+|yeah|bro|dude|todd|hermes)\W+)*(?:"
+    r"(?:are\s+)?you\s+(?:still\s+)?(?:working\s+on|on)\s+(?:that|it|this)"
+    r"|(?:where|how\s+far)\s+(?:are\s+)?(?:you|we)\s+at"
+    r"|where\s+(?:are\s+)?(?:you|we)\s+(?:with|on)\s+(?:that|it|this)"
+    r"|how(?:'s|\s+is|\s+are)\s+(?:it|that|things|we|you)\s+(?:going|coming(?:\s+along)?|doing)"
+    r"|(?:any|what's\s+the|whats\s+the)\s+(?:update|status|progress|news)"
+    r"|(?:is\s+)?(?:it|that)\s+(?:done|ready|finished)(?:\s+yet)?"
+    r"|(?:still|you)\s+(?:there|working|checking)"
+    r"|what(?:'s|\s+is)\s+taking\s+so\s+long"
+    r"|how\s+much\s+longer"
+    r")\b(?:\W+(?:on|with|of)\s+(?:that|it|this|the\s+task))?"
+    r"(?:\W+(?:yet|now|then|still|bro|man|dude|todd|hermes|buddy|there))*\W*$")
+
+
+def is_status_question(request: str) -> bool:
+    """A short "how's it going?" about running work. Answered from what the task has reported,
+    never handed to the task itself (that queued it behind the very work it asks about)."""
+    text = " ".join((request or "").split())
+    return 0 < len(text.split()) <= 12 and bool(_STATUS_Q.search(text))
+
+
+# Talking an idea through: answered by the voice itself, never a task.
+_TALK = re.compile(
+    r"(?i)\b(?:what\s+do\s+you\s+think|what\s+are\s+your\s+thoughts|(?:any\s+)?thoughts\s+on|your\s+take"
+    r"|talk\s+(?:me|it|this|that)\s+through|think\s+(?:it|this|that)\s+through\s+with\s+me|let'?s\s+(?:just\s+)?(?:talk|think|brainstorm|ideate|riff|jam|kick\s+(?:it|this|the\s+ball))"
+    r"|brainstorm|ideat(?:e|ing)|bounce\s+(?:an?\s+|some\s+)?ideas?|what\s+(?:about|if)\s+(?:the\s+idea|we|i|people|it)|how\s+about\s+(?:the\s+idea|we|i)"
+    r"|(?:(?:could|should|can)\s+(?:i|we)|(?:i|we)\s+(?:could|should|might))\s+(?:make|build|do|call|start|try|charge|go|sell|launch)|would\s+(?:it|that)\s+(?:be|make|work)"
+    r"|is\s+(?:it|that|this)\s+(?:a\s+)?(?:good|bad|dumb|smart|stupid)\s+idea|i'?m\s+(?:thinking|wondering)|i\s+was\s+thinking|i\s+feel\s+like)\b")
+# Asking for the work itself: go ahead and hand it off.
+_WORK = re.compile(
+    r"(?i)\b(?:look\s+(?:it\s+|that\s+|this\s+)?(?:up|into)|research|search|google|find\s+(?:me|out|some|a|the)|check|dig\s+into|pull\s+up|show\s+me"
+    r"|book|send|draft|email|text|message|schedule|remind|order|buy|play|turn\s+(?:on|off)|set\s+(?:up|a)|build|write|create|make\s+(?:me|a|the)|fix|deploy|ship"
+    r"|go\s+ahead|kick\s+(?:it|that|this)\s+off|get\s+(?:started|going|on\s+it)|go\s+(?:do|start|work)|start\s+(?:on|working)|map\s+(?:out\s+)?(?:the\s+)?competitors"
+    r"|what'?s\s+the\s+(?:latest|price|weather|score)|how\s+much\s+(?:is|does|are)|who\s+(?:owns|won|is\s+playing))\b")
+# Saying you're just talking: hold work until asked.
+_TALK_MODE_ON = re.compile(
+    r"(?i)\b(?:don'?t\s+(?:build|start|do|make|research|look\s+up)\s+anything|just\s+(?:talk|chat|think\s+out\s+loud)(?:\s+(?:to|with)\s+me)?"
+    r"|(?:we'?re|i'?m)\s+(?:still\s+|just\s+)?(?:in\s+the\s+)?(?:ideat|brainstorm|thinking|talking|exploring)|keep\s+(?:ideating|brainstorming|talking)"
+    r"|no\s+(?:tasks?|work)\s+(?:yet|for\s+now)|stop\s+(?:sending|starting|delegating))")
+# A reaction, not a request: "what, bro", "wait", "yeah okay", "hang on".
+_REACTION = re.compile(
+    r"(?i)^\W*(?:(?:what|huh|wait|hang\s+on|hold\s+on|yeah|yes|yep|no|nope|nah|okay|ok|right|sure|cool|nice|wow|damn|bro|dude|man|lol|haha|the\s+fuck|what\s+the\s+fuck|todd|hermes|really|seriously|for\s+real|got\s+it|i\s+see|interesting)\W*){1,4}$")
+
+
+# "could I make…", "if you were to build…", "should we send…": a verb inside a what-if isn't an ask.
+_HYPOTHETICAL = re.compile(r"(?i)\b(?:(?:could|should|would|might|if|what\s+if|can)\s+(?:i|we|they|people|someone|it)|if\s+you|(?:i|we|they)\s+(?:could|should|would|might))\s+(?:were\s+to\s+|ever\s+|just\s+)?\w+(?:\s+(?:a|an|the|it|this|that|me))?")
+
+
+def is_conversation(request: str) -> bool:
+    """Thinking out loud or asking for a take, with no ask to go do anything."""
+    text = " ".join((request or "").split())
+    return bool(text) and bool(_TALK.search(text)) and not _WORK.search(_HYPOTHETICAL.sub(" ", text))
+
+
+# Listening mode: a question about what was said in the room before the call ("what did Sam say the
+# deadline was?", "who said we'd ship Monday?", "remind me what Priya promised"). It opens with a
+# question and points back at something said, close by. A question word alone is a lookup ("what did
+# Apple announce today"), and "remind me to…" is always a reminder: only "remind me what/who/…" asks.
+_ROOM_ASK = re.compile(
+    r"(?i)^\W*(?:(?:so|okay|ok|um+|uh+|hey|wait|sorry|and|but|quick\s+question)\W+)*(?:[a-z]+\s*,\s*)?"
+    r"(?P<lead>(?:remind\s+me|tell\s+me|(?:can|could)\s+you\s+(?:remind|tell)\s+me|do\s+you\s+remember)\s+)?"
+    # It opens with a question word (not a "what if" musing)…
+    r"(?!what\s+if\b)(?=(?:what|who|whom|whose|when|where|which|how|why|did|didn'?t|was|wasn'?t|were|is|are"
+    r"|has|have|had|do|does)(?:'s|'re|'d)?\b)"
+    # …and soon points back at something said in the room.
+    r".{0,80}?\b(?:said|mentioned|talked\s+about|agreed|decided|asked|promised|suggested|brought\s+up"
+    r"|(?:did|didn'?t)\b.{0,60}?\b(?:say|mention|talk\s+about|agree|decide|ask|promise|suggest|tell)"
+    r"|just\s+now|in\s+the\s+meeting|earlier)\b")
+# Work asked for after the question, joined on ("…, and email it to Dana"): that's a task.
+_THEN_WORK = re.compile(r"(?i)(?:\band\b|\bthen\b|[,;.!?])\s*(?:then\s+|also\s+|please\s+|(?:can|could|would)\s+you\s+)?"
+                        r"(?=\S)")
+
+
+def asks_about_room(request: str) -> bool:
+    """A question about what was said in the room (or earlier in the call), which the voice answers
+    from the room transcript instead of starting work. Built like ``is_conversation``: anything that
+    asks for work is never a room question. What someone said ("who said we'd ship Monday") is not an
+    ask, so work words count only in the question itself and in a request joined on after it."""
+    text = " ".join((request or "").split())
+    match = _ROOM_ASK.match(text)
+    if not match:
+        return False
+    question = text[match.end("lead") if match.group("lead") else 0:match.end()]
+    if _WORK.search(question):
+        return False
+    tail = text[match.end():]
+    return not any(_WORK.match(tail, joined.end()) for joined in _THEN_WORK.finditer(tail))
+
+
+def asks_for_work(request: str) -> bool:
+    return bool(_WORK.search(" ".join((request or "").split())))
+
+
+def starts_talk_mode(request: str) -> bool:
+    return bool(_TALK_MODE_ON.search(" ".join((request or "").split())))
+
+
+def is_reaction(request: str) -> bool:
+    return bool(_REACTION.match(" ".join((request or "").split())))
+
+
+# Setting a waiting question aside: "it's already handled", "never mind that one", "skip it". Strong
+# phrases say it's handled or name the question; weak ones ("never mind", "forget it") also mean
+# "stop the thing I just asked", so the call only takes them for a question that is the newest thing.
+_ASIDE_STRONG = re.compile(
+    r"(?i)\b(?:(?:it|that|this)(?:\s+one)?(?:'s|\s+is|\s+was|\s+has\s+been|\s+got)?\s+(?:already\s+)?"
+    r"(?:handled|taken\s+care\s+of|sorted(?:\s+out)?|dealt\s+with|been\s+handled)"
+    r"|(?:i|we)(?:'ve|\s+have)?\s+already\s+(?:handled|did|done|fixed|sorted|took\s+care\s+of|dealt\s+with)"
+    r"|(?:handled|did|sorted|fixed)\s+(?:it|that|this)(?:\s+one)?\s+already"
+    r"|already\s+(?:handled|taken\s+care\s+of|done|sorted)"
+    r"|set\s+(?:it|that|this)(?:\s+one)?\s+aside|set\s+aside"
+    r"|close\s+(?:it|that|this)(?:\s+one)?\s+out|close\s+out\s+(?:it|that|this)"
+    r"|pass\s+on\s+(?:it|that|this)(?:\s+one)?|not\s+needed|(?:don't|do\s+not|no\s+longer)\s+need\s+(?:it|that|this)"
+    r"|(?:skip|drop|ignore|forget(?:\s+about)?|dismiss|never\s*mind|nevermind)\s+(?:that|this|the)\s+(?:one|question|choice|decision))\b")
+_ASIDE_WEAK = re.compile(
+    r"(?i)^\W*(?:(?:oh|ok|okay|yeah|no|nah|nope|actually|um+|uh+|so|just|and|but)\W+)*"
+    r"(?:never\s*mind|nevermind|forget\s+(?:about\s+)?(?:it|that)|skip\s+(?:it|that)|drop\s+(?:it|that)|"
+    r"don't\s+worry\s+about\s+(?:it|that)|not\s+(?:right\s+)?now|leave\s+it)"
+    r"(?:\W+(?:for\s+now|then|thanks|thank\s+you|please|man|dude))*\W*$")
+# Words that make it an answer or new work, not setting it aside ("never mind, turn on the den").
+_ASIDE_WORK = re.compile(r"(?i)\b(?:turn|switch|book|buy|order|send|go\s+with|pick|choose|use|instead|but\s+can|can\s+you|"
+                         r"could\s+you|please\s+(?!.*\baside\b)\w+|look\s+up|find|check)\b")
+
+
+def set_aside_kind(request: str) -> str | None:
+    """"strong" or "weak" when the words set a waiting question aside, else None. Short utterances
+    only, and nothing that asks for work or picks an option."""
+    said = " ".join((request or "").split())
+    if not said or len(said.split()) > 14 or _ASIDE_WORK.search(said):
+        return None
+    if _ASIDE_STRONG.search(said):
+        return "strong"
+    if _ASIDE_WEAK.search(said):
+        return "weak"
+    return None

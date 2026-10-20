@@ -14,6 +14,12 @@ struct ImageReviewCard: View {
     /// so three waiting reviews never push the panel's controls off screen.
     var compact = false
     @ObservedObject var model: VoicePanelModel
+    /// Shown inside its job's view: no "Open task" (that's where it is).
+    var inJob = false
+    /// Tallest the preview gets (job views keep pictures small; click for full size).
+    var previewCap: CGFloat? = nil
+    /// The card's heading: pictures that came along with an answer aren't "to review".
+    var heading = "Ready to review"
     @State private var image: NSImage?
     @State private var failed = false
     @Environment(\.colorScheme) private var scheme
@@ -21,7 +27,8 @@ struct ImageReviewCard: View {
     private var index: Int { min(model.reviewIndex[review.runID] ?? 0, max(0, review.images.count - 1)) }
     private var card: ImageCard? { review.images.indices.contains(index) ? review.images[index] : nil }
     private var previewHeight: CGFloat {
-        ImageReviewLayout.previewHeight(visibleScreenHeight: NSScreen.main?.visibleFrame.height ?? 800, others: shownCount - 1)
+        let h = ImageReviewLayout.previewHeight(visibleScreenHeight: NSScreen.main?.visibleFrame.height ?? 800, others: shownCount - 1)
+        return previewCap.map { min(h, $0) } ?? h
     }
 
     var body: some View {
@@ -58,9 +65,11 @@ struct ImageReviewCard: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
                 Image(systemName: "photo.on.rectangle.angled").font(.system(size: 11, weight: .semibold)).foregroundStyle(Tokens.blue)
-                Text("Ready to review").font(.system(size: 11.5, weight: .semibold))
-                Text("· \(review.taskName)").font(.system(size: 11.5)).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.tail)
+                Text(heading).font(.system(size: 11.5, weight: .semibold))
+                if !inJob {   // in its job's view the job title already says whose it is
+                    Text("· \(review.taskName)").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.tail)
+                }
                 Spacer(minLength: 4)
                 Text(review.images.count > 1 ? "\(index + 1) of \(review.images.count)" : review.countLabel)
                     .font(.system(size: 10.5, weight: .medium)).foregroundStyle(.secondary)
@@ -77,8 +86,10 @@ struct ImageReviewCard: View {
                     PillButton(title: "›", action: { step(1) }).help("Next image").accessibilityLabel("Next image")
                 }
                 Spacer()
-                PillButton(title: "Open task", action: { model.onSelectTask(review.taskID) })
-                    .help("Show this task's full answer")
+                if !inJob {
+                    PillButton(title: "Open task", action: { model.onSelectTask(review.taskID) })
+                        .help("Show this task's full answer")
+                }
                 PillButton(title: "Dismiss", action: { model.onDismissReview(review.runID) })
                     .help("Hide this card; the images stay in the task")
             }
@@ -99,6 +110,7 @@ struct ImageReviewCard: View {
                 Color.primary.opacity(0.05)
                 if let image {
                     Image(nsImage: image).resizable().interpolation(.high).scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)   // centred, not pushed to the corner
                 } else {
                     Image(systemName: failed ? "photo.badge.exclamationmark" : "photo")
                         .font(.system(size: 26)).foregroundStyle(.secondary)

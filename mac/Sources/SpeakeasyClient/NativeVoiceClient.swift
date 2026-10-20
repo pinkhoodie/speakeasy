@@ -5,6 +5,9 @@ import AVFoundation
 import CoreGraphics
 import Foundation
 import SpeakeasyCore
+#if os(iOS)
+import UIKit
+#endif
 
 /// The call surface the app delegate drives.
 @MainActor
@@ -64,7 +67,7 @@ public final class NativeVoiceClient: VoiceCallClient {
     public var startMuted = false
     /// Client preferences (Settings › General).
     public var showPanelOnStart = true
-    /// Settings › General "Start calls in slim mode".
+    /// Settings › General "Start calls folded into the orb" (was "slim mode").
     public var startSlim = false
     public var followSystemAudio = true
     public var panelOnAllSpaces = true { didSet { surface.onAllSpaces = panelOnAllSpaces } }
@@ -101,7 +104,32 @@ public final class NativeVoiceClient: VoiceCallClient {
     private var ticker: Timer?
     private var levelTimer: Timer?
     /// Checks the call's mic really gets through (see MicCheck); runs even with the screen off.
-    private var micCheck = MicCheck()
+    private var micCheck = NativeVoiceClient.freshMicCheck()
+    /// A mic repair happened on this call: reconnect without listen-while-connecting from now on,
+    /// so a repair never repeats the very mic handoff that may have failed.
+    private var skipEarlyCapture = false
+    /// Whether this connection started with the on-device listener (for the repair report).
+    private var connectionUsedEarlyCapture = false
+    /// Where the current connection attempt is (for the stall report).
+    private var connectStage = "starting"
+    private var connectWatchdog: DispatchWorkItem?
+    private var connectAttempts = 0
+    /// A call that hasn't gone live by then is stuck; retry once, then say so.
+    static let connectStallAfter: TimeInterval = 12
+    /// iPhone: the call has no mic because the app isn't in front (an Action Button / Siri start
+    /// that landed in the background, or iOS took the input away). Reconnecting from the
+    /// background can't fix that, since iOS hands the mic only to the app in front; it's fixed
+    /// the moment the app is opened instead.
+    private var waitingForApp = false
+    private var activeObserver: NSObjectProtocol?
+
+    private static func freshMicCheck() -> MicCheck {
+        #if os(iOS) || os(visionOS)
+        return MicCheck(firstSoundGrace: MicCheck.firstSoundWithinHandheld)
+        #else
+        return MicCheck()
+        #endif
+    }
     private var micTimer: Timer?
     /// Set while a dead mic is being repaired (pause → immediate resume).
     private var micRepairPending = false
@@ -116,6 +144,17 @@ public final class NativeVoiceClient: VoiceCallClient {
     private var earlyCapture: EarlyCapture?
     /// Listen while connecting so a request said right away isn't lost (on-device transcription).
     public var listenWhileConnecting = true
+
+    // Listening mode: the call it was turned off into carries what it heard (the "room").
+    /// That call's room text and take-off state (nil for every other call). Shared by every leg of
+    /// the call (connect retry, resume, device switch, mic repair); gone when the call ends.
+    private var roomCall: RoomCall?
+    private var roomNudgeTask: Task<Void, Never>?
+    /// Bumped per nudge watcher, so a finished watcher clears `roomNudgeTask` only if it's still its own.
+    private var roomNudgeGeneration = 0
+    /// Listening mode learns whether its transcript was used (the call went live) or should come
+    /// back (the call failed before it went live), so it can listen on with it intact.
+    public var onRoomTakeoffOutcome: ((RoomTakeoffOutcome) -> Void)?
     /// Preview mode: canned state, no network, no audio.
     public private(set) var previewMode = false
 
@@ -151,7 +190,12 @@ public final class NativeVoiceClient: VoiceCallClient {
         model.onToggleSlim = { [weak self] in
             guard let self else { return }
             self.model.slim.toggle()
-            if self.model.slim { self.model.workExpanded = false; self.model.selectedTaskID = nil }
+            if self.model.slim {
+                self.model.workExpanded = false; self.model.selectedTaskID = nil
+                if self.model.selectedJobID != nil { self.model.selectedJobID = nil; self.setFocus(taskID: nil) }
+            } else {
+                self.surface.focus()   // the board takes the arrow keys
+            }
             self.surface.setNeedsResize()
         }
         model.onApproval = { [weak self] choice in self?.resolveApproval(choice) }
@@ -161,11 +205,14 @@ public final class NativeVoiceClient: VoiceCallClient {
         model.onTogglePause = { [weak self] in self?.togglePause() }
         model.onStopTask = { [weak self] runID in self?.stopWork(runID: runID) }
         model.onAnswer = { [weak self] taskID, text in self?.answerQuestion(taskID: taskID, text: text) }
+        model.onSetAside = { [weak self] runID in self?.setAside(runID) }
         model.loadCardImage = { [weak self] runID, number in
             guard let api = await self?.api else { return nil }
             return try? await api.image(runID: runID, index: number)
         }
         model.onSelectTask = { [weak self] id in self?.selectTask(id) }
+        model.onOpenJob = { [weak self] id in self?.openJob(id) }
+        model.onTellJob = { [weak self] id in self?.tellJob(id) }
         model.onDismissTasks = { [weak self] runIDs in self?.dismissTasks(runIDs) }
         model.onDismissReview = { [weak self] runID in self?.dismissReview(runID) }
         model.loadProductImage = { [weak self] runID, index in
@@ -193,6 +240,8 @@ public final class NativeVoiceClient: VoiceCallClient {
         let before = model.state
         let after = reduce(before, event, now: Date())
         model.state = after
+        if after.interactionID != nil, after.interactionID != before.interactionID { postFocus() }
+        if after.connection != .connecting, connectWatchdog != nil { connectWatchdog?.cancel(); connectWatchdog = nil }
         applySideEffects(from: before, to: after)
         watchMic(event, from: before, to: after)
         scheduleUploadsIfNeeded()
@@ -205,6 +254,8 @@ public final class NativeVoiceClient: VoiceCallClient {
         case .inputDelta, .outputDelta: micCheck.heard()
         default: break
         }
+        // The call heard the user after listening mode was turned off: never answer over them.
+        if case .inputDelta = event { roomCall?.noteHeardUser() }
         if old.connection != .live && new.connection == .live {
             micCheck.connectionOpened()
             micRepairPending = false
@@ -224,7 +275,7 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func checkMic() {
-        guard let engine, model.state.connection == .live else { return }
+        guard let engine, model.state.connection == .live, !waitingForApp else { return }
         let state = model.state
         var speaking = false
         if case .speaking = state.speech { speaking = true }
@@ -241,17 +292,125 @@ public final class NativeVoiceClient: VoiceCallClient {
     /// This is what closing and reopening the app did, done for you within a few seconds.
     private func repairMic(_ fault: MicFault) {
         guard model.state.canPause, !micRepairPending, !reconnectAfterPause else { return }
+        let detail = micReportDetail()
+        #if os(iOS)
+        if AVAudioSession.sharedInstance().currentRoute.inputs.isEmpty,
+           UIApplication.shared.applicationState != .active {
+            waitingForApp = true
+            dispatch(.micHealth(.broken))
+            onError?("Open Speakeasy to turn the mic on")
+            reportMic("no mic while the app is in the background (\(detail)); reopening when the app is opened")
+            activeObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.appOpenedForMic() }
+            }
+            return
+        }
+        #endif
         micCheck.repairStarted()
         micRepairPending = true
+        skipEarlyCapture = true
         dispatch(.micHealth(.repairing))
-        reportMic("repair \(micCheck.repairs): \(fault.rawValue)")
+        reportMic("repair \(micCheck.repairs): \(fault.rawValue) (\(detail))")
         reconnectAfterPause = true
         pause()
     }
 
+    private func armConnectWatchdog(_ api: ServerClient) {
+        connectWatchdog?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in self?.connectStalled(api) }
+        }
+        connectWatchdog = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectStallAfter, execute: item)
+    }
+
+    /// Still "connecting" long after it should be live. Before, it sat there showing "Listening"
+    /// with nothing reaching the call. Now: retry once without the listener, then fail visibly.
+    private func connectStalled(_ api: ServerClient) {
+        guard model.state.connection == .connecting else { return }
+        let stage = connectStage
+        reportMic("connect stalled (attempt \(connectAttempts)) at: \(stage); \(micReportDetail())")
+        // A call from listening mode keeps what the user already said for the retried call
+        // (which connects without the listener) instead of answering from the room over it.
+        if roomCall != nil, let heard = earlyCapture?.heardSoFar, !cleanTranscript(heard).isEmpty {
+            roomCall?.carriedWords = heard
+        }
+        roomNudgeTask?.cancel(); roomNudgeTask = nil   // the retried admission watches afresh
+        stopEarlyCapture()
+        startTask?.cancel(); startTask = nil
+        streamTask?.cancel(); streamTask = nil
+        engine?.close(); engine = nil
+        if connectAttempts < 2 {
+            skipEarlyCapture = true
+            onStatus?("Reconnecting…")
+            connect(api)
+        } else {
+            connectWatchdog?.cancel(); connectWatchdog = nil
+            dispatch(.failed("Couldn't connect to \(model.state.assistantName). Tap to try again."))
+        }
+    }
+
+    /// The app is in front again: reopen the voice connection, which now gets the mic.
+    private func appOpenedForMic() {
+        guard waitingForApp else { return }
+        stopWaitingForApp()
+        guard model.state.canPause, !reconnectAfterPause else { return }
+        micRepairPending = true
+        skipEarlyCapture = true
+        dispatch(.micHealth(.repairing))
+        reportMic("app opened; reopening the voice connection for the mic")
+        reconnectAfterPause = true
+        pause()
+    }
+
+    private func stopWaitingForApp() {
+        waitingForApp = false
+        if let activeObserver { NotificationCenter.default.removeObserver(activeObserver) }
+        activeObserver = nil
+    }
+
+    /// What the check saw, so a repair in the log says why (no audio content, just numbers).
+    private func micReportDetail() -> String {
+        var parts = [String(format: "watched %.1fs", micCheck.watchedFor),
+                     "level \(micCheck.lastLevel.map { String(format: "%.5f", $0) } ?? "none")",
+                     "packets \(micCheck.lastPacketCount.map(String.init) ?? "none")",
+                     connectionUsedEarlyCapture ? "after listen-while-connecting" : "direct"]
+        #if os(iOS) || os(visionOS)
+        let route = AVAudioSession.sharedInstance().currentRoute
+        let ins = route.inputs.map { $0.portType.rawValue }.joined(separator: "+")
+        let outs = route.outputs.map { $0.portType.rawValue }.joined(separator: "+")
+        parts.append("in " + (ins.isEmpty ? "none" : ins))
+        parts.append("out " + (outs.isEmpty ? "none" : outs))
+        parts.append(NativeCallEngine.sharedAudioSummary())
+        #endif
+        return parts.joined(separator: ", ")
+    }
+
+    /// Vision Pro: the task you're facing or holding (nil = none), and which part of it. Unnamed
+    /// requests go to that task, and the voice is told what you're looking at.
+    private var focusSent: (task: String?, detail: String)?
+    private var focusPosted: (interaction: String, task: String?, detail: String)?
+
+    /// The task the call was last told is on screen (nil = none).
+    public var focusedTaskID: String? { focusSent?.task }
+
+    public func setFocus(taskID: String?, detail: String = "") {
+        focusSent = (taskID, String(detail.prefix(200)))
+        postFocus()
+    }
+
+    private func postFocus() {
+        guard !previewMode, let focus = focusSent, let api, let id = model.state.interactionID else { return }
+        if let p = focusPosted, p.interaction == id, p.task == focus.task, p.detail == focus.detail { return }
+        focusPosted = (id, focus.task, focus.detail)
+        let body: [String: Any] = ["task_id": focus.task ?? NSNull(), "detail": focus.detail]
+        Task { _ = try? await api.post("/voice/interactions/\(id)/focus", body) }
+    }
+
     private func reportMic(_ note: String) {
         guard let api, let id = model.state.interactionID else { return }
-        Task { _ = try? await api.post("/voice/interactions/\(id)/mic-check", ["note": String(note.prefix(200))]) }
+        Task { _ = try? await api.post("/voice/interactions/\(id)/mic-check", ["note": String(note.prefix(400))]) }
     }
 
     private func applySideEffects(from old: VoiceState, to new: VoiceState) {
@@ -279,8 +438,18 @@ public final class NativeVoiceClient: VoiceCallClient {
         }
         if new.connection == .paused, old.connection != .paused { callPaused() }
         if old.exchange != new.exchange { surface.setNeedsResize() }
-        if case .ended(let fin) = new.connection, old.connection != new.connection { finishCall(fin) }
+        if new.connection == .live, old.connection != .live, roomCall != nil {
+            roomCall?.noteLive(at: Date())
+            if let outcome = roomCall?.outcome(for: .wentLive) { onRoomTakeoffOutcome?(outcome) }
+        }
+        if case .ended(let fin) = new.connection, old.connection != new.connection {
+            // Before it went live, only an end the user asked for gives the transcript up; a lost
+            // connection (.transportLost ends a connecting call too) gets it back to listening mode.
+            if let outcome = roomCall?.outcome(for: .ended) { onRoomTakeoffOutcome?(outcome) }
+            finishCall(fin)
+        }
         if case .failed(let message) = new.connection, old.connection != new.connection {
+            if let outcome = roomCall?.outcome(for: .failed) { onRoomTakeoffOutcome?(outcome) }
             onError?(message)
             finishCall(.incomplete)
         }
@@ -356,20 +525,65 @@ public final class NativeVoiceClient: VoiceCallClient {
     // MARK: Call lifecycle
 
     public func start() {
+        startCall(room: nil, takeoffAt: nil)
+    }
+
+    /// Start the call listening mode was turned off into. It carries what was heard, opens
+    /// unmuted whatever "start muted" says (you turned listening off to ask something), and when
+    /// nothing is said it answers from what it heard about 2 s after `takeoffAt`.
+    /// If listening mode was turned on mid-conversation (which paused this call), it resumes that
+    /// same conversation instead, with what was heard added.
+    public func start(room: String, takeoffAt: Date) {
+        if model.state.connection == .paused {
+            roomNudgeTask?.cancel(); roomNudgeTask = nil
+            if !room.isEmpty { roomCall = RoomCall(room: room, takeoffAt: takeoffAt) }   // a new take-off
+            resume(unmuted: true)
+            return
+        }
+        guard !model.state.connection.isOpen else { return }
+        startCall(room: room.isEmpty ? nil : room, takeoffAt: takeoffAt)
+    }
+
+    /// Listening mode turned on mid-conversation: pause this call (the voice stops hearing and
+    /// answering, nothing is billed, the conversation and tasks are kept) and report whether it
+    /// paused, so the mic is free for listening mode. Turning listening off resumes it.
+    public func pauseForListening() async -> Bool {
+        if model.state.connection == .paused { return true }
+        guard model.state.canPause else { return false }
+        pause()
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            switch model.state.connection {
+            case .paused: return true
+            case .live where !model.state.pausing: return false   // the server couldn't hold the call
+            case .idle, .ended, .failed: return false
+            default: continue
+            }
+        }
+        return false
+    }
+
+    private func startCall(room: String?, takeoffAt: Date?) {
         if model.state.connection == .paused { resume(); return }
         guard !model.state.connection.isInCall else { surface.show(); return }
+        resetRoom()
+        if let room, let takeoffAt { roomCall = RoomCall(room: room, takeoffAt: takeoffAt) }
         cancelAutoHide()
         closeNotified = false
         voiceProvider = "openai"
         codexStopRequested = false
         appliedMic = nil; appliedRemote = nil
-        micCheck = MicCheck(); micRepairPending = false
+        micCheck = NativeVoiceClient.freshMicCheck(); micRepairPending = false; skipEarlyCapture = false
+        connectAttempts = 0
+        stopWaitingForApp()
         dwell = StatusDwell(minimumDwell: 1.5)
         model.workExpanded = false
         model.captionExpanded = false
         workOnlyTask?.cancel()
         dispatch(.startRequested)
-        if startMuted { dispatch(.setMic(.muted)) }
+        // A call from listening mode always opens unmuted: the words said next are the request.
+        if startMuted && takeoffAt == nil { dispatch(.setMic(.muted)) }
         surface.onEscape = { [weak self] in self?.handleEscape() }
         if startSlim { model.slim = true }
         if showPanelOnStart { surface.show() }
@@ -408,7 +622,12 @@ public final class NativeVoiceClient: VoiceCallClient {
         // What this call can share: re-checked against the plugin while the call connects.
         dispatch(.sharing(.declared(screenDeclaration())))
         refreshAttachmentSupport(api)
-        startEarlyCapture()
+        connectStage = "starting"
+        connectAttempts += 1
+        armConnectWatchdog(api)
+        if skipEarlyCapture { stopEarlyCapture() } else { startEarlyCapture() }
+        connectionUsedEarlyCapture = earlyCapture != nil
+        if earlyCapture == nil { NativeCallEngine.resetSharedAudio() }
         let engine = NativeCallEngine()
         self.engine = engine
         if earlyCapture != nil { engine.holdAudio() }
@@ -423,27 +642,54 @@ public final class NativeVoiceClient: VoiceCallClient {
             }
         }
         engine.onChannelClosed = { [weak self] in self?.channelClosed() }
+        engine.onChannelOpen = { [weak self] in self?.connectStage = "channel open; waiting for the call to start" }
         engine.onAudioFormatChanged = { [weak self] in self?.audioDevicesChanged() }
         engine.onConnectionFailed = { [weak self] in
             guard let self, self.model.state.connection == .live || self.model.state.connection == .connecting else { return }
             self.dispatch(.transportLost)
         }
+        // A new admission of a call from listening mode carries what was heard. Whether the
+        // server still takes it (the plugin can be updated or rolled back during a long listen) is
+        // asked while the offer is made, so the check never delays the call.
+        // nil = the status didn't come back (unknown); a status without the flag = an older plugin.
+        let resuming = model.state.resumeFrom != nil
+        let roomSupport: Task<Bool?, Never>? = roomCall?.sends(resuming: resuming) == true
+            ? Task {
+                (try? await api.status()).map { ($0.roomListening ?? false) && (!resuming || ($0.roomOnResume ?? false)) }
+            } : nil
         startTask = Task { [weak self] in
+            var sentRoom = false
             do {
                 await engine.warmAudioRoute()
                 try engine.prepare(captureAudio: true)
                 // Honour a mute chosen before/while connecting (start-muted or hotkey).
                 engine.setMicEnabled(self?.model.state.localAudioEnabled ?? false)
+                self?.connectStage = "creating offer"
                 let sdp = try await engine.createOffer()
+                self?.connectStage = "waiting for the server"
                 guard let self, self.engine === engine, self.model.state.connection == .connecting else { engine.close(); return }
-                let tour = self.model.state.resumeFrom == nil ? self.pendingTour : nil
                 // Resumes declare again: the resumed call starts with sharing off.
                 let screen = self.model.state.sharing.declared
+                var room: String?
+                if let roomSupport, let context = self.roomCall?.room {
+                    // Give a slow status a second; if it still hasn't answered, send the room
+                    // anyway: a server that can't take it answers 400 and the call falls back below.
+                    let supported = await Self.firstAnswer(of: roomSupport, within: 1)
+                    if supported == false {
+                        self.dropRoomContext("This Speakeasy plugin can't use what listening mode heard. Update it on the Hermes machine, then run hermes voice reload.")
+                    } else {
+                        room = context
+                    }
+                    guard self.engine === engine, self.model.state.connection == .connecting else { engine.close(); return }
+                }
+                sentRoom = room != nil
+                let tour = self.model.state.resumeFrom == nil && room == nil ? self.pendingTour : nil
                 let admission = try await api.admitSession(sdp: sdp, idempotencyKey: UUID().uuidString,
                                                               resumeFrom: self.model.state.resumeFrom, tour: tour,
-                                                              screen: screen)
+                                                              screen: screen, room: room)
                 guard self.engine === engine else { engine.close(); return }
                 self.dispatch(.sharing(.declared(screen)))   // exactly what the plugin was told
+                if sentRoom { self.roomCall?.markDelivered() }   // later resumes rely on the server's copy
                 if tour != nil {
                     self.pendingTour = nil
                     self.model.tourActive = true
@@ -452,12 +698,14 @@ public final class NativeVoiceClient: VoiceCallClient {
                 self.voiceProvider = admission.voiceProvider
                 self.codexStopRequested = false
                 self.dispatch(.sessionAdmitted(interactionID: admission.interactionID))
+                self.connectStage = "admitted; connecting audio"
                 let early = self.earlyCapture
                 if early != nil { engine.setMicEnabled(false) }
                 try await engine.setRemoteAnswer(admission.answerSDP)
                 self.appliedMic = nil; self.appliedRemote = nil
                 self.dispatch(.tick)
                 self.startServerEvents(api, interactionID: admission.interactionID)
+                self.connectStage = "answer applied; waiting for the call to start"
                 if let early {
                     // Mid-sentence? Let the listener hear you out before the call takes the mic.
                     await early.waitForPause()
@@ -466,10 +714,20 @@ public final class NativeVoiceClient: VoiceCallClient {
                     self.handOverEarlyWords(early, api: api, interactionID: admission.interactionID)
                 } else {
                     engine.releaseAudio()
+                    self.handOverRoomRequest("", api: api, interactionID: admission.interactionID)
                 }
                 if self.model.state.connection == .ending { self.sendClose() }
             } catch {
                 guard let self, self.engine === engine else { return }
+                // The server wouldn't take what listening mode heard (an older plugin, or the
+                // transcript was refused): don't loop back into listening, start a normal call.
+                if sentRoom, let http = error as? ServerClient.HTTPError, http.status == 400 || http.status == 413,
+                   self.model.state.connection == .connecting {
+                    engine.close()
+                    self.dropRoomContext("Couldn't use what listening mode heard; carried on without it")
+                    self.connect(api)
+                    return
+                }
                 // The api no longer holds the paused call (restarted, or it was
                 // already resumed): start a fresh call rather than failing.
                 if self.model.state.resumeFrom != nil, let http = error as? ServerClient.HTTPError,
@@ -486,6 +744,7 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     public func end() {
+        roomCall?.noteEndRequested()
         switch model.state.connection {
         case .paused:
             dispatch(.endRequested)
@@ -570,11 +829,14 @@ public final class NativeVoiceClient: VoiceCallClient {
     private func audioDevicesChanged() {}
     #endif
 
-    private func resume() {
+    /// `unmuted`: listening mode was just turned off to talk, so the call comes back with the mic on.
+    private func resume(unmuted: Bool = false) {
         guard model.state.connection == .paused, let api else { return }
         pollTask?.cancel(); pollTask = nil
         appliedMic = nil; appliedRemote = nil
         dispatch(.resumeRequested)
+        if unmuted { dispatch(.setMic(.live)) }
+        connectAttempts = 0
         surface.show()
         startTicker()
         startLevelMeter()
@@ -674,9 +936,23 @@ public final class NativeVoiceClient: VoiceCallClient {
         guard listenWhileConnecting, model.state.localAudioEnabled, !previewMode else { return }
         let capture = EarlyCapture()
         capture.onPartial = { [weak self] text in self?.dispatch(.earlyHeard(text)) }
-        guard capture.start() else { return }
+        capture.onSignal = { [weak self, weak capture] in
+            guard let self, let capture, self.earlyCapture === capture else { return }
+            self.connectStage = "listener hearing"
+            self.dispatch(.earlyListening(true))
+        }
+        guard capture.start() else { connectStage = "listener couldn't start"; return }
         earlyCapture = capture
-        dispatch(.earlyListening(true))
+        connectStage = "listener started"
+        // No sound within 1.5 s (iOS hadn't given us the mic yet, e.g. right after an Action Button
+        // launch): drop the listener and let the call take the mic itself. Never show "Listening"
+        // for a mic that hears nothing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak capture] in
+            guard let self, let capture, self.earlyCapture === capture, !capture.hasSignal else { return }
+            self.connectStage = "listener heard no sound; call takes the mic"
+            self.stopEarlyCapture()
+            self.engine?.setMicEnabled(self.model.state.localAudioEnabled)
+        }
     }
 
     private func stopEarlyCapture() {
@@ -697,14 +973,73 @@ public final class NativeVoiceClient: VoiceCallClient {
             self.dispatch(.tick)   // the call's mic opens now (unless you muted)
             let keep = self.model.state.localAudioEnabled && self.model.state.connection.isInCall
             self.dispatch(.earlyListening(false))
+            if self.roomCall != nil {
+                if keep { self.handOverRoomRequest(text, api: api, interactionID: interactionID) }
+                return
+            }
             guard keep, !cleanTranscript(text).isEmpty else { return }
-            self.dispatch(.inputDelta(text))
-            // Sharing turned on while connecting reaches the plugin before these words do.
-            await self.screenSend?.value
-            do {
-                _ = try await api.post("/voice/interactions/\(interactionID)/early-request", ["text": String(text.prefix(1000))])
-            } catch {
-                self.dispatch(.error("Couldn't pass on what you said while connecting. Say it again."))
+            await self.sendEarlyRequest(text, api: api, interactionID: interactionID)
+        }
+    }
+
+    private func sendEarlyRequest(_ text: String, api: ServerClient, interactionID: String) async {
+        dispatch(.inputDelta(text))
+        // Sharing turned on while connecting reaches the plugin before these words do.
+        await screenSend?.value
+        do {
+            _ = try await api.post("/voice/interactions/\(interactionID)/early-request", ["text": String(text.prefix(1000))])
+        } catch {
+            dispatch(.error("Couldn't pass on what you said while connecting. Say it again."))
+        }
+    }
+
+    // MARK: Listening mode (the call it was turned off into)
+
+    /// The words said since listening mode was turned off (plus any the listener had heard before
+    /// a connect retry) are the request. With none, the call answers from what listening mode
+    /// heard, once RoomTakeoffPolicy says the user isn't about to speak. No-op for other calls.
+    private func handOverRoomRequest(_ text: String, api: ServerClient, interactionID: String) {
+        guard let call = roomCall else { return }
+        let words = [call.carriedWords ?? "", text].filter { !cleanTranscript($0).isEmpty }.joined(separator: " ")
+        roomCall?.carriedWords = nil
+        if !words.isEmpty {
+            // Words said while a later leg reconnects are an ordinary request too.
+            roomCall?.markRequestHandled()
+            Task { [weak self] in await self?.sendEarlyRequest(words, api: api, interactionID: interactionID) }
+            return
+        }
+        // Nothing said: the call keeps the room as context and waits for a request. It never speaks
+        // first; it can't know what you want from a conversation it overheard.
+        roomCall?.markRequestHandled()
+    }
+
+    /// The server can't take what listening mode heard: this call carries on without it.
+    private func dropRoomContext(_ message: String) {
+        let outcome = roomCall?.notUsed()
+        roomCall = nil
+        roomNudgeTask?.cancel(); roomNudgeTask = nil
+        if let outcome { onRoomTakeoffOutcome?(outcome) }
+        dispatch(.error(message))
+    }
+
+    private func resetRoom() {
+        roomCall = nil
+        roomNudgeTask?.cancel(); roomNudgeTask = nil
+    }
+
+    /// The task's answer if it arrives within `seconds`, else nil (the task keeps running in the
+    /// background). Not a task group: a group waits for every child before it returns, and awaiting
+    /// an unstructured task ignores cancellation, so the timeout would never cut the wait.
+    private static func firstAnswer<T: Sendable>(of task: Task<T?, Never>, within seconds: Double) async -> T? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+            let once = SignalFlag()
+            Task {
+                let value = await task.value
+                if once.set() { continuation.resume(returning: value) }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                if once.set() { continuation.resume(returning: nil) }
             }
         }
     }
@@ -718,6 +1053,7 @@ public final class NativeVoiceClient: VoiceCallClient {
 
     private func finishCall(_ finalization: Finalization) {
         stopEarlyCapture()
+        resetRoom()   // what listening mode heard lives only as long as the call it was used for
         model.selectedTaskID = nil
         model.tourActive = false
         endDeadline?.cancel(); endDeadline = nil
@@ -843,9 +1179,12 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func handleEscape() {
-        if model.selectedTaskID != nil && model.workExpanded { model.selectedTaskID = nil; surface.setNeedsResize() }
+        if model.selectedJobID != nil { closeJob() }
+        else if model.selectedTaskID != nil && model.workExpanded { model.selectedTaskID = nil; surface.setNeedsResize() }
         else if model.workExpanded && !model.state.workOnly { model.workExpanded = false; surface.setNeedsResize() }
         else if model.state.workOnly { closeWorkView() }
+        // Escape folds an open call into the orb; from the orb it ends the call, as before.
+        else if model.state.connection.isOpen && !model.showsSlim { model.onToggleSlim() }
         else if model.state.connection.isOpen { end() }
         else { hideNow() }
     }
@@ -937,6 +1276,16 @@ public final class NativeVoiceClient: VoiceCallClient {
         if model.showsSlim { model.slim = false }
         if show.opensDetail {
             if model.state.tasks.contains(where: { $0.id == show.taskID }) { selectTask(show.taskID) }
+        } else if let job = model.jobs.first(where: { j in j.tasks.contains { $0.id == show.taskID } }) {
+            // Asked to see it: the review lives in its job's view.
+            if let run = show.runID {
+                model.focusedReviewID = run
+                // Pictures folded under an answer: asked to see them, unfold them.
+                if job.tasks.contains(where: { $0.id == show.taskID && $0.info.reviewIsIncidental }) {
+                    model.cardOpen["\(job.id)|pictures:\(run)"] = true
+                }
+            }
+            openJob(job.id)
         } else {
             model.workExpanded = false
             model.selectedTaskID = nil
@@ -954,6 +1303,42 @@ public final class NativeVoiceClient: VoiceCallClient {
         surface.focus()
     }
 
+    /// Open a job from the board (nil = back to the board). The call is told which job is on screen,
+    /// so "do the first one" goes there; leaving the job clears it.
+    private func openJob(_ id: String?) {
+        guard let id, let job = model.jobs.first(where: { $0.id == id }) else { closeJob(); return }
+        if model.showsSlim { model.slim = false }
+        model.selectedTaskID = nil
+        model.selectedJobID = id
+        model.boardFocusID = id
+        model.markAnswerSeen(job)
+        if model.tellingJobID != id { model.tellingJobID = nil }
+        model.workExpanded = true
+        setFocus(taskID: job.newest.id, detail: job.name)
+        surface.setNeedsResize()
+        surface.focus()
+    }
+
+    private func closeJob() {
+        let open = model.selectedJobID != nil
+        // Anything that arrived in the job while it was open has been seen.
+        if let job = model.selectedJob { model.markAnswerSeen(job) }
+        model.selectedJobID = nil
+        model.tellingJobID = nil
+        model.workExpanded = false
+        if open { setFocus(taskID: nil) }
+        surface.setNeedsResize()
+    }
+
+    /// "Tell it something": the job is already in focus; open the mic so the next words go to it.
+    private func tellJob(_ id: String) {
+        guard let job = model.jobs.first(where: { $0.id == id }) else { return }
+        model.tellingJobID = id
+        setFocus(taskID: job.newest.id, detail: job.name)
+        if model.state.mic == .muted && model.state.connection.isOpen { dispatch(.toggleMic) }
+        surface.setNeedsResize()
+    }
+
     private func toggleWorkView() {
         if model.showsSlim { model.slim = false; model.workExpanded = true }
         else { model.workExpanded.toggle() }
@@ -962,6 +1347,7 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     private func closeWorkView() {
+        if model.selectedJobID != nil { closeJob(); return }
         if model.selectedTaskID != nil && model.state.tasks.count > 1 {
             model.selectedTaskID = nil   // Back goes from one task to the task list
             surface.setNeedsResize()
@@ -1028,6 +1414,23 @@ public final class NativeVoiceClient: VoiceCallClient {
         Task { [weak self] in
             do { try await api.dismissReview(runID: runID, cards: cards) }
             catch { self?.dispatch(.error("Couldn't dismiss: \(error.localizedDescription)")) }
+        }
+    }
+
+    /// "Not needed": already hidden from Needs you; tell the api so the task, the run and the voice
+    /// all let it go. On failure it comes back so it isn't silently lost.
+    private func setAside(_ runID: String) {
+        surface.setNeedsResize()
+        guard let api, !previewMode else { return }
+        Task { [weak self] in
+            do { try await api.setAside(runID: runID) }
+            catch {
+                guard let self else { return }
+                if let task = self.model.state.tasks.first(where: { $0.info.runID == runID }) {
+                    self.model.setAsideTasks.remove(task.id)
+                }
+                self.dispatch(.error("Couldn't set that aside. Say it instead."))
+            }
         }
     }
 

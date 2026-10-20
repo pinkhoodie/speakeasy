@@ -21,6 +21,8 @@ enum Prefs {
     static let followSystemAudio = "followSystemAudio"
     static let onboardingDone = "onboardingDone"
     static let startSlim = "startSlim"
+    /// Beta: listening mode (off by default; Settings › Beta).
+    static let listeningBeta = "betaListeningMode"
     static let showCaptions = "showCaptions"
     static let notifyWhenDone = "notifyWhenDone"
     static let panelOnAllSpaces = "panelOnAllSpaces"
@@ -32,6 +34,10 @@ enum Prefs {
     static let tourPending = "tourPending"
     /// The address the server last advertised for other devices (e.g. its tailnet URL).
     static let advertisedURL = "advertisedServerURL"
+    /// Listening mode on/off shortcut (unset = none; empty = turned off). Stored like the others.
+    static let listeningShortcut = "listeningShortcut"
+    /// The one-time explainer was shown before listening mode was first turned on.
+    static let listeningExplained = "listeningExplained"
 
     static func register() {
         UserDefaults.standard.register(defaults: [showPanelOnStart: true, followSystemAudio: true, startMuted: false, startSlim: false,
@@ -118,6 +124,7 @@ final class AppModel: ObservableObject {
     @Published var muteShortcutProblem: String?
     @Published var pauseShortcutProblem: String?
     @Published var screenShortcutProblem: String?
+    @Published var listeningShortcutProblem: String?
     /// Onboarding "Try it" and Settings ask the delegate to start a call.
     var startCall: () -> Void = {}
 
@@ -485,7 +492,7 @@ final class AppModel: ObservableObject {
     }
 
     func resetShortcuts() {
-        for key in [Prefs.muteShortcut, Prefs.pauseShortcut, Prefs.screenShortcut] { UserDefaults.standard.removeObject(forKey: key) }
+        for key in [Prefs.muteShortcut, Prefs.pauseShortcut, Prefs.screenShortcut, Prefs.listeningShortcut] { UserDefaults.standard.removeObject(forKey: key) }
         setCallShortcut(.call)
         objectWillChange.send()
     }

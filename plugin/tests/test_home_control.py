@@ -254,8 +254,22 @@ def test_in_a_call_a_home_request_is_done_without_hermes(home, hermes):
         feed = svc.interaction(created["interaction_id"]).feed
         task = wait_for(lambda: next((t for t in feed.last.get("tasks") or [] if t["task_id"] == "call_home_1"), None))
         assert task["status"] == "completed"
+        # Heard on the call, nothing to read: the apps don't show it as a new answer.
+        assert task.get("seen") is True
     finally:
         svc.close()
+
+
+def test_only_a_marked_task_is_sent_as_seen(tmp_path):
+    from speakeasy.store import StateStore
+    store = StateStore(tmp_path / "state.sqlite3")
+    for key in ("k_home", "k_other"):
+        store.reserve_run(key, "int_1", key, 0)
+        store.update_run(key, None, "completed")
+        store.set_result(key, {"text": "Done."})
+    store.mark_seen("k_home")
+    assert store.work(idem_key="k_home").get("seen") is True
+    assert "seen" not in store.work(idem_key="k_other")
 
 
 def test_in_a_call_a_handoff_goes_to_hermes(home, hermes):

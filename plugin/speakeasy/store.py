@@ -19,13 +19,36 @@ from typing import Any
 from .emails import canonical_json, draft_sha256
 from .failures import public_failure
 from .text import (MAX_CARDS, AUTHORED_PRECEDENCE_S, SETTLED, TERMINAL, notice_text, public_result, safe_user_text,
-                   valid_short_status)
+                   short_title, valid_short_status)
 
 STALE_AFTER_S = 90
 MAX_REVIEWS = 3  # finished-image review cards carried onto the call panel
 SHARED_KINDS = frozenset({"screen", "picture", "file"})
 MAX_SHARED = 12  # things shared with one task kept on its card (a running task can be shown more): the
                  # first ones, so a position never renumbers (the app fetches images by position)
+
+
+JOB_NAME_TAIL = {"a", "an", "and", "the", "of", "for", "to", "in", "on", "with", "from", "by", "at", "or", "my", "your"}
+
+
+def job_name(title: str | None) -> str | None:
+    """A job's short name: the first two to four words of a task title, without a dangling
+    "and"/"for" at the end. None when there's nothing to name it from."""
+    words = re.findall(r"[^\s]+", re.sub(r"[\"“”]", "", title or ""))[:4]
+    while len(words) > 2 and words[-1].lower().strip(",.:;") in JOB_NAME_TAIL:
+        words.pop()
+    name = " ".join(words).strip(" ,.:;-")
+    return name[:40] or None
+
+
+def _placed_session(continued: str | None) -> str | None:
+    """The session id a task's placement names (the conversation it continued), if any."""
+    try:
+        placed = json.loads(continued) if continued else {}
+    except ValueError:
+        return None
+    sid = placed.get("session_id") if isinstance(placed, dict) else None
+    return sid if isinstance(sid, str) and sid else None
 
 
 def local_run_id(idem_key: str) -> str:
@@ -77,13 +100,26 @@ class StateStore:
             self._db.execute("""CREATE TABLE IF NOT EXISTS shared_files (
                 idem_key TEXT NOT NULL, path TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY (idem_key, path))""")
             self._db.execute("CREATE INDEX IF NOT EXISTS shared_files_path ON shared_files(path)")
+            # A job is the Hermes session its tasks live in (across calls and days); its short name is
+            # kept here once, from the first task's own title (never a chat thread's name).
+            self._db.execute("""CREATE TABLE IF NOT EXISTS jobs (
+                job_id TEXT PRIMARY KEY, name TEXT NOT NULL, from_key TEXT, updated REAL NOT NULL)""")
             columns = {row[1] for row in self._db.execute("PRAGMA table_info(runs)")}
+            if "own_title" not in columns:  # the task's name from its words or the titler, never a thread title
+                self._db.execute("ALTER TABLE runs ADD COLUMN own_title TEXT")
+            self._db.execute("CREATE INDEX IF NOT EXISTS runs_session ON runs(session_id)")
             if "timings" not in columns:  # added after the first release
                 self._db.execute("ALTER TABLE runs ADD COLUMN timings TEXT")
             if "failure" not in columns:  # why a run failed: a failures.py kind, never provider text
                 self._db.execute("ALTER TABLE runs ADD COLUMN failure TEXT")
             if "shared" not in columns:  # what the user shared with the task (its card), see add_shared
                 self._db.execute("ALTER TABLE runs ADD COLUMN shared TEXT")
+            if "plan" not in columns:  # the steps a handed-off task will go through (JSON list)
+                self._db.execute("ALTER TABLE runs ADD COLUMN plan TEXT")
+            if "set_aside" not in columns:  # when the user set its question aside (handled, or not needed)
+                self._db.execute("ALTER TABLE runs ADD COLUMN set_aside REAL")
+            if "seen" not in columns:  # nothing to read (a finished home command): never a new answer
+                self._db.execute("ALTER TABLE runs ADD COLUMN seen INTEGER")
             # Finished tasks that never had a Hermes run id (quick answers, home control) could not be
             # cleared: "Clear done" and the x address tasks by run id. Give them their local id.
             settled = sorted(TERMINAL | {"rejected"})
@@ -190,12 +226,92 @@ class StateStore:
             row = self._db.execute("SELECT title FROM runs WHERE idem_key=?", (key,)).fetchone()
         return row[0] if row and row[0] else None
 
-    def set_title(self, key: str, title: str | None, summary: str | None = None) -> None:
+    def set_title(self, key: str, title: str | None, summary: str | None = None, thread: bool = False) -> None:
+        """A task's display title. ``thread`` marks a chat thread's own name: shown on the task, but
+        never used to name its job. A task's own new title refines the job it first named."""
         with self._lock, self._db:
             if title:
                 self._db.execute("UPDATE runs SET title=? WHERE idem_key=?", (title, key))
+                name = None if thread else job_name(title)
+                if name:
+                    self._db.execute("UPDATE runs SET own_title=? WHERE idem_key=?", (title, key))
+                    self._db.execute("UPDATE jobs SET name=?, updated=? WHERE from_key=?", (name, time.time(), key))
             if summary:
                 self._db.execute("UPDATE runs SET summary=? WHERE idem_key=?", (summary, key))
+
+    def _older_title(self, job_id: str, key: str) -> tuple[str, str] | None:
+        """A task saved before tasks kept their own title: its shown title, unless it ran in a new
+        chat thread (then the title may be the thread's name). Call with the lock held."""
+        for idem, title, continued in self._db.execute(
+                "SELECT idem_key, title, continued FROM runs WHERE (session_id=? OR idem_key=?) AND title IS NOT NULL "
+                "ORDER BY rowid", (job_id, key)):
+            if '"thread_id"' not in (continued or ""):
+                return idem, title
+        return None
+
+    def job(self, key: str, session_id: str | None, continued: str | None) -> dict[str, str]:
+        """The job a task belongs to: {id, name}. The id is its Hermes session (else the session it
+        continued, else the task itself); the name is set once, from the job's first task."""
+        job_id = session_id or _placed_session(continued) or key
+        with self._lock, self._db:
+            row = self._db.execute("SELECT name FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            if row:
+                return {"id": job_id, "name": row[0]}
+            first = self._db.execute(
+                "SELECT idem_key, own_title FROM runs WHERE (session_id=? OR idem_key=?) AND own_title IS NOT NULL "
+                "ORDER BY rowid LIMIT 1", (job_id, key)).fetchone()
+            if first is None:
+                first = self._older_title(job_id, key)
+            name = job_name(first[1]) if first else None
+            if not name:
+                # Not named yet (the titler is still working): a stand-in from the request, not stored.
+                request = self._db.execute("SELECT text FROM work_events WHERE idem_key=? AND kind='request' "
+                                           "ORDER BY seq LIMIT 1", (key,)).fetchone()
+                return {"id": job_id, "name": job_name(short_title(request[0]) if request else None) or "Voice task"}
+            self._db.execute("INSERT OR IGNORE INTO jobs (job_id,name,from_key,updated) VALUES (?,?,?,?)",
+                             (job_id, name, first[0], time.time()))
+        return {"id": job_id, "name": name}
+
+    def add_shape(self, key: str, shape: dict[str, Any]) -> bool:
+        """Attach a result's structure to its stored result (kept beside spoken/full)."""
+        with self._lock, self._db:
+            row = self._db.execute("SELECT result_json FROM runs WHERE idem_key=?", (key,)).fetchone()
+            try:
+                result = json.loads(row[0]) if row and row[0] else None
+            except ValueError:
+                result = None
+            if not isinstance(result, dict):
+                return False
+            result["shape"] = shape
+            self._db.execute("UPDATE runs SET result_json=? WHERE idem_key=?", (json.dumps(result), key))
+            return True
+
+    def add_view(self, key: str, view: dict[str, Any]) -> bool:
+        """Add a derived view card to a stored result that has none of its own."""
+        with self._lock, self._db:
+            row = self._db.execute("SELECT result_json FROM runs WHERE idem_key=?", (key,)).fetchone()
+            try:
+                result = json.loads(row[0]) if row and row[0] else None
+            except ValueError:
+                result = None
+            if not isinstance(result, dict) or result.get("views"):
+                return False
+            result["views"] = [view]
+            self._db.execute("UPDATE runs SET result_json=? WHERE idem_key=?", (json.dumps(result), key))
+            return True
+
+    def set_plan(self, key: str, steps: list[str]) -> None:
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET plan=? WHERE idem_key=?", (json.dumps(steps[:5]), key))
+
+    def plan(self, key: str) -> list[str]:
+        with self._lock:
+            row = self._db.execute("SELECT plan FROM runs WHERE idem_key=?", (key,)).fetchone()
+        try:
+            steps = json.loads(row[0]) if row and row[0] else []
+        except ValueError:
+            return []
+        return [str(s) for s in steps][:5] if isinstance(steps, list) else []
 
     def dismiss(self, run_ids: list[str]) -> list[str]:
         """Hide finished tasks from the task list. Running tasks are never dismissed."""
@@ -323,6 +439,29 @@ class StateStore:
                 f"UPDATE runs SET dismissed=1 WHERE idem_key=? AND status IN ({marks})", (key, *settled))
         return bool(cursor.rowcount)
 
+    def set_aside(self, key: str) -> bool:
+        """The user set this task's question (or approval) aside: already handled, or not needed.
+        It settles as no longer needed, never as failed, and stops waiting on them. Only a settled
+        task (finished, or waiting for approval) has anything to set aside."""
+        settled = sorted(SETTLED | {"rejected"})
+        marks = ",".join("?" * len(settled))
+        with self._lock, self._db:
+            cursor = self._db.execute(
+                f"UPDATE runs SET set_aside=COALESCE(set_aside, ?) WHERE idem_key=? AND status IN ({marks})",
+                (time.time(), key, *settled))
+        return bool(cursor.rowcount)
+
+    def mark_seen(self, key: str) -> None:
+        """Nothing in this task's answer the user needs to read (a home command that went through):
+        apps leave it out of New answers. Opening it still shows the answer."""
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET seen=1 WHERE idem_key=?", (key,))
+
+    def is_set_aside(self, key: str) -> bool:
+        with self._lock:
+            row = self._db.execute("SELECT set_aside FROM runs WHERE idem_key=?", (key,)).fetchone()
+        return bool(row and row[0])
+
     def set_timing(self, key: str, name: str, ms: int) -> None:
         """Internal per-task timings (e.g. routing latency), kept for diagnostics, never spoken."""
         with self._lock, self._db:
@@ -343,6 +482,11 @@ class StateStore:
             return json.loads(row[0]) if row and row[0] else {}
         except ValueError:
             return {}
+
+    def forget_run_id(self, key: str) -> None:
+        """Drop a run id Hermes refused at the door, so nothing polls a run that never ran."""
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET run_id=NULL WHERE idem_key=?", (key,))
 
     def update_run(self, key: str, run_id: str | None, status: str) -> None:
         now = time.time()
@@ -449,7 +593,8 @@ class StateStore:
         with self._lock:
             rows = self._db.execute(
                 """SELECT idem_key,run_id,status,settled_at,result_json,failure FROM runs
-                   WHERE settled_at > ? AND run_id IS NOT NULL ORDER BY settled_at DESC LIMIT ?""",
+                   WHERE settled_at > ? AND run_id IS NOT NULL AND set_aside IS NULL
+                   ORDER BY settled_at DESC LIMIT ?""",
                 (float(ended), limit)).fetchall()
         items = []
         for key, run_id, status, settled_at, result_json, failure in rows:
@@ -706,7 +851,7 @@ class StateStore:
              assistant_name: str = "Hermes") -> dict[str, Any] | None:
         """The latest admitted job or one exact server-owned run, including past calls."""
         cols = """idem_key,run_id,status,updated,short_status,detail,progress_updated,
-                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,shared"""
+                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,shared,session_id,set_aside,seen"""
         with self._lock:
             if idem_key:
                 row = self._db.execute(f"SELECT {cols} FROM runs WHERE idem_key=?", (idem_key,)).fetchone()
@@ -717,7 +862,8 @@ class StateStore:
             if row is None:
                 return None
             (key, actual_run_id, status, updated, short_status, detail, progress_updated,
-             status_source, result_json, title, dismissed, summary, continued, settled_at, failure, shared) = row
+             status_source, result_json, title, dismissed, summary, continued, settled_at, failure, shared,
+             session_id, set_aside, seen) = row
             events = self._db.execute(
                 "SELECT kind,text,created FROM work_events WHERE idem_key=? ORDER BY seq DESC LIMIT 30", (key,)).fetchall()
         stale = status not in TERMINAL | {"waiting_for_approval"} and time.time() - updated > STALE_AFTER_S
@@ -745,7 +891,15 @@ class StateStore:
             "status_source": source, "result": public_result(result),
             "title": title, "summary": summary, "dismissed": bool(dismissed),
             "email_drafts": self.drafts_for(key),
+            "plan": self.plan(key),
+            "job": self.job(key, session_id, continued),
         }
+        if set_aside:
+            # Its question was set aside: nothing waits on the user any more (only sent when true).
+            work["set_aside"] = True
+        if seen:
+            # Nothing to read (a home command that went through): not a new answer (only sent when true).
+            work["seen"] = True
         why = public_failure(failure, self.hermes_home) if status == "failed" else None
         if why:
             # Speakeasy's own words for why it failed: a row label when the reason is known, and a

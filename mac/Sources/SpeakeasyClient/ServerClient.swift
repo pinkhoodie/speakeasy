@@ -188,8 +188,9 @@ public final class ServerClient: @unchecked Sendable {
     /// POST the SDP offer byte-for-byte (the body encoder never trims it). `screen` is this client's
     /// sharing declaration, sent only to plugins that advertise attachments.
     public func admitSession(sdp: String, idempotencyKey: String, resumeFrom: String? = nil,
-                      tour: [String: String]? = nil, screen: ScreenDeclaration? = nil) async throws -> SessionAdmission {
-        let body = try sessionRequestBody(sdp: sdp, resumeFrom: resumeFrom, tour: tour, screen: screen)
+                      tour: [String: String]? = nil, screen: ScreenDeclaration? = nil,
+                      room: String? = nil) async throws -> SessionAdmission {
+        let body = try sessionRequestBody(sdp: sdp, resumeFrom: resumeFrom, tour: tour, screen: screen, room: room)
         let object = try await json("/voice/sessions", method: "POST", body: body,
                                     headers: ["Idempotency-Key": idempotencyKey])
         guard let admission = SessionAdmission(json: object) else {
@@ -236,6 +237,11 @@ public final class ServerClient: @unchecked Sendable {
     public func latestWork() async throws -> (WorkInfo?, [TaskItem]) {
         let object = try await json("/voice/work/latest")
         return (WorkInfo(json: object["work"]), TaskItem.list(json: object["tasks"]) ?? [])
+    }
+
+    /// "Not needed": set aside a task's waiting question, decision or approval without answering it.
+    public func setAside(runID: String) async throws {
+        _ = try await post("/voice/tasks/\(escape(runID))/set-aside", [:])
     }
 
     /// Clear finished tasks from the task list (running tasks are never cleared).

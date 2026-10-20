@@ -2,13 +2,134 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
-## Mac 0.2.18 + Plugin 0.2.48 — Look at this
+## Mac 0.3.5 and Plugin 0.3.13 — Look at this
 
 - **Let Hermes see your screen when you want it to.** A new eye next to the mic turns screen sharing on for the call; press it again, press ⌃⌥S, or say "stop looking at my screen" to turn it off. It's off at the start of every call. While it's on, each new request takes a picture of the window you're working in along with your words, so "what's this error?" or "reply to this email" just works.
 - **Drop or paste pictures and files onto the panel.** A screenshot, a photo, a PDF or a log goes with your next request (up to 3 at a time), whether or not screen sharing is on. They wait as small thumbnails you can remove.
 - **Ask to look while it's off and it waits for you.** Say "look at my screen" with sharing off and the eye lights up; turn it on within 30 seconds and your request goes ahead with your screen.
 - **Private by design.** Your screen and files go only to your own Hermes, never to the voice model. Speakeasy never captures its own windows, password managers or a password you're typing, and anything you share never goes into a group chat or a channel you didn't name. The first time a request takes your screen without you mentioning it, you'll hear which window went.
 - **Needs Screen Recording permission** for the screen part (Settings › General › Screen). macOS asks Speakeasy to relaunch after you allow it, and reminds you about once a month.
+
+## Mac 0.3.4 and Plugin 0.3.11 — Clear an answer without opening it
+
+- **Every new answer has an ×.** Tap it (or long-press the answer and pick Dismiss) and it leaves New answers without opening; it's still in Done today if you want it later. *(Mac app and iPhone app)*
+- **"Lights off" doesn't leave a new answer behind.** A home command that Home Assistant carried out is already counted as read: you heard "done" on the call. Anything else, including a home request Hermes handled itself, still shows up as usual. *(Plugin)*
+- **More voices with ChatGPT sign-in.** The voice picker lists the newer ChatGPT voices that work with a ChatGPT sign-in. *(Plugin 0.3.10 and Mac app)*
+
+## Plugin 0.3.9 — One sentence, one task
+
+- **A question no longer starts two tasks.** The voice sometimes passes one sentence along twice, the whole thing and then a scrap of its ending a moment later. The second copy used to start its own task (and its own chat thread). Now a repeat of what you just asked is folded into the first request.
+- **Answering a question once means once.** Tapping an answer twice, or tapping it and also saying it, sends it to the task one time.
+
+## Plugin 0.3.8 — Follow-ups to a chat thread stop failing
+
+- **"Turn it down a little" after a request that ran in a chat thread works again.** On a live Hermes, a refused turn ends without saying it failed; the refusal only shows on the run itself, so 0.3.7's fallback never kicked in and the follow-up failed. Speakeasy now checks the run, then says the request in the thread (or runs it with the chat's context) as intended.
+
+## Mac 0.3.3 and Plugin 0.3.7 — Set things aside, links you can click, chats picked up in place
+
+- **"Not needed" on anything waiting for you.** A question, option set or approval you've already handled (or don't want to deal with now) can be set aside with one tap, from the board or the job. It leaves Needs you, shows in Done today as Set aside, and the work waiting on it is told to stop asking. You can also just say "that's already handled" or "never mind that one."
+- **Links you can click.** When an answer is about something you'd open (an event page, a livestream, an article, a product, tickets), the agent now includes the real link. Rows in lists and schedules open their page (look for ↗), and links in the report are clickable.
+- **Picking up a chat thread from voice works inside the thread.** A voice request for an existing Discord or Telegram thread is now said in that thread, through Hermes' webhook platform, so the agent has the whole conversation and replies there; the call still hears the answer. Without a thread or the webhook platform, it runs on its own with the chat's recent messages, as in 0.3.6.
+
+## Plugin 0.3.6 — Voice requests for an existing chat work again
+
+- **Picking up a chat thread from voice works on current Hermes.** Recent Hermes versions no longer let outside apps add a turn to a Discord or Telegram conversation, so a voice request meant for an existing chat failed in about a second and the voice could only say it didn't go through. Speakeasy now runs that request as its own task, gives it the chat's recent messages so it knows what you were talking about, and still posts the answer into that chat. No Hermes changes are needed.
+
+## Plugin 0.3.5 — Status questions get real answers, and the voice talks like a person
+
+- **"How's that coming along?" gets a real update.** A short status question said right after a request used to get glued onto that request and sent to the task as more work, so the voice just said it had passed it on. Status questions now stand on their own. The routing model also recognizes looser ones ("you seem stuck", "what's it doing?"), and the answer comes from what the task is actually doing right now (reading files, editing code, running commands, what it last wrote), not just "I'm on it."
+- **No more "Status unconfirmed" on queued follow-ups.** A follow-up waiting its turn behind work already running in the same conversation now stays marked as queued instead of going stale after 90 seconds.
+- **Less script, more person.** The voice's instructions no longer contain sample lines it repeated word for word ("On it", "got it, adding that", "Your draft is on the card…", "It will come back as one answer"). It's told how to sound, the way a sharp friend at the next desk would react to that particular ask, and to never reuse the same wording on a call.
+
+## Plugin 0.3.4 — Acknowledgements that fit the ask
+
+- **No more stock "On it."** When you hand off a task, the voice now acknowledges it in its own words about what you actually asked for, and doesn't repeat the same phrase from one request to the next.
+
+## Mac 0.3.2 — The answer leads, pictures fold away
+
+- **A picture no longer hides the answer.** When a finished answer also came with a screenshot, the app treated it as something waiting for you to look at: the job said "Needs you", the picture filled the view, and the actual answer sat far below. Now it's a new answer: the headline and any scoreboard, numbers or list come first, then the report, and the picture folds into a one-line "1 picture" row you can open.
+- **Projected scores.** Scoreboards show a "Projected" tag when the numbers are projections rather than a live or final score.
+
+## Plugin 0.3.3 — A picture of the answer, even when the agent didn't draw one
+
+- **Answers with numbers get a picture.** When a finished answer has data but the agent didn't draw a card (tasks continued in a chat thread never could), Speakeasy now draws one from the answer itself: a matchup or projection as a scoreboard, a few numbers as tiles, things compared side by side, a trend as a chart, or a short list of picks. It picks whatever fits what the answer says, never a format tied to a topic, and uses only names and numbers that are in the answer.
+
+## Plugin 0.3.2 — Quick "on it", and answers you can use at a glance
+
+- **"On it" comes right away again.** After 0.3.1 the voice could take 6–7 seconds to acknowledge a request, and sometimes handed the same request off twice. It's now cued to acknowledge the moment work is handed off, and a repeat of the same words within a few seconds is ignored.
+- **Data gets drawn, not screenshotted.** When an answer has data, the agent now draws the part that matters with the app's cards (a matchup with both scores, key numbers, a short list, a chart) instead of a screenshot of the page, which got cut off in the panel. Pictures are for when the look itself matters, they never replace the answer, and a website's home page never counts as one.
+- **Recommendations fit you.** For things to do, places or shows, the agent checks what it knows about your taste first, leads with what fits, says why, and drops generic picks. If it doesn't know your taste yet, it asks.
+
+## Mac 0.3.1 and Plugin 0.3.1 — A calmer panel you can scroll, and really no more "mm-hmm"
+
+- **The panel scrolls.** With several cards open you could get stuck in the middle with no way to reach the rest. The board and every job now scroll all the way with the trackpad or mouse wheel, and the panel never grows past your screen. Page Up/Down, Space and Home/End scroll too, and the arrow keys keep the selected job in view.
+- **The board stays a board.** Cards no longer pile up underneath it. Each card lives in its job: open "Weekend weather" to see the forecast, or "Weekend events" to see the pictures.
+- **One card open at a time.** Inside a job, the most relevant card is open and the rest fold into one-line rows; click a row to open or fold it. Big pictures are capped in size; click to see them full size.
+- **An obvious way back.** Every job has "‹ All jobs" at the top left, and Esc still steps back.
+- **No more "mm-hmm" (plugin, already live).** Not after handing work off, and not out of nowhere while something runs. With ChatGPT voice, the background notes Speakeasy gives the voice (work started, how a task is going, where it went, what's on your screen) were delivered as things to answer, so the voice replied to each one with "Mm-hmm", even when nobody was talking. Those notes now wait and go along with the next thing the voice actually says.
+
+## Mac 0.3.0 and Plugin 0.3.0 — Your work as jobs, with the facts to decide
+
+- **The orb.** Click the orb (or press Esc) and the panel folds into a small orb; the call keeps going. Its color tells you what's up at a glance: grey when idle, blue while you talk, violet while something runs, a blue dot for a new answer, amber with a count when something needs you, red when something failed. The panel header uses the same orb, and the line next to it says why ("2 need you", "1 new answer").
+- **A board of jobs, not a pile of tasks.** Open the orb and your work is grouped by job: what needs you first, then new answers, what's running, and what's done today. Follow-ups to the same conversation stay in one job, even across days. Arrow keys move, Return opens, Esc goes back.
+- **Decisions you can actually make.** When Hermes needs a call from you, it now explains what's going on, why it recommends an option, and what each option does: its risk, and whether you can undo it. Simple, low-risk calls get an **Approve** button right on the board; anything that spends money, sends something as you, publishes, or deletes always opens the options first.
+- **Pictures, not walls of text.** Results can come with timelines (what ran when, and where it broke), before and after, where something goes, a grid of your devices, check tiles and charts. Long reports show their checks, what shipped, and what's still open as a board. Everything drawn comes from real data.
+- **Answers get their own place.** A question with nothing to decide shows up under New answers with a small preview (the temperature, a chart, which option won). Open it to see the visuals first, then the details.
+- **Talk to what you're looking at.** With a job open, anything you say goes to that job unless it's clearly about something else. A "Talking to" label shows where your words go.
+- **Watch it work.** A running job shows its steps as they happen, with Stop and "Tell it something".
+- **A calmer panel on long calls.** Finished tasks take one short line, and older ones fold into "+N earlier".
+- **No more "mm-hm" (plugin).** With ChatGPT voice, the voice played a canned "mm-hm" every time it handed work off. That filler is off.
+- **Fixes (plugin).** Some long answers were saved twice; they're now kept once. When a task had no spoken summary, the read-out could pick a sentence out of context or repeat one; it now reads the opening and only clear warnings.
+
+## Plugin 0.2.55 — Long answers come sorted
+
+- **Long reports are sorted into parts.** When a task finishes with a long answer, Speakeasy sorts it into what kind of work it was (a build, a setup, research, options, or a plain answer) and pulls out its parts: the checks it ran, what's now done, what's still open, and its main sections. The answer itself arrives exactly as before; the sorting happens right after and never delays it. Apps use it to lay a report out as panels instead of a wall of text.
+- **Task plans fit real work.** A task's plan now reads like the work most people hand off ("Find the cause", "Fix and test", "Deploy", "Your review"), not like booking a trip.
+
+## Plugin 0.2.54 — Tasks come with a plan
+
+- **Every task you hand off gets a short plan.** When a task goes to Hermes, it's laid out as three to five steps ("Compare flights", "Draft itinerary", "Your review"). Steps are checked off as Hermes reports progress. Apps that show a task's progress line use it; nothing changes in how tasks run.
+
+## Mac 0.2.18 — Listening mode (beta), and calls that actually hear you
+
+- **Listening mode (beta).** Turn it on in Settings › General › Beta. During a call, tap the ear button with the call's controls (or use the menu bar, or a shortcut you set in Settings › Shortcuts): the call pauses and Speakeasy transcribes the room on your Mac without answering. Nothing leaves the Mac and nothing is billed while it listens. Turn it off (or press Resume) and the call picks up again knowing the last 30 minutes of what was said: ask about it ("what did Sam say the deadline was?"), ask for something ("email Dana what we agreed"), or say nothing and it stays quiet, keeping what it heard until you ask. It stops when the call ends, after 2 hours, or when the Mac sleeps; Discard drops what it heard. Needs macOS 26 and the Hermes plugin 0.2.51. When the room text hits its size limit, the oldest lines go first and the newest stay.
+- **iPhone: calls stop coming up deaf.** Talk-while-connecting is off on iPhone: its listener and the call fought over the phone's one mic and could leave the call's audio switched off for later calls. Every call now starts with the phone's call audio reset. A tap tells you when to talk.
+- **"Listening" means it's listening.** While connecting, it says Listening only once sound is actually coming from the mic. If none arrives within a second and a half, the call takes the mic itself.
+- **A call that doesn't connect says so.** Before, a call that never finished connecting sat on "Listening" forever. Now it retries once after 12 seconds, then says it couldn't connect so you can tap again. Where it got stuck is logged.
+- **Old questions stop greeting you.** An unanswered question stays pinned for 20 minutes, then lives only in its task. Closing a card or answering one is remembered across launches. On iPhone, a question's answers can now be tapped.
+- **iPhone: an Action Button call never ends up behind the app with no mic.** The call starts only once the app is fully in front (iOS gives the mic only to the app in front). If the mic is lost while the app is in the background, it says so and fixes itself the moment you open the app, instead of reconnecting in a loop.
+- **iPhone: no more "Fixing the mic…" loop at the start of a call.** The mic check judged the mic dead 2.5 seconds after the call took it over from the talk-while-connecting listener, before the phone's call audio (and AirPods' call mode) had started, then reconnected twice. A phone now gets 7 seconds for the first sound, the listener fully lets go of the mic, and a repair reconnects without the listener. Repairs log what the check saw.
+- No more "didn't get that" while a task is clearly still working. It showed 45 seconds after any follow-up or status question that didn't start a new task.
+
+## Plugin 0.2.53 — Tasks rename themselves as they grow
+
+- **A task's name keeps up with it.** When you add to a task ("now make it a weekend in Porto"), it gets a new name for what it has become. Quick answers get a proper name too, not just your first few words.
+
+## Plugin 0.2.52 — Talk to what you're facing (Vision Pro)
+
+- **The Vision Pro room view can tell Speakeasy which task you're facing.** Say something without naming a task ("make it lighter") and it goes to the task in front of you. "New thing" or "something else" still starts fresh. The voice is told what you're looking at, so "what is this?" gets answered right away.
+
+## Plugin 0.2.51 — Listening mode
+
+- **A call picks up after listening mode knowing what was said in the room.** The room transcript (sent with the resume) reaches the voice as background (never as instructions), and any task from that call gets it too, except in posts to a chat thread. Listening again later in the same call adds to it. Questions about the room are answered by the voice right away; a request that sounds like work still goes to Hermes. If you say nothing, the voice stays quiet and keeps the room as context until you ask it something; it never offers things up on its own.
+- **Speakeasy never keeps the room transcript.** It isn't written to the call log, recent conversations or Tune (Hermes keeps what its tasks from that call received, like any task), it's dropped when the call ends (or 15 minutes after it's paused), and passwords, keys, card numbers and the like said aloud are redacted before anything leaves the Hermes machine.
+
+## Plugin 0.2.50
+
+- Mic reports from the app can carry the phone's audio state, so a deaf call says why.
+
+## Plugin 0.2.49 — Talk it through first
+
+- **Ideas get a real reply, not a task.** "What do you think about…", "what about the idea of…", "I could make…", "I was thinking…": the voice answers with its own take. Work starts when you ask it to go do something (look it up, research, build, send, book) or say go ahead.
+- **"Just talk to me" mode.** Say you're just ideating, or "don't build anything", and nothing goes off to your agent until you ask for something.
+- **Reactions aren't requests.** "What, bro", "hang on", "yeah" no longer start a lookup. A "yeah" to something the voice just offered is a go-ahead, and the offer goes along with it.
+- **No more humming into silence.** The voice is told to leave pauses empty: no "hmm", "mm" or "mm-hm".
+
+## Plugin 0.2.48 — Talks like a person, and tells you where things are
+
+- **Less "On it", "Checking", "One sec".** Quick questions get the answer, nothing before it. Bigger asks get a short, natural reaction, or none.
+- **"You working on that?" gets a real answer.** Status questions are answered right away from what the task has done so far. Before, they were sometimes sent into the task itself, queued behind the work they asked about, and treated as a new request once it finished.
+- **Tasks that continue an earlier chat now report progress.** Their updates ("ratings are in, checking fares next") reach the app and the voice. Before, only a narrow format got through, so a long task in an earlier conversation stayed silent until it finished.
 
 ## Mac 0.2.17 — Questions you answer in one tap
 

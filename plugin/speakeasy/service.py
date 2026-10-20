@@ -39,7 +39,7 @@ from .settings import (OPENAI_KEY_NAME, Settings, SettingsError, default_voice, 
 from .store import StateStore
 from .suggest import SuggestError, suggest
 from .threads import ThreadRunner, capability, sync_routes
-from .text import ID_RE, MAX_CARDS, TERMINAL, notice_text, split_result
+from .text import ID_RE, MAX_CARDS, MAX_ROOM_CHARS, TERMINAL, notice_text, safe_room_text, split_result
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,26 @@ def _tour(value: Any) -> dict[str, str]:
             raise ServiceError(400, f"tour.{key} must be a short shortcut label")
         out[key] = label
     return out
+
+
+def _room(value: Any) -> str:
+    """``room`` on a session request: what listening mode heard before the call, as "[HH:MM] text"
+    lines. At most MAX_ROOM_CHARS code points as sent; secret-looking lines are redacted here, before
+    the text reaches the voice or Hermes. An empty string means no room text."""
+    if not isinstance(value, str):
+        raise ServiceError(400, "room must be a string")
+    if len(value) > MAX_ROOM_CHARS:
+        raise ServiceError(400, f"room must be at most {MAX_ROOM_CHARS} characters")
+    return safe_room_text(value)
+
+
+def _merge_rooms(kept: str, heard: str) -> str:
+    """A call paused for listening mode resumes with what was just heard added to any room text it
+    already had (oldest lines dropped first to stay within MAX_ROOM_CHARS)."""
+    lines = [line for line in (kept + "\n" + heard).split("\n") if line.strip()]
+    while lines and len("\n".join(lines)) > MAX_ROOM_CHARS:
+        lines.pop(0)
+    return "\n".join(lines)
 
 class VoiceService:
     def __init__(self, hermes_home: Path, *, hermes: Any = None, notifier: Any = None,
@@ -162,7 +182,10 @@ class VoiceService:
         with self.lock:
             live = list(self.interactions.values())
         for interaction in live:
-            if not interaction.call_closed or interaction.paused:
+            # A paused call counts until its pause is bookkept as ended (PAUSE_NOTICE_AFTER_S): a call
+            # paused and never resumed (or ended on the device while paused) must not hold back an
+            # update forever. Resuming it after a reload starts a fresh call on the app's side.
+            if not interaction.call_closed or (interaction.paused and not interaction.pause_bookkept):
                 return True
             if any(r.status in ACTIVE_RUN_STATES for r in interaction.runs.values()):
                 return True
@@ -202,7 +225,9 @@ class VoiceService:
 
     # -- voice sessions -------------------------------------------------------------------------
     def instructions(self, *, away: list[dict[str, Any]], resume: str,
-                     tour: dict[str, str] | None = None) -> str:
+                     tour: dict[str, str] | None = None, room: str = "") -> str:
+        """The voice's instructions for a new or resumed call. ``room`` is listening mode's room
+        text (the builder fences it and leaves recent voice out when it is there)."""
         s = self.settings.get()
         names = P.Names.from_settings(s)
         recent = ""
@@ -219,24 +244,31 @@ class VoiceService:
                                          resume=resume, extra=s["instructions_extra"], now=now,
                                          delivery_label=label, channels=s["delivery"]["channels"],
                                          tour=P.tour_block(names, tour, label, s["delivery"]["channels"])
-                                         if tour is not None else "")
+                                         if tour is not None else "", room=room)
 
     def create_session(self, body: dict[str, Any], request_id: str, device_id: str = "") -> dict[str, Any]:
         if self.updated_underneath():
             raise ServiceError(503, RESTART_NEEDED)
         resume_from = body.get("resume_from")
-        if (not set(body) <= {"sdp", "resume_from", "tour", "screen"} or not isinstance(body.get("sdp"), str)
+        if (not set(body) <= {"sdp", "resume_from", "tour", "screen", "room"} or not isinstance(body.get("sdp"), str)
                 or resume_from is not None and not (isinstance(resume_from, str) and ID_RE.fullmatch(resume_from))):
-            raise ServiceError(400, "body must contain only an SDP offer, an optional resume_from, tour and screen")
+            raise ServiceError(400, "body must contain only an SDP offer, an optional resume_from, tour, screen and room")
         # What the app can share this call: ready (it can capture the screen) or no_permission. Apps
         # that predate screen sharing never send it, and their calls behave as before.
         screen = body.get("screen")
         if screen is not None and screen not in A.DECLARATIONS:
             raise ServiceError(400, "screen must be ready or no_permission")
+        # Listening mode: what was heard rides on a new call, or on the resume of a call paused for
+        # listening mode (it's added to any room text that call already had; see adopt).
+        room = _room(body["room"]) if "room" in body else ""
+        heard = room
         tour = _tour(body.get("tour")) if "tour" in body and not resume_from else None
         if tour is not None and self.store.get_meta("last_call_end") is not None:
             # The app asks per Mac (a new Mac, a reinstall or an update all look like a first call
             # there); the server knows whether this person has called before, and decides.
+            tour = None
+        if tour is not None and room:
+            # A call about what was just said in the room: the first-call tour would talk over it.
             tour = None
         source = self.resumable(resume_from) if resume_from else None
         sdp = body["sdp"]
@@ -245,12 +277,12 @@ class VoiceService:
             raise ServiceError(400, "invalid SDP offer")
         if not ID_RE.fullmatch(request_id):
             raise ServiceError(400, "invalid Idempotency-Key")
-        fingerprint = hashlib.sha256((sdp + "\0" + (resume_from or "") + ("\0tour" if tour is not None else ""))
-                                     .encode()).hexdigest()
+        fingerprint = hashlib.sha256((sdp + "\0" + (resume_from or "") + ("\0tour" if tour is not None else "")
+                                      + ("\0room\0" + room if room else "")).encode()).hexdigest()
         interaction_id = "vi_" + secrets.token_hex(16)
         outcome, replay = self.store.reserve_session(request_id, fingerprint, interaction_id)
         if outcome == "conflict":
-            raise ServiceError(409, "Idempotency-Key reused with different SDP")
+            raise ServiceError(409, "Idempotency-Key reused with a different SDP or room")
         if outcome == "pending":
             raise ServiceError(409, "identical session admission is still pending")
         if replay is not None:
@@ -266,9 +298,15 @@ class VoiceService:
             away: list[dict[str, Any]] = []
             history = self.pause_history(source)
             resume = P.resume_block(interaction_tasks(self.store, source, names.assistant_name), names)
+            with source.lock:
+                # A call started from listening mode keeps its room across Pause/Resume; one paused
+                # for listening mode comes back with what was just heard added.
+                room = _merge_rooms(source.room, heard) if heard else source.room
         else:
             away, resume = self.store.away(), ""
-        instructions = self.instructions(away=away, resume=resume, tour=tour)
+        if room:
+            logger.info("speakeasy: call has the room transcript from listening mode (%d words)", len(room.split()))
+        instructions = self.instructions(away=away, resume=resume, tour=tour, room=room)
         seed = P.resume_input(history)
         provider = s["voice"]["provider"]
         voice = default_voice(s)
@@ -310,10 +348,17 @@ class VoiceService:
         if screen is None and source is not None:
             screen = source.attachments.declared  # a resume that doesn't say keeps the call's declaration
         interaction = Interaction(interaction_id=interaction_id, live_session_id=live_id, away=away,
-                                  device_id=device_id, attachments=A.CallAttachments(screen))
-        if source is not None:
+                                  device_id=device_id, attachments=A.CallAttachments(screen),
+                                  room=room if source is None else "")
+        if source is not None:  # a resume: adopt moves the room text over from the paused call
             self.adopt(source, interaction, history)
             client_result["resumed_from"] = source.interaction_id
+            if heard:
+                # Listening mode was just turned off mid-conversation: a new take-off, so the voice
+                # may respond from the room once more if nothing is said.
+                with interaction.lock:
+                    interaction.room = room
+                    interaction.room_nudged = False
         with self.lock:
             self.interactions[interaction_id] = interaction
         self.store.complete_session(request_id, client_result)
@@ -401,6 +446,8 @@ class VoiceService:
             if interaction.successor is not None or not interaction.paused or interaction.pause_bookkept:
                 return
             interaction.pause_bookkept = True
+            # Paused this long is bookkept as ended: listening mode's room text goes with it.
+            interaction.room = ""
         worker = interaction.worker
         try:
             self.store.mark_call_ended()
@@ -433,7 +480,12 @@ class VoiceService:
             source.successor = interaction
             source.paused = False
             runs = dict(source.runs)
+            # Listening mode's room text moves to the resumed call; the paused one no longer holds it.
+            room, source.room = source.room, ""
+            room_nudged = source.room_nudged
         interaction.runs.update(runs)
+        interaction.room = room
+        interaction.room_nudged = room_nudged   # an empty request after listening is handled once per call (the voice waits)
         interaction.history = history
         interaction.resumed_from = source.interaction_id
         interaction.revision = source.revision
@@ -591,14 +643,33 @@ class VoiceService:
             raise ServiceError(404, "that task isn't in this call")
         return {"interaction_id": interaction_id, "task_id": task_id, "sent": True}
 
+    def focus(self, interaction_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Vision Pro: the task the user is facing or holding (or none). Unnamed requests go there."""
+        if not isinstance(body, dict) or not set(body) <= {"task_id", "detail"} or "task_id" not in body:
+            raise ServiceError(400, "body must contain task_id and optionally detail")
+        task_id, detail = body["task_id"], body.get("detail") or ""
+        if task_id is not None and (not isinstance(task_id, str) or not ID_RE.fullmatch(task_id)):
+            raise ServiceError(400, "task_id must be a task id or null")
+        if not isinstance(detail, str) or len(detail) > 200:
+            raise ServiceError(400, "detail must be a short string")
+        interaction = self.interaction(interaction_id)
+        detail = re.sub(r"[\x00-\x1f\x7f]", " ", detail).strip()
+        with interaction.lock:
+            changed = (interaction.focus_task_id, interaction.focus_detail) != (task_id, detail)
+            interaction.focus_task_id, interaction.focus_detail = task_id, detail
+        worker = interaction.worker
+        if changed and worker is not None and worker.loop is not None and not worker.loop.is_closed():
+            asyncio.run_coroutine_threadsafe(worker.focus_changed(), worker.loop)
+        return {"interaction_id": interaction_id, "task_id": task_id}
+
     def mic_check(self, interaction_id: str, body: dict[str, Any]) -> dict[str, Any]:
         """The app found the call's mic wasn't getting through and reopened the connection.
         Logged (no audio, no words) so dead-mic calls show up in the logs with a reason."""
         note = body.get("note") if isinstance(body, dict) else None
-        if set(body or {}) != {"note"} or not isinstance(note, str) or len(note) > 200:
+        if set(body or {}) != {"note"} or not isinstance(note, str) or len(note) > 400:
             raise ServiceError(400, "body must contain only note")
         self.interaction(interaction_id)
-        logger.warning("speakeasy: mic check on %s: %s", interaction_id[:10], re.sub(r"[^\w :.,()-]", "", note))
+        logger.warning("speakeasy: mic check on %s: %s", interaction_id[:10], re.sub(r"[^\w :.,()/;+-]", "", note))
         return {"interaction_id": interaction_id, "logged": True}
 
     def skip_tour(self, interaction_id: str) -> dict[str, Any]:
@@ -681,6 +752,46 @@ class VoiceService:
             if touched:
                 publish_state(self.store, interaction, name)
         return {"dismissed": dismissed}
+
+    def set_aside(self, run_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """"Not needed": set aside a question, decision or approval waiting on the user without
+        answering it (already handled, or not needed). The task settles as set aside (not failed),
+        a run still waiting on the answer is told to wrap up, and a live call hears it quietly so
+        the voice never asks again. A finished task's question starts no new work."""
+        if not ID_RE.fullmatch(run_id) or not isinstance(body, dict) or body:
+            raise ServiceError(400, "body must be empty")
+        key = self.store.key_for_run(run_id)
+        if key is None:
+            raise ServiceError(404, "task not found")
+        with self.lock:
+            live = list(self.interactions.values())
+        for interaction in live:
+            with interaction.lock:
+                task_id = next((t for t, r in interaction.runs.items() if r.idem_key == key), None)
+            worker = interaction.worker
+            if task_id is None or worker is None or worker.loop is None or worker.loop.is_closed():
+                continue
+            future = asyncio.run_coroutine_threadsafe(worker.set_aside(task_id), worker.loop)
+            if not future.result(20):
+                raise ServiceError(409, "nothing is waiting on you there")
+            return {"run_id": run_id, "set_aside": True}
+        # No live call holds it: record it; the next call and every app see it closed.
+        if not self.store.set_aside(key):
+            raise ServiceError(409, "nothing is waiting on you there")
+        for interaction in live:  # an approval left waiting after its call ended: decline it
+            with interaction.lock:
+                backend = next((r for r in interaction.runs.values() if r.idem_key == key), None)
+                approval = backend.approval if backend and backend.status == "waiting_for_approval" else None
+                if approval and backend.run_id:
+                    backend.approval, backend.status = None, "working"
+            if approval and backend.run_id:
+                try:
+                    self.hermes.approve(backend.run_id, approval.get("request_id", ""), "deny")
+                except Exception:
+                    logger.warning("speakeasy: set-aside could not decline the approval")
+        self.store.progress(key, "milestone", "Set aside")
+        self._republish_all()
+        return {"run_id": run_id, "set_aside": True}
 
     def dismiss_review(self, run_id: str, body: dict[str, Any]) -> dict[str, Any]:
         """Dismiss a finished task's image review card (all its images, or the listed card numbers).
@@ -1199,7 +1310,13 @@ class VoiceService:
             "routing_model": routing_model(), "routing_hint": ROUTING_HINT, "routing_explainer": ROUTING_EXPLAINER,
             "routing_choice": self.routing_choices(),
             "advertised_url": s["server"]["advertised_url"], "tailscale_name": s["server"]["tailscale_name"],
-            "attachments": self.attachment_status(), "version": __version__,
+            "attachments": self.attachment_status(),
+            # Listening mode: POST /voice/sessions takes "room" (the app sends it only when this is true),
+            # also with resume_from (listening mode during a call pauses it, then resumes it with "room").
+            "room_listening": True,
+            "room_on_resume": True,
+            "focus": True,
+            "version": __version__,
         }
 
     def attachment_status(self) -> dict[str, Any]:
