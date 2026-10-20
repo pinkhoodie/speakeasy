@@ -21,7 +21,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
-from . import channels, continuity, failures, router, threads
+from . import channels, continuity, duck as duck_mod, failures, router, threads
 from . import home_control as home_control_mod
 from . import instant as instant_mod
 from . import jev as jev_mod
@@ -708,6 +708,7 @@ class SidebandWorker:
             speaker = "user" if kind.startswith("session.input") else "assistant"
             self.fragments.append({"speaker": speaker, "text": delta, "at": time.monotonic(),
                                    "start_ms": int(event.get("start_ms", 0)), "end_ms": int(event.get("end_ms", 0))})
+            duck_mod.note(speaker)  # either side talking: duck the Mac's volume until the call goes quiet
             return
         if kind == "session.delegation.created":
             delegation = event.get("delegation") or {}
@@ -723,6 +724,7 @@ class SidebandWorker:
             marked = delegation.get("task_id") or delegation.get("follow_up_task_id")
             self.schedule_dispatch(delegation_id, context, marked)
         elif kind == "session.closed":
+            duck_mod.restore()
             self.call_closed()
             with self.interaction.lock:
                 self.interaction.finalization = "confirmed"
