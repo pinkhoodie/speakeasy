@@ -36,11 +36,15 @@ enum Prefs {
     static let listeningShortcut = "listeningShortcut"
     /// The one-time explainer was shown before listening mode was first turned on.
     static let listeningExplained = "listeningExplained"
+    /// Past threads renamed on device by Apple Intelligence (Settings › General; on by default).
+    static let renameThreadsWithAI = "renameThreadsWithAI"
+    /// When the last automatic rename sweep ran (throttle: one per six hours).
+    static let lastAITitleSweep = "lastAITitleSweep"
 
     static func register() {
         UserDefaults.standard.register(defaults: [showPanelOnStart: true, followSystemAudio: true, startMuted: false, startSlim: false,
                                                  showCaptions: true, notifyWhenDone: true, panelOnAllSpaces: true,
-                                                 showInDock: true])
+                                                 showInDock: true, renameThreadsWithAI: true])
     }
 
     /// The call shortcut (default ⌃⌥Space). Stored as e.g. `ctrl+opt+space`.
@@ -273,6 +277,39 @@ final class AppModel: ObservableObject {
         }
         onboarding = try? await api.onboarding()
         micAuthorization = AVCaptureDevice.authorizationStatus(for: .audio)
+        Task { await sweepThreadTitles() }
+    }
+
+    // MARK: AI thread titles
+
+    /// Renames past threads that still show their stand-in label, on device, with Apple
+    /// Intelligence — the Wing thread-titler applied to Speakeasy's voice threads. Touches
+    /// only stand-in labels, runs at most once every six hours (or forced from Settings),
+    /// and does nothing at all when Apple Intelligence isn't available on this Mac.
+    @discardableResult
+    func sweepThreadTitles(force: Bool = false) async -> Int {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: Prefs.renameThreadsWithAI) as? Bool ?? true else { return 0 }
+        guard isPaired, ThreadTitler.isAvailable() else { return 0 }
+        if !force {
+            let last = defaults.object(forKey: Prefs.lastAITitleSweep) as? Date ?? .distantPast
+            guard Date().timeIntervalSince(last) > 6 * 3600 else { return 0 }
+        }
+        defaults.set(Date(), forKey: Prefs.lastAITitleSweep)
+        guard let api else { return 0 }
+        guard let pending = try? await api.pendingThreadTitles(), !pending.isEmpty else { return 0 }
+        var renamed = 0
+        for candidate in pending.prefix(30) {
+            let material = candidate.request.isEmpty ? candidate.title : candidate.request
+            guard let raw = await ThreadTitler.shared.generateTitle(for: material),
+                  let title = ThreadTitles.sanitized(raw), title != candidate.title else { continue }
+            do {
+                try await api.renameThread(taskID: candidate.taskID, title: title)
+                renamed += 1
+            } catch { break }  // server gone or an older plugin: stop quietly, finish next sweep
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return renamed
     }
 
     /// Loads home control: whether Home Assistant is found, on/off, every device it could use.

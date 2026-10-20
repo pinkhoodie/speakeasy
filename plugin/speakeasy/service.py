@@ -775,6 +775,28 @@ class VoiceService:
             raise ServiceError(404, "not found")
         return {"work": self.store.work(run_id, assistant_name=self.settings.get()["assistant_name"])}
 
+    # -- AI thread titles ------------------------------------------------------------------------
+
+    def pending_thread_titles(self) -> dict[str, Any]:
+        """Past tasks still under their stand-in label, for the app's on-device titler."""
+        return {"tasks": self.store.stand_in_titles()}
+
+    def rename_thread(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Set one task's title from the app's on-device Apple Intelligence titler. Same store
+        path as the cloud titler's answer: the title also refines the name of the job it named."""
+        task_id, title = body.get("task_id"), body.get("title")
+        if (not set(body) <= {"task_id", "title"} or not isinstance(task_id, str)
+                or not 1 <= len(task_id) <= 128 or not isinstance(title, str)):
+            raise ServiceError(400, "task_id and title are required")
+        title = " ".join(title.split())
+        if not 2 <= len(title) <= 90:
+            raise ServiceError(400, "title needs 2-90 characters")
+        key = self.store.key_for_task(task_id)
+        if key is None:
+            raise ServiceError(404, "task not found")
+        self.store.set_title(key, title)
+        return {"task_id": task_id, "title": title, "renamed": True}
+
     # -- card images ---------------------------------------------------------------------------
     def _card(self, run_id: str, index: int) -> dict[str, Any]:
         if not ID_RE.fullmatch(run_id) or not 1 <= index <= MAX_CARDS:

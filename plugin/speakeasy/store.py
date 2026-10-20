@@ -653,6 +653,43 @@ class StateStore:
             row = self._db.execute("SELECT delegation_id FROM runs WHERE idem_key=?", (key,)).fetchone()
         return (row[0] if row and row[0] else key)
 
+    # -- AI thread titles ----------------------------------------------------------------------
+
+    def key_for_task(self, task_id: str) -> str | None:
+        """A run's idem key by the id the app knows it by (its delegation id, else the key)."""
+        with self._lock:
+            row = self._db.execute("SELECT idem_key FROM runs WHERE delegation_id=? OR idem_key=?",
+                                   (task_id, task_id)).fetchone()
+        return row[0] if row else None
+
+    def stand_in_titles(self, limit: int = 40) -> list[dict[str, Any]]:
+        """Past tasks whose shown title is still the stand-in label built from their own words
+        (the titler never landed: out of credits, reload mid-name) or that never got one.
+        These are what the Mac app's on-device Apple Intelligence titler may rename."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT idem_key, delegation_id, title, status, updated FROM runs "
+                "ORDER BY updated DESC LIMIT 400").fetchall()
+        unsettled = {"rejected", "admitting", "working", "waiting_for_approval", "running", "ambiguous"}
+        out = []
+        for key, delegation_id, title, status, updated in rows:
+            if status in unsettled:
+                continue
+            request = notice_text(self._request_text(key), 1200) or ""
+            if title and title != short_title(request):
+                continue  # a real name (the titler's, a chat thread's, an older row's): never touched
+            out.append({"task_id": delegation_id or key, "title": title or "",
+                        "request": request, "updated": float(updated or 0)})
+            if len(out) >= limit:
+                break
+        return out
+
+    def _request_text(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT text FROM work_events WHERE idem_key=? AND kind='request' "
+                                   "ORDER BY seq LIMIT 1", (key,)).fetchone()
+        return row[0] if row else None
+
     # -- live view ("what it's looking at") -------------------------------------------------
     def set_live_image(self, key: str, kind: str, ref: str, name: str, source: str) -> bool:
         """Record the task's latest image (already vetted by the caller). False when unchanged."""

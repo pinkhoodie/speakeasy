@@ -81,6 +81,9 @@ private struct GeneralSettings: View {
     @AppStorage(Prefs.notifyWhenDone) private var notifyWhenDone = true
     @AppStorage(Prefs.panelOnAllSpaces) private var panelOnAllSpaces = true
     @AppStorage(Prefs.tourPending) private var tourPending = false
+    @AppStorage(Prefs.renameThreadsWithAI) private var renameThreadsAI = true
+    @State private var renamingThreads = false
+    @State private var renamedThreads = 0
     /// Why listening mode can't run here (nil when it can).
     @State private var listeningUnavailable: String?
 
@@ -95,6 +98,22 @@ private struct GeneralSettings: View {
             Section("Calls") {
                 Toggle("Start calls muted", isOn: $startMuted)
                 Toggle("Follow the system's audio devices (AirPods etc.)", isOn: $followSystemAudio)
+                Toggle("Rename past threads with Apple Intelligence", isOn: $renameThreadsAI)
+                HStack {
+                    Button("Rename past threads now") {
+                        renamingThreads = true
+                        renamedThreads = 0
+                        Task {
+                            renamedThreads = await app.sweepThreadTitles(force: true)
+                            renamingThreads = false
+                        }
+                    }
+                    .disabled(renamingThreads || !app.isPaired)
+                    if renamingThreads { ProgressView().controlSize(.small) }
+                    if renamedThreads > 0 {
+                        Text("Renamed \(renamedThreads)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
             Section("Panel") {
                 Toggle("Show the panel when a call starts", isOn: $showPanelOnStart)
