@@ -808,6 +808,10 @@ struct TranscriptBubble: View {
     var turn: TranscriptTurn
     var assistantName: String
     var body: some View {
+        if turn.kind == .text { textReply } else { speech }
+    }
+
+    @ViewBuilder private var speech: some View {
         let mine = turn.speaker == .you
         HStack(spacing: 0) {
             if mine { Spacer(minLength: 36) }
@@ -826,6 +830,35 @@ struct TranscriptBubble: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(mine ? "You" : assistantName): \(turn.cleanedText)")
+    }
+
+    /// A task's full written answer: the voice speaks the short version, the whole text is here to read.
+    private var textReply: some View {
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(turn.taskName.map { "\(assistantName) · \($0)" } ?? "\(assistantName) · written reply")
+                    .font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.tertiary).lineLimit(1)
+                Text(Self.markdown(turn.cleanedText)).font(.system(size: 11.5))
+                    .foregroundStyle(Color.primary.opacity(0.9))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 9).padding(.vertical, 7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.primary.opacity(0.05)))
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(Tokens.brass.opacity(0.35), lineWidth: 0.75))
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 12)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(assistantName) wrote: \(turn.cleanedText)")
+    }
+
+    /// Inline markdown (bold, links) with line breaks kept; plain text when it doesn't parse.
+    static func markdown(_ text: String) -> AttributedString {
+        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(text)
     }
 }
 

@@ -169,6 +169,9 @@ public struct WorkInfo: Equatable, Sendable {
     /// Nothing in it to read: a finished home command ("lights off") the server already counts as
     /// seen, so it never sits in New answers. The answer is still there when the job is opened.
     public var seen = false
+    /// An earlier call's task kept on this call's list only for its pending draft or review card
+    /// (the server marks it); it's not an answer of this conversation.
+    public var carried = false
 
     public init(runID: String?, status: String, stale: Bool = false, updated: Date? = nil,
                 shortStatus: String? = nil, detail: String? = nil, updatedAt: Date? = nil,
@@ -227,6 +230,7 @@ public struct WorkInfo: Equatable, Sendable {
         job = JobRef(json: object["job"])
         setAside = object["set_aside"] as? Bool ?? false
         seen = object["seen"] as? Bool ?? false
+        carried = object["carried"] as? Bool ?? false
         plan = (object["plan"] as? [Any] ?? []).compactMap { $0 as? String }.filter { !$0.isEmpty }
         liveImage = LiveImage(json: object["live_image"])
         failure = status == "failed" ? WorkFailure(json: object["failure"]) : nil

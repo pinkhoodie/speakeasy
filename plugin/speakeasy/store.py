@@ -750,6 +750,7 @@ class StateStore:
             work = self.work(idem_key=key)
             if work is not None:
                 work["task_id"] = task_id
+                work["carried"] = True
                 out.append(work)
         return out
 

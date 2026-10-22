@@ -301,7 +301,8 @@ The newest task (`work`), the task list (`tasks`, newest last, finished ones hid
 dismissal) and the recap of results that finished while no call was open (`away`). Each task has
 `task_id`, `run_id`, `status` (`admitting`, `working`, `waiting_for_approval`, `completed`,
 `failed`, `cancelled`, `interrupted`, `ambiguous`), live `short_status`/`detail`, `events`,
-`result` (`spoken`, `full`, optional `label`, optional `cards`) and `email_drafts`.
+`result` (`spoken`, `full`, optional `label`, optional `cards`) and `email_drafts`. An earlier
+call's task shown only for its pending draft or review card has `carried: true`.
 Product and image cards appear as `result.cards`; image cards are fetched through
 `/voice/card-image/...`, never by path.
 
