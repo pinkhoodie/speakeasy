@@ -41,11 +41,11 @@ struct OrbBar: View {
                        unreadAnswers: model.unreadAnswers, placement: "folded").contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .help("\(model.orbState.label). Open your jobs")
-            .accessibilityLabel("\(model.orbState.label). Open your jobs")
+            .help(orbLabel)
+            .accessibilityLabel(orbLabel)
             if model.state.connection != .paused {
-                MicButton(muted: p.micMuted, enabled: p.micEnabled, shortcutHint: model.muteShortcutHint, action: model.onToggleMic)
-                    .fixedSize()
+                // Screen half and mic: sharing stays visible and stoppable while folded.
+                MediaCapsule(model: model, presentation: p)
             } else if let label = p.pauseLabel {
                 PauseButton(label: label, enabled: p.pauseEnabled, shortcutHint: model.pauseShortcutHint, action: model.onTogglePause)
                     .fixedSize()
@@ -53,7 +53,12 @@ struct OrbBar: View {
             EndButton(action: model.onEnd).fixedSize()
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
-        .frame(width: VoicePanelModel.orbWidth)
+        .frame(width: model.foldedWidth)
+    }
+
+    /// A request waiting for the screen is said on the orb (its line lives in the full panel).
+    private var orbLabel: String {
+        model.hold?.isWaiting == true ? "\(slimHoldSummary). Show the full panel" : "\(model.orbState.label). Open your jobs"
     }
 }
 

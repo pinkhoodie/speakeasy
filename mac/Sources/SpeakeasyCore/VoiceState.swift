@@ -119,6 +119,9 @@ public struct VoiceState: Equatable, Sendable {
     public var micHealth: MicHealth = .ok
     /// What was heard while connecting, as transcribed so far.
     public var earlyHeard = ""
+    /// Screen sharing, capture requests and pending pictures and files ("Look at this"). Off at the
+    /// start of every call and every resume.
+    public var sharing = CallSharing()
 
     public init() {}
 
@@ -202,6 +205,8 @@ public enum VoiceEvent: Equatable, Sendable {
     case earlyHeard(String)
     /// The mic check's verdict changed.
     case micHealth(MicHealth)
+    /// Screen sharing, capture requests, pictures and files.
+    case sharing(SharingEvent)
 }
 
 /// Pure reducer. `now` is supplied by the caller so tests are deterministic.
@@ -223,6 +228,7 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
 
     case .sessionAdmitted(let id):
         s.interactionID = id
+        s.sharing.admitted()
 
     case .earlyListening(let on):
         s.earlyListening = on && s.connection == .connecting
@@ -252,6 +258,7 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
         s.lastError = nil
         s.exchange.replyStarted = true   // next words start a fresh visible exchange
         s.lastInputAt = nil
+        s.sharing.resumed()
 
     case .tasks(let tasks):
         s.tasks = tasks.filter { !s.dismissedRunIDs.contains($0.info.runID ?? "") }
@@ -390,6 +397,14 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
         }
         s.approval = snapshot.approval
         if let error = snapshot.error { s.lastError = error }
+        // Sharing state only from this call's own snapshots, and never while it pauses (the plugin
+        // has dropped what was waiting; it goes again after Resume).
+        if s.connection.isInCall, !s.pausing, let current = s.interactionID,
+           snapshot.interactionID == nil || snapshot.interactionID == current {
+            var own = snapshot
+            own.interactionID = current
+            s.sharing.reconcile(own, now: now)
+        }
         switch snapshot.finalization {
         case "confirmed", "complete":
             if s.connection.isInCall && s.connection != .connecting { s.connection = .ended(.complete) }
@@ -409,6 +424,11 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
         if case .speaking(let last) = s.speech, now.timeIntervalSince(last) >= VoiceState.speechQuietGap {
             s.speech = .idle
         }
+        s.sharing.tick(now: now)
+
+    case .sharing(let event):
+        let live = (s.connection == .live || s.connection == .connecting) && !s.pausing
+        s.sharing.apply(event, now: now, admitted: s.interactionID, live: live)
 
     case .reset:
         s = s.fresh()
@@ -422,6 +442,10 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
         s.speech = .idle
         if s.lastError == "Voice connection lost; final usage confirmation unavailable" { s.lastError = nil }
     }
+    // Paused: sharing is off and nothing is captured; pictures and files not sent yet wait for Resume.
+    // Ended: nothing of the call's sharing is kept.
+    if s.connection == .paused { s.sharing.callClosed(paused: true) }
+    else if !s.connection.isOpen { s.sharing.callClosed(paused: false) }
     s.work = deriveWork(s, now: now)
     return s
 }

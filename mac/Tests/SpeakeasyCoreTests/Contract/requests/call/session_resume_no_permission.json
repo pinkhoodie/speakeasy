@@ -1,0 +1,9 @@
+{
+  "body" : {
+    "resume_from" : "{interaction_id}",
+    "screen" : "no_permission",
+    "sdp" : "{sdp}"
+  },
+  "method" : "POST",
+  "path" : "\/voice\/sessions"
+}

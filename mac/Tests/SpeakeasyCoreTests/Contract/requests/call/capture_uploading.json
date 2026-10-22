@@ -1,0 +1,7 @@
+{
+  "body" : {
+    "status" : "uploading"
+  },
+  "method" : "POST",
+  "path" : "\/voice\/interactions\/{interaction_id}\/captures\/{capture_id}"
+}
