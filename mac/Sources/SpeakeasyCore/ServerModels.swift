@@ -156,6 +156,9 @@ public struct WorkInfo: Equatable, Sendable {
     public var liveImage: LiveImage?
     /// Why a `failed` task failed (out of credits, rejected key, …); nil for any other status.
     public var failure: WorkFailure?
+    /// The screen, pictures and files this task carried to Hermes (names only; pictures load through
+    /// `/voice/shared-image/<run>/<number>`).
+    public var shared: [SharedItem] = []
     /// The steps the task will go through, for the progress line; empty until the api plans it.
     public var plan: [String] = []
     /// The job this task belongs to (nil from older plugins: the task is its own job).
@@ -231,6 +234,7 @@ public struct WorkInfo: Equatable, Sendable {
         plan = (object["plan"] as? [Any] ?? []).compactMap { $0 as? String }.filter { !$0.isEmpty }
         liveImage = LiveImage(json: object["live_image"])
         failure = status == "failed" ? WorkFailure(json: object["failure"]) : nil
+        shared = SharedItem.list(json: object["shared"])
         if let review = object["review"] as? [String: Any] {
             reviewImages = (review["images"] as? [Any] ?? []).compactMap { ($0 as? NSNumber)?.intValue }.filter { (1...8).contains($0) }
             reviewSettledAt = decodeDate(review["settled_at"])
@@ -251,6 +255,52 @@ public struct WorkInfo: Equatable, Sendable {
         } else {
             result = nil
         }
+    }
+}
+
+/// Something a task carried to Hermes: a screen capture, a picture or a file. Only its kind and
+/// names reach the app; a capture's or picture's bytes come from the authenticated
+/// `/voice/shared-image/<run>/<number>` route, never from a path.
+public struct SharedItem: Equatable, Sendable, Identifiable {
+    public enum Kind: String, Equatable, Sendable { case screen, picture, file }
+    /// Position in the task's `shared` list, from 1 (addresses the image route, like card numbers).
+    public let number: Int
+    public let kind: Kind
+    /// The app a screen capture shows ("Xcode").
+    public let app: String?
+    /// A file's (or picture's) name.
+    public let name: String?
+    public var id: Int { number }
+
+    public init(number: Int, kind: Kind, app: String? = nil, name: String? = nil) {
+        self.number = number; self.kind = kind; self.app = app; self.name = name
+    }
+
+    public init?(json: Any?, number: Int) {
+        guard let o = json as? [String: Any], let kind = (o["kind"] as? String).flatMap(Kind.init(rawValue:)) else { return nil }
+        self.init(number: number, kind: kind, app: nonEmpty(o["app"]).map { String($0.prefix(60)) },
+                  name: nonEmpty(o["name"]).map { String($0.prefix(120)) })
+    }
+
+    /// Pictures and screen captures have an image to show; files show a chip.
+    public var isImage: Bool { kind != .file }
+
+    /// "Xcode", "report.pdf", or the kind when nothing else is known.
+    public var label: String {
+        switch kind {
+        case .screen: return app.map { "\($0) window" } ?? "Screen"
+        case .picture: return name ?? "Picture"
+        case .file: return name ?? "File"
+        }
+    }
+
+    /// How many things one task's card keeps (the plugin's `MAX_SHARED`). The plugin keeps the first
+    /// ones shared, so a position never renumbers; the image route is asked for 1...this.
+    public static let maxItems = 12
+
+    /// Numbers count every listed entry (an unknown kind keeps its place) so they match the server's.
+    public static func list(json: Any?) -> [SharedItem] {
+        Array((json as? [Any] ?? []).prefix(maxItems).enumerated()).compactMap { SharedItem(json: $0.element, number: $0.offset + 1) }
     }
 }
 
@@ -329,13 +379,26 @@ public struct InteractionSnapshot: Equatable, Sendable {
     public var finalization: String?
     public var error: String?
     public var paused: Bool
+    /// Screen sharing in force and what the call declared (plugins with attachments).
+    public var screen: ScreenSnapshot?
+    /// Capture requests still open: a polling client serves these like `capture` events.
+    public var captures: [String]
+    /// Pictures and files the plugin holds for the next request; nil when the plugin predates them.
+    public var attachments: [ServerAttachment]?
+    /// A request waiting for the screen ("Waiting for your screen"), or how it ended.
+    public var hold: ScreenHold?
+    /// The snapshot carries `hold` (null included), so a missing one means "none" rather than "unknown".
+    public var hasHold: Bool
 
     public init(interactionID: String? = nil, status: String? = nil, runID: String? = nil,
                 approval: ApprovalInfo? = nil, finalization: String? = nil, error: String? = nil,
-                paused: Bool = false) {
+                paused: Bool = false, screen: ScreenSnapshot? = nil, captures: [String] = [],
+                attachments: [ServerAttachment]? = nil, hold: ScreenHold? = nil, hasHold: Bool = false) {
         self.interactionID = interactionID; self.status = status; self.runID = runID
         self.approval = approval; self.finalization = finalization; self.error = error
         self.paused = paused
+        self.screen = screen; self.captures = captures; self.attachments = attachments
+        self.hold = hold; self.hasHold = hasHold || hold != nil
     }
 
     public init?(json: Any?) {
@@ -347,6 +410,15 @@ public struct InteractionSnapshot: Equatable, Sendable {
         finalization = object["finalization"] as? String
         error = nonEmpty(object["error"])
         paused = object["paused"] as? Bool ?? false
+        screen = ScreenSnapshot(json: object["screen"])
+        var seen = Set<String>()
+        captures = (object["captures"] as? [Any] ?? []).compactMap { raw in
+            guard let id = nonEmpty((raw as? [String: Any])?["capture_id"]), seen.insert(id).inserted else { return nil }
+            return id
+        }
+        attachments = (object["attachments"] as? [Any]).map { $0.compactMap(ServerAttachment.init(json:)) }
+        hold = ScreenHold(json: object["hold"])
+        hasHold = object.keys.contains("hold")
     }
 }
 
@@ -371,15 +443,18 @@ public struct SessionAdmission: Equatable, Sendable {
 /// `resumeFrom` names a paused call whose conversation the new session continues.
 /// `tour` asks for the one-time first-call tour; values are the shortcut labels to mention
 /// (`call`, `mute`, `pause`). Never sent with `resumeFrom`.
+/// `screen` says whether this client can share its screen; pass it only when `/voice/status`
+/// advertises attachments (an older plugin refuses unknown keys). Resumes declare it again.
 /// `room` is what listening mode heard (rendered transcript lines): with a new call, or with the
 /// resume of a call that listening mode paused mid-conversation. Only to servers whose status says
 /// `room_listening`, and it replaces the tour: a call opened from listening mode isn't a tour.
 public func sessionRequestBody(sdp: String, resumeFrom: String? = nil, tour: [String: String]? = nil,
-                               room: String? = nil) throws -> Data {
+                               screen: ScreenDeclaration? = nil, room: String? = nil) throws -> Data {
     var body: [String: Any] = ["sdp": sdp]
     if let room, !room.isEmpty { body["room"] = room }
     if let resumeFrom { body["resume_from"] = resumeFrom }
     else if body["room"] == nil, let tour { body["tour"] = tour }
+    if let screen { body["screen"] = screen.rawValue }
     return try JSONSerialization.data(withJSONObject: body, options: [])
 }
 
