@@ -10,6 +10,11 @@ Speakeasy has two parts that update separately: the **Mac app** (updates through
 - **Private by design.** Your screen and files go only to your own Hermes, never to the voice model. Speakeasy never captures its own windows, password managers or a password you're typing, and anything you share never goes into a group chat or a channel you didn't name. The first time a request takes your screen without you mentioning it, you'll hear which window went.
 - **Needs Screen Recording permission** for the screen part (Settings › General › Screen). macOS asks Speakeasy to relaunch after you allow it, and reminds you about once a month.
 
+## Plugin 0.3.12 — A live status that keeps you company
+
+- **The status line tells you what's actually happening.** While a request runs, the agent now gives you a fresh update at every real step — starting or finishing a piece of work it handed to a helper, a build or big search kicking off and landing, a change of plan, and the moment before it writes the answer — with the specifics (names, numbers, files) of what it's thinking through, researching, and running in the background, not just "working on it." *(Plugin)*
+- **No more filler.** It skips an update that would only repeat the last one and never pads with "still working," so each line is new and worth reading. *(Plugin)*
+
 ## Mac 0.3.4 and Plugin 0.3.11 — Clear an answer without opening it
 
 - **Every new answer has an ×.** Tap it (or long-press the answer and pick Dismiss) and it leaves New answers without opening; it's still in Done today if you want it later. *(Mac app and iPhone app)*
