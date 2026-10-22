@@ -284,6 +284,9 @@ class Interaction:
     history: list[dict[str, str]] = dataclasses.field(default_factory=list)
     resumed_from: str | None = None
     device_id: str = ""
+    # The call's app runs on the Mac that runs Hermes (a direct loopback request): only then is the
+    # Mac's volume the call's own to duck.
+    local: bool = False
     # Listening mode: what the Mac heard in the room before this call (cleaned "[HH:MM] text" lines).
     # Memory only, never in history, logs or reprs; it moves to a resumed call and is cleared when
     # the call ends (or a pause runs out). Empty = an ordinary call.
@@ -713,7 +716,8 @@ class SidebandWorker:
             speaker = "user" if kind.startswith("session.input") else "assistant"
             self.fragments.append({"speaker": speaker, "text": delta, "at": time.monotonic(),
                                    "start_ms": int(event.get("start_ms", 0)), "end_ms": int(event.get("end_ms", 0))})
-            if self.rt.duck is not None:  # either side talking: duck the Mac's volume until it goes quiet
+            if self.rt.duck is not None and speaker == "assistant" and self.interaction.local:
+                # The assistant talking on this Mac: duck its volume until the voice goes quiet.
                 self.rt.duck.note(speaker, self.interaction.interaction_id)
             return
         if kind == "session.delegation.created":

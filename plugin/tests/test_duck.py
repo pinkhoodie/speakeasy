@@ -401,11 +401,104 @@ def test_close_restores_and_stops(tmp_path):
     assert vol.sets == [30, 60]
 
 
+# -- the output device changes while ducked --------------------------------------------------------
+
+class DeviceVolume(FakeVolume):
+    """A fake volume that knows the default output device, and each device's own level."""
+
+    def __init__(self, volume: int = 60, device: str = "BuiltInSpeakerDevice"):
+        super().__init__(volume)
+        self.device = device
+        self.levels: dict[str, int] = {}
+        self.gone: set[str] = set()
+
+    def output_device(self):
+        return self.device
+
+    def set_device_volume(self, device: str, volume: int) -> bool:
+        if device in self.gone:
+            return False
+        self.levels[device] = volume
+        return True
+
+    def switch(self, device: str, volume: int) -> None:
+        with self.lock:
+            self.device, self.volume = device, volume
+
+
+def test_a_device_switch_while_ducked_restores_the_ducked_device_and_leaves_the_new_one(tmp_path, make):
+    vol = DeviceVolume(60)
+    d = make(vol, hold_s=30)
+    d.note("assistant", "call_a")
+    wait_for(lambda: vol.sets == [30])
+    assert json.loads(state_file(tmp_path).read_text())["device"] == "BuiltInSpeakerDevice"
+    vol.switch("AirPods-UID", 45)                  # AirPods connect mid-call
+    d.restore("call_a")
+    d.close()
+    assert vol.levels == {"BuiltInSpeakerDevice": 60}, "the speakers get their volume back"
+    assert vol.sets == [30] and vol.volume == 45, "the AirPods are left as they are"
+    assert not state_file(tmp_path).exists()
+
+
+def test_a_ducked_device_that_is_gone_just_ends_the_duck(tmp_path, make):
+    vol = DeviceVolume(60, device="USB-Speakers")
+    d = make(vol, hold_s=30)
+    d.note("assistant")
+    wait_for(lambda: vol.sets == [30])
+    vol.gone.add("USB-Speakers")
+    vol.switch("BuiltInSpeakerDevice", 50)         # unplugged: macOS falls back to the speakers
+    d.restore()
+    d.close()
+    assert vol.sets == [30] and vol.volume == 50
+    assert not state_file(tmp_path).exists()
+
+
+def test_the_same_device_restores_as_before(tmp_path, make):
+    vol = DeviceVolume(60)
+    d = make(vol, hold_s=30)
+    d.note("assistant")
+    wait_for(lambda: vol.sets == [30])
+    d.restore()
+    wait_for(lambda: vol.sets == [30, 60])
+    assert vol.levels == {}
+
+
+def test_a_crash_restore_after_a_device_switch_targets_the_saved_device(tmp_path, make):
+    write_state(tmp_path, {"volume": 70, "ducked_to": 30, "device": "BuiltInSpeakerDevice"})
+    vol = DeviceVolume(40, device="AirPods-UID")
+    d = make(vol)
+    d.close()
+    assert vol.levels == {"BuiltInSpeakerDevice": 70} and vol.sets == []
+    assert not state_file(tmp_path).exists()
+
+
+# -- only calls on this Mac ------------------------------------------------------------------------
+
+class _Headers(dict):
+    def get(self, key, default=None):
+        return super().get(key, default)
+
+
+@pytest.mark.parametrize("peer,headers,local", [
+    ("127.0.0.1", {}, True),
+    ("::1", {}, True),
+    ("127.0.0.1", {"X-Forwarded-For": "100.101.102.103"}, False),       # proxied from another device
+    ("127.0.0.1", {"X-Forwarded-For": "127.0.0.1"}, True),              # proxied, but from this Mac
+    ("127.0.0.1", {"Tailscale-User-Login": "someone@example.com"}, False),
+    ("127.0.0.1", {"X-Forwarded-For": "not an address"}, False),
+    ("203.0.113.9", {}, False),
+])
+def test_same_machine(peer, headers, local):
+    from speakeasy.server import same_machine
+    assert same_machine(peer, _Headers(headers)) is local
+
+
 # -- settings -------------------------------------------------------------------------------------
 
 def test_settings_default_and_survive_other_patches(tmp_path):
     s = Settings(tmp_path)
-    assert s.get()["audio_duck"] == DEFAULTS["audio_duck"] == {"enabled": True, "level": 30, "hold_s": 4.0}
+    assert s.get()["audio_duck"] == DEFAULTS["audio_duck"] == {"enabled": False, "level": 30, "hold_s": 4.0}
+    s.patch({"audio_duck": {"enabled": True}})
     s.patch({"audio_duck": {"level": 20}})
     s.patch({"assistant_name": "Nova"})           # an unrelated PATCH must not drop the duck settings
     assert s.get()["audio_duck"] == {"enabled": True, "level": 20, "hold_s": 4.0}
@@ -424,7 +517,7 @@ def test_bad_settings_are_refused_with_the_field_named(tmp_path, bad):
 
 def test_duck_config_reads_validated_settings(monkeypatch):
     assert duck_config({"audio_duck": {"enabled": True, "level": 25, "hold_s": 2.0}}) == (True, 25, 2.0)
-    assert duck_config({}) == (True, 30, 4.0)
+    assert duck_config({}) == (False, 30, 4.0)  # off unless turned on
     monkeypatch.setenv("SPEAKEASY_VOICE_DUCK", "0")
     assert duck_config({"audio_duck": {"enabled": True, "level": 25, "hold_s": 2.0}})[0] is False
 
@@ -487,15 +580,15 @@ def ducked(home):
                        openai_negotiate=lambda key, payload: {"session": {"id": "sess_fake"},
                                                               "transport": {"sdp": "v=0\r\n"}},
                        openai_worker=make_worker, volume_backend=vol)
-    svc.settings.patch({"voice": {"provider": "openai"}, "audio_duck": {"hold_s": 30}})
+    svc.settings.patch({"voice": {"provider": "openai"}, "audio_duck": {"enabled": True, "hold_s": 30}})
     srv = SpeakeasyServer(svc, "127.0.0.1", 0)
     srv.start()
     _, paired = http(srv.base_url, "POST", "/voice/pair", {"code": svc.devices.new_pairing_code(),
                                                           "device_name": "Test Mac"})
 
-    def start_call(key: str = "req_duck_1") -> FakeLiveWorker:
+    def start_call(key: str = "req_duck_1", headers: dict | None = None) -> FakeLiveWorker:
         status, _ = http(srv.base_url, "POST", "/voice/sessions", {"sdp": SDP}, paired["token"],
-                         {"Idempotency-Key": key})
+                         {"Idempotency-Key": key, **(headers or {})})
         assert status == 201
         return workers[-1]
 
@@ -514,21 +607,41 @@ def say(worker, words, side="input"):
     worker.feed({"type": f"session.{side}_transcript.delta", "delta": words, "start_ms": 1, "end_ms": 2})
 
 
-def test_a_call_ducks_while_talking_and_restores_on_hang_up(ducked, home):
+def test_a_call_ducks_while_the_assistant_talks_and_restores_on_hang_up(ducked, home):
     vol, start_call, _ = ducked
     worker = start_call()
-    say(worker, "turn the music")
-    wait_for(lambda: vol.sets == [30])
     say(worker, "Sure", side="output")
+    wait_for(lambda: vol.sets == [30])
     worker.feed({"type": "session.closed"})
     wait_for(lambda: vol.sets == [30, 60])
     assert not state_file(home).exists()
 
 
+def test_the_user_talking_never_ducks(ducked):
+    vol, start_call, stop = ducked
+    worker = start_call()
+    say(worker, "turn the music down a bit")
+    say(worker, "and the lights")
+    assert worker.fragments                        # the transcript still arrives
+    stop()
+    assert vol.sets == []
+
+
+@pytest.mark.parametrize("headers", [{"X-Forwarded-For": "100.101.102.103"},     # an iPhone over the tailnet
+                                     {"Tailscale-User-Login": "someone@example.com"},
+                                     {"Forwarded": "for=100.101.102.103"}])
+def test_a_call_from_another_device_never_ducks_this_mac(ducked, headers):
+    vol, start_call, stop = ducked
+    worker = start_call("req_duck_remote", headers)
+    say(worker, "Sure, here's what I found", side="output")
+    stop()
+    assert vol.sets == []
+
+
 def test_a_dropped_transport_restores_too(ducked):
     vol, start_call, _ = ducked
     worker = start_call()
-    say(worker, "hello")
+    say(worker, "hello", side="output")
     wait_for(lambda: vol.sets == [30])
     worker.call_closed()                           # what both transports run when the connection ends
     wait_for(lambda: vol.sets == [30, 60])
@@ -536,7 +649,7 @@ def test_a_dropped_transport_restores_too(ducked):
 
 def test_shutting_the_service_down_mid_call_restores(ducked):
     vol, start_call, stop = ducked
-    say(start_call(), "hello")
+    say(start_call(), "hello", side="output")
     wait_for(lambda: vol.sets == [30])
     stop()                                         # live reload / gateway stop: service.close()
     assert vol.volume == 60

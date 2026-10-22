@@ -1,6 +1,7 @@
-"""Duck the Mac's system volume while either side of a voice call is speaking.
+"""Duck the Mac's system volume while the assistant is speaking on a call from this Mac.
 
-The call's transcript drives it (``SidebandWorker.handle_event``): a transcript delta from either side
+Off unless ``audio_duck.enabled`` is set. The call's transcript drives it (``SidebandWorker.handle_event``):
+an assistant transcript delta on a call whose app runs on this Mac (not an iPhone or another computer)
 lowers the output volume to ``audio_duck.level``; after ``audio_duck.hold_s`` seconds with no transcript,
 or when the call ends (and no other call is still talking), the previous volume comes back. Output that
 is muted, or already at or below the duck level, is left alone.
@@ -10,12 +11,17 @@ and only removed once it has been put back, so a crash, kill or live reload whil
 it the next time the plugin starts. If the user changes the volume while ducked, their choice wins and
 nothing is restored (muting alone is not a change: the level still comes back, unmuting is theirs).
 
+The output device is saved too. If the default output changed while ducked (AirPods connected, speakers
+picked), the restore puts the old volume back on the device that was ducked and leaves the new one alone;
+when that device can't be reached any more, the duck simply ends.
+
 Settings: ``audio_duck.enabled`` / ``level`` / ``hold_s`` in settings.json (validated in settings.py);
 ``SPEAKEASY_VOICE_DUCK=0`` in the environment turns it off. macOS only (``osascript``); a no-op
 elsewhere. macOS cannot duck other apps alone, so the voice is lowered too.
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
@@ -54,6 +60,80 @@ class VolumeBackend(Protocol):
         """Set the output volume; False when it could not be set."""
         ...
 
+    # Optional: a backend that also knows the output device (``output_device`` -> a stable id, and
+    # ``set_device_volume(id, volume)``) lets a restore after a device switch reach the ducked device.
+
+
+class _CoreAudio:
+    """The default output device's UID, and setting one device's volume, through CoreAudio (ctypes)."""
+
+    SYSTEM_OBJECT = 1
+
+    class _Address(ctypes.Structure):
+        _fields_ = [("selector", ctypes.c_uint32), ("scope", ctypes.c_uint32), ("element", ctypes.c_uint32)]
+
+    @staticmethod
+    def _code(text: str) -> int:
+        return int.from_bytes(text.encode("ascii"), "big")
+
+    def __init__(self) -> None:
+        self._ca = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        self._at = ctypes.CDLL("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")
+        self._cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        for fn in (self._ca.AudioObjectGetPropertyData, self._ca.AudioObjectGetPropertyDataSize):
+            fn.restype = ctypes.c_int32
+        self._at.AudioHardwareServiceSetPropertyData.restype = ctypes.c_int32
+        self._cf.CFStringGetCString.restype = ctypes.c_bool
+        self._cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+        self._cf.CFRelease.argtypes = [ctypes.c_void_p]
+
+    def _addr(self, selector: str, scope: str = "glob") -> "_CoreAudio._Address":
+        return self._Address(self._code(selector), self._code(scope), 0)
+
+    def _default_output_id(self) -> int | None:
+        dev, size = ctypes.c_uint32(0), ctypes.c_uint32(4)
+        err = self._ca.AudioObjectGetPropertyData(ctypes.c_uint32(self.SYSTEM_OBJECT), ctypes.byref(self._addr("dOut")),
+                                                  0, None, ctypes.byref(size), ctypes.byref(dev))
+        return dev.value if err == 0 and dev.value else None
+
+    def _uid(self, device: int) -> str | None:
+        ref, size = ctypes.c_void_p(), ctypes.c_uint32(ctypes.sizeof(ctypes.c_void_p))
+        err = self._ca.AudioObjectGetPropertyData(ctypes.c_uint32(device), ctypes.byref(self._addr("uid ")),
+                                                  0, None, ctypes.byref(size), ctypes.byref(ref))
+        if err != 0 or not ref.value:
+            return None
+        try:
+            buf = ctypes.create_string_buffer(512)
+            ok = self._cf.CFStringGetCString(ref, buf, 512, 0x08000100)  # kCFStringEncodingUTF8
+            return buf.value.decode() if ok else None
+        finally:
+            self._cf.CFRelease(ref)
+
+    def _devices(self) -> list[int]:
+        addr, size = self._addr("dev#"), ctypes.c_uint32(0)
+        if self._ca.AudioObjectGetPropertyDataSize(ctypes.c_uint32(self.SYSTEM_OBJECT), ctypes.byref(addr),
+                                                   0, None, ctypes.byref(size)) != 0:
+            return []
+        ids = (ctypes.c_uint32 * (size.value // 4))()
+        if self._ca.AudioObjectGetPropertyData(ctypes.c_uint32(self.SYSTEM_OBJECT), ctypes.byref(addr),
+                                               0, None, ctypes.byref(size), ids) != 0:
+            return []
+        return list(ids)
+
+    def default_output_uid(self) -> str | None:
+        device = self._default_output_id()
+        return self._uid(device) if device else None
+
+    def set_volume(self, uid: str, volume: int) -> bool:
+        device = next((d for d in self._devices() if self._uid(d) == uid), None)
+        if device is None:
+            return False  # unplugged or gone
+        scalar = ctypes.c_float(max(0, min(100, volume)) / 100.0)
+        err = self._at.AudioHardwareServiceSetPropertyData(  # kAudioHardwareServiceDeviceProperty_VirtualMainVolume
+            ctypes.c_uint32(device), ctypes.byref(self._addr("vmvc", "outp")), 0, None,
+            ctypes.c_uint32(ctypes.sizeof(scalar)), ctypes.byref(scalar))
+        return err == 0
+
 
 class OsascriptVolume:
     """The Mac's output volume through ``osascript`` (tens of ms per call: run off the event loop)."""
@@ -76,6 +156,33 @@ class OsascriptVolume:
 
     def set_volume(self, volume: int) -> bool:
         return self._run(f"set volume output volume {int(volume)}") is not None
+
+    _core: "_CoreAudio | None | bool" = False  # False = not loaded yet; None = unavailable
+
+    def _coreaudio(self) -> "_CoreAudio | None":
+        if self._core is False:
+            try:
+                self._core = _CoreAudio()
+            except (OSError, AttributeError) as exc:
+                logger.debug("speakeasy-duck: CoreAudio unavailable: %s", type(exc).__name__)
+                self._core = None
+        return self._core  # type: ignore[return-value]
+
+    def output_device(self) -> str | None:
+        """The default output device's UID (stable across reboots), or None when it can't be read."""
+        core = self._coreaudio()
+        try:
+            return core.default_output_uid() if core else None
+        except Exception:  # never let audio plumbing break the call
+            return None
+
+    def set_device_volume(self, device: str, volume: int) -> bool:
+        """Set one device's volume, whether or not it's the default output now."""
+        core = self._coreaudio()
+        try:
+            return bool(core and core.set_volume(device, volume))
+        except Exception:
+            return False
 
 
 def default_backend() -> VolumeBackend | None:
@@ -236,10 +343,14 @@ class Ducker:
         volume, muted = current
         if muted or volume <= level:
             return  # nothing to lower, and never raise a quiet Mac
+        state: dict[str, Any] = {"volume": volume, "ducked_to": level}
+        device = self._output_device()
+        if device:
+            state["device"] = device
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.state_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"volume": volume, "ducked_to": level}))
+            tmp.write_text(json.dumps(state))
             os.replace(tmp, self.state_path)  # saved before lowering, so a crash can still restore
         except OSError as exc:
             logger.warning("speakeasy-duck: could not save the volume (%s); not ducking", exc)
@@ -255,6 +366,15 @@ class Ducker:
         state = self._read_state()
         if state is None:
             return True
+        ducked_device, device = state.get("device"), self._output_device()
+        if isinstance(ducked_device, str) and device and device != ducked_device:
+            # The output changed while ducked: the old volume goes back on the device that was ducked,
+            # and the new one is left as it is. If that device is gone, the duck just ends.
+            setter = getattr(self._backend, "set_device_volume", None)
+            if setter is None or not setter(ducked_device, state["volume"]):
+                logger.debug("speakeasy-duck: the ducked output is gone; ending the duck")
+            self._forget_state()
+            return True
         current = self._backend.read()
         ducked_to = state.get("ducked_to")
         if current is not None and isinstance(ducked_to, int) and abs(current[0] - ducked_to) > USER_CHANGE_TOLERANCE:
@@ -267,6 +387,16 @@ class Ducker:
         self._forget_state()
         logger.debug("speakeasy-duck: restored %s", state["volume"])
         return True
+
+    def _output_device(self) -> str | None:
+        reader = getattr(self._backend, "output_device", None)
+        if reader is None:
+            return None
+        try:
+            device = reader()
+        except Exception:
+            return None
+        return device if isinstance(device, str) and device else None
 
     def _forget_state(self) -> None:
         try:

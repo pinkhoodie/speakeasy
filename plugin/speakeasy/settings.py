@@ -46,9 +46,10 @@ DEFAULTS: dict[str, Any] = {
     # typesafe) that sorts each request in well under a second; the key comes from the profile .env.
     # home_place: a city for weather questions that don't name one ("what's the weather tomorrow").
     "fast_routing": {"quick_answers": True, "jev": "", "home_place": ""},
-    # Lower the Mac's output volume to `level` % while either side of a call speaks; the old volume
-    # comes back after `hold_s` seconds without speech or when the call ends (macOS only).
-    "audio_duck": {"enabled": True, "level": 30, "hold_s": 4.0},
+    # Off unless turned on. Lower the Mac's output volume to `level` % while the assistant speaks on a
+    # call made from the Mac running Hermes; the old volume comes back after `hold_s` seconds without
+    # its speech or when the call ends (macOS only).
+    "audio_duck": {"enabled": False, "level": 30, "hold_s": 4.0},
     "image_roots": [],
     # Written by `hermes voice setup`: the URL other devices use to reach this server (a tailnet
     # HTTPS name when Tailscale was imported), reused by `hermes voice pair`.

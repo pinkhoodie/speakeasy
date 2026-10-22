@@ -5,9 +5,11 @@ Loopback only. Every route except ``GET /health`` and ``POST /voice/pair`` needs
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import re
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +29,36 @@ MAX_BODY = 128 * 1024
 # of the usual body (whose 128 KiB already fits the largest SDP offer, MAX_SDP, with its escaping).
 MAX_SESSION_BODY = MAX_BODY + MAX_ROOM_CHARS * 12
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+PROXY_HEADERS = ("X-Forwarded-For", "X-Real-IP", "Forwarded", "Tailscale-User-Login")
+
+
+def _is_own_address(ip: str) -> bool:
+    """True when ``ip`` belongs to this machine (it can be bound here), e.g. its own tailnet address."""
+    try:
+        addr = ipaddress.ip_address(ip.strip().strip("[]"))
+    except ValueError:
+        return False
+    if addr.is_unspecified or addr.is_multicast:
+        return False
+    if addr.is_loopback:
+        return True
+    try:
+        with socket.socket(socket.AF_INET6 if addr.version == 6 else socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.bind((str(addr), 0))
+        return True
+    except OSError:
+        return False
+
+
+def same_machine(peer: str, headers: Any) -> bool:
+    """The request came from an app on this machine: a direct loopback connection, or one through a
+    local proxy (Tailscale serve) whose forwarded client address is this machine's own."""
+    if not _is_own_address(peer):
+        return False
+    if not any(headers.get(h) for h in PROXY_HEADERS):
+        return True
+    forwarded = (headers.get("X-Forwarded-For") or headers.get("X-Real-IP") or "").split(",")[0]
+    return bool(forwarded.strip()) and _is_own_address(forwarded)
 _ID = r"([A-Za-z0-9_-]+)"
 
 
@@ -200,7 +232,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/voice/sessions":
                 self._reply(201, self.service.create_session(self._body(MAX_SESSION_BODY),
                                                             self.headers.get("Idempotency-Key", ""),
-                                                            device_id))
+                                                            device_id, local=same_machine(self.client_address[0],
+                                                                                          self.headers)))
                 return
             if path == "/voice/tasks/dismiss":
                 self._reply(200, self.service.dismiss_tasks(self._body()))

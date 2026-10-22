@@ -249,7 +249,8 @@ class VoiceService:
                                          tour=P.tour_block(names, tour, label, s["delivery"]["channels"])
                                          if tour is not None else "", room=room)
 
-    def create_session(self, body: dict[str, Any], request_id: str, device_id: str = "") -> dict[str, Any]:
+    def create_session(self, body: dict[str, Any], request_id: str, device_id: str = "",
+                       local: bool = False) -> dict[str, Any]:
         if self.updated_underneath():
             raise ServiceError(503, RESTART_NEEDED)
         resume_from = body.get("resume_from")
@@ -344,7 +345,7 @@ class VoiceService:
             "transport": {"type": "webrtc", "sdp": answer}, "voice_provider": provider,
         }
         interaction = Interaction(interaction_id=interaction_id, live_session_id=live_id, away=away,
-                                  device_id=device_id, room=room if source is None else "")
+                                  device_id=device_id, room=room if source is None else "", local=local)
         if source is not None:  # a resume: adopt moves the room text over from the paused call
             self.adopt(source, interaction, history)
             client_result["resumed_from"] = source.interaction_id
