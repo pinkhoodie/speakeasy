@@ -81,7 +81,7 @@ private struct GeneralSettings: View {
     @AppStorage(Prefs.notifyWhenDone) private var notifyWhenDone = true
     @AppStorage(Prefs.panelOnAllSpaces) private var panelOnAllSpaces = true
     @AppStorage(Prefs.tourPending) private var tourPending = false
-    @AppStorage(Prefs.renameThreadsWithAI) private var renameThreadsAI = true
+    @AppStorage(Prefs.renameThreadsWithAI) private var renameThreadsAI = false
     @State private var renamingThreads = false
     @State private var renamedThreads = 0
     /// Why listening mode can't run here (nil when it can).

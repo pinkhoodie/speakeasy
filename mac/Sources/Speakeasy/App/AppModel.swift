@@ -36,7 +36,7 @@ enum Prefs {
     static let listeningShortcut = "listeningShortcut"
     /// The one-time explainer was shown before listening mode was first turned on.
     static let listeningExplained = "listeningExplained"
-    /// Past threads renamed on device by Apple Intelligence (Settings › General; on by default).
+    /// Past threads renamed on device by Apple Intelligence (Settings › General; off until turned on).
     static let renameThreadsWithAI = "renameThreadsWithAI"
     /// When the last automatic rename sweep ran (throttle: one per six hours).
     static let lastAITitleSweep = "lastAITitleSweep"
@@ -44,7 +44,7 @@ enum Prefs {
     static func register() {
         UserDefaults.standard.register(defaults: [showPanelOnStart: true, followSystemAudio: true, startMuted: false, startSlim: false,
                                                  showCaptions: true, notifyWhenDone: true, panelOnAllSpaces: true,
-                                                 showInDock: true, renameThreadsWithAI: true])
+                                                 showInDock: true, renameThreadsWithAI: false])
     }
 
     /// The call shortcut (default ⌃⌥Space). Stored as e.g. `ctrl+opt+space`.
@@ -292,7 +292,7 @@ final class AppModel: ObservableObject {
     @discardableResult
     func sweepThreadTitles(force: Bool = false) async -> Int {
         let defaults = UserDefaults.standard
-        guard defaults.object(forKey: Prefs.renameThreadsWithAI) as? Bool ?? true else { return 0 }
+        guard defaults.object(forKey: Prefs.renameThreadsWithAI) as? Bool ?? false else { return 0 }
         guard isPaired, ThreadTitler.isAvailable(), !titleSweepRunning, let api else { return 0 }
         if !force {
             let last = defaults.object(forKey: Prefs.lastAITitleSweep) as? Date ?? .distantPast

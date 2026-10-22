@@ -37,6 +37,25 @@ def test_stand_in_titles_are_offered_and_renames_stick(server, service, hermes):
     assert job_name == "book train boston"
 
 
+def test_rename_keeps_a_job_name_that_is_not_the_stand_in(server, service, hermes):
+    """Only the task's stand-in title is replaced; a job already named some other way keeps its name."""
+    _, worker = start_call(server, service)
+    worker.delegate("call_j", "Um, book a train to Boston for tomorrow morning please")
+    wait_for(lambda: any(t.get("task_id") == "call_j" and t.get("title") and t["status"] == "completed"
+                         for t in tasks(server)))
+    key = service.store.key_for_task("call_j")
+    job = [t for t in tasks(server) if t.get("task_id") == "call_j"][0]["job"]
+    service.store._db.execute("INSERT OR REPLACE INTO jobs (job_id,name,from_key,updated) VALUES (?,?,?,?)",
+                              (job["id"], "Boston weekend", key, 1.0))
+
+    status, renamed = http(server.base_url, "POST", "/voice/titles",
+                           {"task_id": "call_j", "title": "book train boston"}, server.token)
+    assert status == 200 and renamed["renamed"] is True
+    assert service.store.title(key) == "book train boston"
+    (name,) = service.store._db.execute("SELECT name FROM jobs WHERE from_key=?", (key,)).fetchone()
+    assert name == "Boston weekend"
+
+
 def test_rename_validation_and_auth(server, service, hermes):
     status, _ = http(server.base_url, "GET", "/voice/titles")
     assert status == 401

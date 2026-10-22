@@ -707,7 +707,13 @@ class StateStore:
             name = job_name(title)
             if name:
                 self._db.execute("UPDATE runs SET own_title=? WHERE idem_key=?", (title, key))
-                self._db.execute("UPDATE jobs SET name=?, updated=? WHERE from_key=?", (name, time.time(), key))
+                # The job this task named takes the new name only while it still has the stand-in's
+                # name; a job named any other way keeps its name.
+                stand_ins = {n for n in (job_name(row[0]), job_name(short_title(notice_text(row[2], 1200) or "")),
+                                         "Voice task") if n}
+                marks = ",".join("?" * len(stand_ins))
+                self._db.execute(f"UPDATE jobs SET name=?, updated=? WHERE from_key=? AND name IN ({marks})",
+                                 (name, time.time(), key, *stand_ins))
         return True
 
     # -- live view ("what it's looking at") -------------------------------------------------
