@@ -7,6 +7,8 @@ only implement ``run()`` (read provider events) and ``_send()`` (write context t
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
 import re
 import dataclasses
 import functools
@@ -28,6 +30,9 @@ from . import instant as instant_mod
 from . import jev as jev_mod
 from . import quick as quick_mod
 from . import views as views_mod
+from . import attachments as A
+from .attachments import Attachment, CallAttachments
+from .hermes_api import user_content
 from .settings import valid_delivery_target
 from .prompt import builder as P
 from . import text as text_mod
@@ -110,10 +115,11 @@ STATUS_NOTE_EVERY_S = 60.0
 
 
 class ServiceError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, reason: str | None = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.reason = reason  # a short code the app maps to its own line (attachment refusals)
 
 
 @dataclasses.dataclass
@@ -146,6 +152,10 @@ class Runtime:
     call_log: Any = None
     # Lowers the Mac's volume while the call is speaking (duck.Ducker); None = never.
     duck: Ducker | None = None
+    # Speakeasy's copies of shared files (attachments.SharedFolder), and the call that deletes copies
+    # nothing uses any more (no task records them, no live call holds them). None = not kept.
+    shared: Any = None
+    discard_files: Callable[[list[str]], int] | None = None
 
     @property
     def names(self) -> P.Names:
@@ -298,6 +308,13 @@ class Interaction:
     worker: Any = dataclasses.field(default=None, repr=False)
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock, repr=False)
     feed: EventFeed = dataclasses.field(default_factory=EventFeed, repr=False)
+    # What the client can share, the screen toggle, pending pictures and files, capture requests.
+    # A resumed call starts with a fresh one (sharing off, nothing pending); the app re-sends.
+    attachments: CallAttachments = dataclasses.field(default_factory=CallAttachments, repr=False)
+    # A request waiting for screen sharing to come on (one at a time), as the app shows it:
+    # {"state": "waiting" | "not_sent", "text": its line, "since": epoch seconds}; "not_sent" clears
+    # after HOLD_OUTCOME_S. Set by the worker (hold_request, end_hold), never mutated in place.
+    hold: dict[str, Any] | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -321,6 +338,8 @@ class Interaction:
                 "error": (latest.error if latest else None) or self.error,
                 "paused": self.paused,
                 "resumed_from": self.resumed_from,
+                **self.attachments.snapshot(),  # screen, captures, attachments
+                "hold": self.hold,
             }
 
     def head(self) -> "Interaction":
@@ -385,6 +404,102 @@ def publish_state(store: Any, interaction: Interaction, assistant_name: str = "H
                 "finalization": "complete" if snap["finalization"] == "confirmed" else "incomplete",
                 "error": snap.get("error"),
             })
+
+
+# -- look at this: what a handoff carries besides its words ----------------------------------------
+
+KEEP_CAPTURE_S = 60.0  # a request that asked a question first: its capture waits this long for the answer
+KEPT_ANSWER_WORDS = 6  # ... which is a short reply that doesn't point at the screen itself
+HOLD_S = 30.0          # a request that needs the screen waits this long for sharing to come on
+RELEASED_REPEAT_S = 10.0  # once it went, asking to look again this soon is the same request
+HOLD_OUTCOME_S = 8.0   # ... and its "Not sent" line stays this long once it ended unsent
+STOP_HEARD_SETTLE_S = 0.6  # "stop looking at my screen" heard in the transcript: act once the words settle
+STOP_WINDOW_S = 8.0    # the transcript words a stop phrase is looked for in
+STOP_DEBOUNCE_S = 15.0 # heard and handed off for the same words: one confirmation
+
+
+def _base(task_id: str) -> str:
+    """The handoff a task belongs to: the parts of a split request are "<handoff>-p<n>"."""
+    return re.sub(r"-p\d+$", "", task_id)
+
+
+@dataclasses.dataclass
+class Shared:
+    """What one handoff carries to Hermes besides its words: the pictures and files dropped on the
+    panel, the screen capture taken for it, and why a capture didn't come. Image bytes live only here
+    and in the run's input; ``saved`` maps each image to Speakeasy's copy once saved (the parts of a
+    split request share one Shared, so one copy)."""
+    pictures: list[Attachment] = dataclasses.field(default_factory=list)
+    files: list[Attachment] = dataclasses.field(default_factory=list)
+    capture: Attachment | None = None
+    missing: str | None = None  # why there's no capture: a CaptureResult reason, or "budget"
+    at: float = dataclasses.field(default_factory=time.time)
+    saved: dict[str, str] = dataclasses.field(default_factory=dict, repr=False)
+
+    @property
+    def images(self) -> list[Attachment]:
+        return ([self.capture] if self.capture else []) + self.pictures
+
+    @property
+    def things(self) -> list[Attachment]:
+        return self.images + self.files
+
+    def __bool__(self) -> bool:
+        return bool(self.capture or self.pictures or self.files)
+
+    def forget_bytes(self) -> None:
+        """The run has the images now: don't hold them in memory for as long as it works."""
+        for image in self.images:
+            image.data = None
+
+
+@dataclasses.dataclass
+class Held:
+    """A request that needs the user's screen, waiting (HOLD_S) for sharing to come on; one per call.
+    It holds nothing the user shared: the handoff gave everything back when it was held, and binds
+    again (with a fresh capture) once it goes."""
+    delegation_id: str
+    revision: int
+    context: str
+    marked: Any
+    request: str               # the whole request, settled
+    since: float = dataclasses.field(default_factory=time.time)  # epoch seconds, as the snapshot shows it
+    token: int = 0
+
+
+def _fits(images: list[Attachment]) -> bool:
+    """Inside one request's image budget (read at call time from attachments.py)."""
+    sizes = [len(a.data or b"") for a in images]
+    return (len(sizes) <= A.MAX_REQUEST_IMAGES and all(s <= A.MAX_IMAGE_BYTES for s in sizes)
+            and sum(sizes) <= A.MAX_REQUEST_IMAGE_BYTES)
+
+
+def _image_filename(image: Attachment) -> str:
+    """A saved image's name: what it shows, with the extension of what it is (the Mac re-encodes
+    every image, so a dropped picture's own name may carry another one)."""
+    stem = (f"{image.app} window" if image.app else "Screen") if image.kind == "screen" else \
+        (Path(image.name).stem if image.name else "Picture")
+    return stem + (".png" if image.mime == "image/png" else ".jpg")
+
+
+def _data_url(image: Attachment) -> str:
+    return f"data:{image.mime};base64," + base64.b64encode(image.data or b"").decode("ascii")
+
+
+def end_shared(rt: Runtime, interaction: Interaction, reason: str) -> None:
+    """The call ended or paused: no more capture requests or uploads. Pictures and files that were
+    only waiting on the panel are dropped (the app re-sends them to a resumed call), and so are
+    Speakeasy's copies of those files unless a task or another call still uses them. A request
+    waiting for the screen ends unsent."""
+    dropped = interaction.attachments.end(reason)
+    if interaction.worker is not None:
+        interaction.worker.end_hold(reason)
+    paths = [a.path for a in dropped if a.path]
+    if paths and rt.discard_files is not None:
+        try:
+            rt.discard_files(paths)
+        except Exception as exc:
+            logger.warning("speakeasy: could not delete unsent shared files: %s", type(exc).__name__)
 
 
 # -- chat notices (delivery target) ---------------------------------------------------------------
@@ -503,6 +618,26 @@ class SidebandWorker:
         self.wants_show: set[str] = set()        # delegation ids the user wants to SEE (routing said show)
         self.show_seq = 0
         self.route_timings: dict[str, int] = {}  # task id -> routing latency (ms), stored with the task
+        # Look at this, per handoff (a split request's parts share their handoff's): whether its words
+        # point at the screen, the capture asked for it, and its one collection (collect_shared).
+        self.share_refs: dict[str, bool] = {}
+        self.capture_ids: dict[str, str] = {}
+        self.share_jobs: dict[str, asyncio.Future[Shared]] = {}
+        self.no_capture: set[str] = set()        # handoffs whose capture was given up (routed to a group)
+        self.kept_capture: tuple[str, float] | None = None  # a question's capture, waiting for the answer
+        self.capture_announced = False           # the call's first unasked-for capture was said aloud
+        # A request waiting for the screen (interaction.hold is what the app sees), and "stop looking at
+        # my screen" heard in the transcript: words up to stop_words_after are spent; stopped_at is when
+        # sharing last went off (or a hold ended) by voice, so the same words act once.
+        self.held: Held | None = None
+        self.hold_token = 0
+        # The held request that last went (its words, when), and handoffs a released hold is dispatching
+        # now: the handoff that was held must not give back what the release just bound for it.
+        self.released_hold: tuple[str, float] | None = None
+        self.releasing: set[str] = set()
+        self.stop_words_after = 0.0
+        self.stopped_at = float("-inf")
+        self.stop_check: asyncio.Task[Any] | None = None
         self.delegations: set[str] = set()
         self.dispatch_tasks: set[asyncio.Task[Any]] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -670,6 +805,7 @@ class SidebandWorker:
                 self.still_working_notices()
         except Exception as exc:
             logger.warning("speakeasy: call-close bookkeeping failed: %s", type(exc).__name__)
+        end_shared(self.rt, self.interaction, "paused" if paused else "ended")
 
     def call_tasks(self) -> list[dict[str, Any]]:
         """This call's tasks for the call log: what was asked, how it ended, the spoken answer."""
@@ -719,6 +855,8 @@ class SidebandWorker:
             if self.rt.duck is not None and speaker == "assistant" and self.interaction.local:
                 # The assistant talking on this Mac: duck its volume until the voice goes quiet.
                 self.rt.duck.note(speaker, self.interaction.interaction_id)
+            if speaker == "user":
+                self.listen_for_stop()
             return
         if kind == "session.delegation.created":
             delegation = event.get("delegation") or {}
@@ -1292,13 +1430,49 @@ class SidebandWorker:
             logger.info("speakeasy: handoff already folded into the task before it; not started twice")
             await self._drop(delegation_id, revision, "Added to the previous request", None)
             return
+        # "Stop looking at my screen" and "share my screen" are about sharing itself, never work: answered
+        # here, in calls whose app said it can share (others go on as words, as before).
+        intent = router.screen_intent(last_request) if self.interaction.attachments.declared else None
+        if intent is not None:
+            rest = router.after_stop(last_request) if intent == "stop" else ""
+            if not rest and not marked:
+                # The voice sometimes hands the same words off twice: hint (or stop) once.
+                if self._echoes_recent(last_request):
+                    await self._drop(delegation_id, revision, "Added to the previous request", None)
+                    return
+                self._remember_request(last_request)
+            await self.screen_words(delegation_id, intent, more=bool(rest))
+            if not rest:
+                return
+            last_request = rest  # sharing is off now; the rest of what they asked still goes ahead
+        held = self.held
+        if held is not None and (router.acknowledges(last_request) or _same_words(last_request, held.request)):
+            # "Ok, one sec" or "I'm turning on the eye" while they turn sharing on, or the same words
+            # handed off again: the request waiting for the screen keeps waiting, and this one never
+            # becomes a task.
+            self.handoff_at.pop(delegation_id, None)
+            await self._drop(delegation_id, revision, "Waiting for the screen", None)
+            return
+        if held is None and self.repeats_released(last_request):
+            # "Now look at my screen" just as the request that waited for it went: that one has the screen.
+            logger.info("speakeasy: asked to look again as the held request went; not started twice")
+            self.handoff_at.pop(delegation_id, None)
+            await self._drop(delegation_id, revision, "Already on its way with your screen", None)
+            return
         if not marked and self._echoes_recent(last_request):
             logger.info("speakeasy: handoff repeats a request started seconds ago; not started twice")
             await self._drop(delegation_id, revision, "Added to the previous request", None)
             return
         if not marked:
             self._remember_request(last_request)
-        if router.is_show_me(last_request) and await self.show_me(delegation_id, last_request):
+        self.end_hold("superseded")  # a newer request ends one waiting for the screen
+        # Pointing at their own screen, or with pictures waiting on the panel, "show me this" is about
+        # what they're showing; only "show me what you're looking at" still means a task's own view.
+        # Only in a call that can share: elsewhere (an iPhone, an older Mac) "this page" is a task's, as before.
+        refs = bool(self.interaction.attachments.declared) and router.refers_to_screen(last_request)
+        showing = refs or bool(self.interaction.attachments.pending())
+        if (router.is_show_me(last_request) and (not showing or router.about_task_view(last_request))
+                and await self.show_me(delegation_id, last_request)):
             return
         if router.is_status_question(last_request):
             running = [t for t in self.open_tasks() if t.status not in TERMINAL]
@@ -1312,11 +1486,33 @@ class SidebandWorker:
         home_follow = isinstance(marked, str) and marked in self.home_tasks
         if (not marked or home_follow) and await self.home_control(delegation_id, revision, last_request):
             return
+        showing = self.bind_shared(delegation_id, last_request)
+        # In a call that declared ``ready`` but isn't sharing, a request that needs the screen waits for
+        # it once settled (``wait_for_screen``, in _dispatch_bound), instead of going on without it.
+        try:
+            await self._dispatch_bound(delegation_id, revision, context, marked, last_request, showing)
+        finally:
+            # Held, and sharing came on before the hold's own hint was out: the release dispatches this
+            # handoff now and owns what it bound (dispatch_held finishes it), so it isn't given back here.
+            if delegation_id not in self.releasing:
+                self.finish_shared(delegation_id)
+
+    async def _dispatch_bound(self, delegation_id: str, revision: int, context: str, marked: Any,
+                              last_request: str, showing: bool, released: bool = False) -> None:
+        """The rest of a handoff, once it holds what the user shared with it (``bind_shared``).
+        ``showing``: it carries pictures or files or points at the screen, so the quick lanes and a
+        task's own picture are never what it means. ``released``: a held request going now that
+        sharing is on (already settled, never held again)."""
         # Home commands stay instant. Anything else waits a beat in case the user is still talking,
         # so a breath mid-thought doesn't send half a request.
-        if not marked and router.continues_newest(last_request, self.open_tasks()) is None:
-            last_request = await self.settle(last_request)
-        if not marked and await self.quick_answer(delegation_id, revision, last_request):
+        if not released and not marked and router.continues_newest(last_request, self.open_tasks()) is None:
+            settled = await self.settle(last_request)
+            if settled != last_request and self.interaction.attachments.declared and router.refers_to_screen(settled):
+                self.share_refs[delegation_id] = showing = True  # "what's" ... "this error?"
+            last_request = settled
+        if not released and await self.wait_for_screen(delegation_id, revision, context, marked, last_request):
+            return
+        if not marked and not showing and await self.quick_answer(delegation_id, revision, last_request):
             return
         focus = None
         if not marked:
@@ -1358,7 +1554,7 @@ class SidebandWorker:
         if part.kind == router.STATUS and part.task_id:
             await self.answer_status(delegation_id, part.task_id)
             return
-        if decision.show:
+        if decision.show and not showing:
             # "What do those speakers look like?": about an open task, show what it already has (or ask
             # it for a screenshot); otherwise the work that answers must come back with a picture.
             if part.kind == "follow_up" and part.task_id and await self.show_me(
@@ -1377,7 +1573,11 @@ class SidebandWorker:
             if conv is not None:
                 await self.start_continuity_task(delegation_id, revision, context, last_request, conv)
                 return
-        choice = named or self.rt.topical_channel(decision.channel)
+        # What the user shared is answered home unless they named a channel: a topical channel is a
+        # group chat they didn't pick for it.
+        choice = named or self.rt.topical_channel(None if self.carries(delegation_id) else decision.channel)
+        if choice.how == "topic" and choice.channel is not None and not choice.channel.default:
+            self.forgo_capture(delegation_id)  # a riding-along capture never goes to a topical channel
         if len(decision.parts) > 1 and not choice.clarify:
             await self.start_parts(delegation_id, revision, context, [p.request for p in decision.parts], choice)
             return
@@ -1492,7 +1692,8 @@ class SidebandWorker:
         Jev, if on, is still deciding) plus one short sentence. Anything not clearly answered goes to
         Hermes as usual."""
         fast = self.rt.settings().get("fast_routing") or {}
-        if not fast.get("quick_answers", True) or not quick_mod.eligible(request):
+        can_share = bool(self.interaction.attachments.declared)  # "what's this error?" means their screen
+        if not fast.get("quick_answers", True) or not quick_mod.eligible(request, can_share=can_share):
             return False
         tasks = self.open_tasks()
         if router.quick_intent(request, tasks, self.replied_task) is not None:
@@ -1634,6 +1835,444 @@ class SidebandWorker:
         self.interaction.feed.publish("show", {"task_id": task_id, "run_id": run_id, "image": kind,
                                                "seq": self.show_seq})
 
+    def request_capture(self, delegation_id: str) -> str | None:
+        """Ask the app for a capture of the frontmost window for this handoff: only in a call that
+        declared ``screen: ready``, with sharing on. Listed in the snapshot (polling clients) and
+        published once as a ``capture`` event; asking again while it is open returns the same id.
+        The app confirms with ``capturing`` before capturing and gets 410 once the request has
+        closed, so a stale or replayed event never captures anything. None when it can't capture."""
+        shared = self.interaction.attachments
+        before = shared.capture_for(delegation_id)
+        capture_id = shared.open_capture(delegation_id)
+        if capture_id is None or capture_id == before:
+            return capture_id
+        self.publish()  # the snapshot first, so a polling app sees it too
+        self.interaction.feed.publish("capture", {"capture_id": capture_id})
+        return capture_id
+
+    def take_attachments(self, delegation_id: str, idem: str) -> list[Attachment]:
+        """Hand over the pictures and files bound to this handoff (bytes included) and mark them
+        sent. Saved files are recorded on the task first, so clearing the task deletes Speakeasy's
+        copies. Call once, when the task's run starts."""
+        shared = self.interaction.attachments
+        paths = [a.path for a in shared.bound(delegation_id) if a.path]
+        if paths:
+            self.store.add_shared_files(idem, paths)
+        taken = shared.take_bound(delegation_id)
+        self.publish()
+        return taken
+
+    # -- look at this: binding, collecting and attaching ------------------------------------------
+    def bind_shared(self, delegation_id: str, request: str) -> bool:
+        """Past the home lane, a handoff claims the pictures and files waiting on the panel and, in a
+        call that is sharing its screen, asks the app for a capture now, so it overlaps the settle wait
+        and routing. True when it carries pictures or files or its words point at the screen (only in a
+        call that can share: elsewhere "this page" is never theirs). A short reply to a question just
+        asked takes that question's capture (``keep_capture``); anything else gets a capture of its own."""
+        attachments = self.interaction.attachments
+        bound = attachments.bind_pending(delegation_id)
+        refs = bool(attachments.declared) and router.refers_to_screen(request)
+        self.share_refs[delegation_id] = refs
+        answers = len(request.split()) <= KEPT_ANSWER_WORDS and not refs  # "Just keep it with me"
+        capture_id = (self.adopt_kept_capture(delegation_id if answers else None)
+                      or self.request_capture(delegation_id))
+        if capture_id:
+            self.capture_ids[delegation_id] = capture_id
+        if bound:
+            self.publish()  # the panel shows them as on their way
+        return self.share_refs[delegation_id] or bool(bound)
+
+    def finish_shared(self, delegation_id: str) -> None:
+        """The handoff is done. What it still holds goes back to the panel (pictures and files no run
+        took) or closes (a capture nobody took is discarded), so nothing taken for it lingers."""
+        back = self.interaction.attachments.release(delegation_id)
+        for held in (self.share_refs, self.capture_ids, self.share_jobs):
+            held.pop(delegation_id, None)
+        self.no_capture.discard(delegation_id)
+        if back:
+            self.publish()
+
+    def drop_capture(self, task_id: str) -> None:
+        """Words only after all (a plain follow-up into a running task): its capture is discarded."""
+        base = _base(task_id)
+        capture_id = self.capture_ids.pop(base, None)
+        if capture_id:
+            self.interaction.attachments.close_capture(capture_id)
+
+    def keep_capture(self, delegation_id: str) -> None:
+        """The handoff asked a question instead of starting work: its capture waits for the answer
+        (KEEP_CAPTURE_S), which carries what was on screen when the question came up."""
+        capture_id = self.capture_ids.pop(delegation_id, None)
+        if capture_id and self.interaction.attachments.move_capture(capture_id, f"kept_{delegation_id}"):
+            self.adopt_kept_capture(None)  # an older one is dropped
+            self.kept_capture = (capture_id, time.monotonic())
+
+    def adopt_kept_capture(self, delegation_id: str | None) -> str | None:
+        """The next handoff takes the kept capture (the answer to that question); a stale one closes,
+        and so does one the next handoff doesn't answer with (``delegation_id`` None)."""
+        kept, self.kept_capture = self.kept_capture, None
+        if kept is None:
+            return None
+        capture_id, at = kept
+        attachments = self.interaction.attachments
+        if delegation_id and time.monotonic() - at <= KEEP_CAPTURE_S and attachments.move_capture(capture_id, delegation_id):
+            return capture_id
+        attachments.close_capture(capture_id)
+        return None
+
+    def carries(self, task_id: str) -> bool:
+        """The handoff must take something to Hermes besides its words: pictures or files bound to it,
+        or a capture its words point at ("what's this error?"). Such a request never goes into a group
+        chat, a chat thread or a channel the user didn't name. A capture that only rides along because
+        sharing is on doesn't count: where the request goes is decided as usual, and the capture is
+        given up (``forgo_capture``) wherever it may not go."""
+        base = _base(task_id)
+        if base not in self.share_refs:
+            return False
+        job = self.share_jobs.get(base)
+        if job is not None and job.done() and not job.cancelled() and job.exception() is None:
+            shared = job.result()
+            return bool(shared.pictures or shared.files) or (self.share_refs[base] and shared.capture is not None)
+        return self.shares_with_task(task_id)
+
+    def forgo_capture(self, task_id: str) -> None:
+        """This request goes somewhere a capture may not (a group chat, a thread, a topical channel) and
+        its words don't need one: its capture is discarded and none is asked for at task start."""
+        base = _base(task_id)
+        if base in self.share_refs:
+            self.no_capture.add(base)
+            self.drop_capture(base)
+
+    def shares_with_task(self, task_id: str) -> bool:
+        """A follow-up into a running task brings what it shares only when it has pictures or files,
+        or its words point at the screen while a capture is coming. Otherwise it's words only."""
+        base = _base(task_id)
+        if base not in self.share_refs:
+            return False
+        attachments = self.interaction.attachments
+        return bool(attachments.bound(base)) or (self.share_refs[base] and (
+            base in self.capture_ids or attachments.can_capture))
+
+    async def collect_shared(self, task_id: str, idem: str) -> Shared:
+        """Everything this task's handoff carries, collected once per handoff (a split request's parts
+        share one capture and the same pictures and files). Nothing for a task no handoff bound: a
+        question-card answer never waits for or carries a capture."""
+        base = _base(task_id)
+        if base not in self.share_refs:
+            return Shared()
+        job = self.share_jobs.get(base)
+        if job is None:
+            job = self.share_jobs[base] = asyncio.ensure_future(self._collect(base, idem))
+        try:
+            return await asyncio.shield(job)
+        except Exception as exc:  # never break a task over what it carries: it goes with words only
+            logger.warning("speakeasy: could not collect what was shared (%s)", type(exc).__name__)
+            return Shared()
+
+    async def _collect(self, base: str, idem: str) -> Shared:
+        """Take the handoff's pictures and files (recorded on ``idem`` first, so their copies are never
+        deleted in between) and wait for its capture: up to CAPTURE_WAIT_S, longer while the app
+        reports it is uploading. Sharing turned on after the handoff: the capture is asked for now.
+        A capture that would break the request's image budget is dropped, with a reason."""
+        attachments = self.interaction.attachments
+        capture_id = self.capture_ids.get(base)
+        if capture_id is None and base not in self.no_capture:
+            capture_id = self.request_capture(base)
+            if capture_id:
+                self.capture_ids[base] = capture_id
+        taken = self.take_attachments(base, idem)
+        shared = Shared(pictures=[a for a in taken if a.is_image], files=[a for a in taken if not a.is_image])
+        if capture_id:
+            result = await attachments.wait_capture(capture_id, A.CAPTURE_WAIT_S, A.CAPTURE_UPLOAD_WAIT_S)
+            shared.capture, shared.missing = result.attachment, result.reason
+        if shared.capture is not None and not _fits(shared.pictures + [shared.capture]):
+            shared.capture, shared.missing = None, "budget"  # the capture goes first
+        while shared.pictures and not _fits(shared.pictures):  # intake leaves room, so never in practice
+            logger.warning("speakeasy: a picture over the request's image budget was left out")
+            shared.pictures.pop()
+        await self.say_shared(base, shared)
+        return shared
+
+    async def say_shared(self, base: str, shared: Shared) -> None:
+        """What the voice hears: silently, what went with the request; aloud, once per call, the first
+        capture that went with a request that wasn't about the screen (naming the app); and why a
+        capture that was due didn't go. It never hears names, contents or bytes."""
+        capture = shared.capture
+        if shared:
+            await self.append("session.thinking.append", base, P.shared_note(
+                capture.app if capture else None, capture is not None, len(shared.pictures), len(shared.files)))
+        if capture is not None and not self.share_refs.get(base) and not self.capture_announced:
+            self.capture_announced = True
+            await self.append("session.commentary.append", base, P.screen_sent_line(capture.app))
+        elif capture is None and (line := P.capture_missing_line(shared.missing)):
+            await self.append("session.commentary.append", base, line)
+
+    def save_shared(self, shared: Shared, idem: str) -> list[dict[str, Any]]:
+        """Speakeasy's copies of what this task carries, recorded on it (clearing the task deletes
+        them): images are saved once, into the shared folder inside the image roots so the app can
+        show them later; files already were. Returns the task's card entries, server-side paths
+        included."""
+        folder = self.rt.shared
+        with folder.lock if folder is not None else contextlib.nullcontext():  # saved and recorded at once
+            for image in shared.images:
+                if folder is not None and image.id not in shared.saved and image.data:
+                    try:
+                        shared.saved[image.id] = str(folder.save(image.data, _image_filename(image)))
+                    except OSError as exc:
+                        logger.warning("speakeasy: could not keep a copy of a shared image (%s)", type(exc).__name__)
+            items = [{"kind": a.kind, "app": a.app, "name": None if a.kind == "screen" else a.name,
+                      "path": shared.saved.get(a.id) or a.path, "at": shared.at} for a in shared.things]
+            paths = [i["path"] for i in items if i["path"]]
+            if paths:
+                self.store.add_shared_files(idem, paths)
+        return items
+
+    def image_urls(self, shared: Shared) -> list[str]:
+        """The images as data URLs for the run's input, when the backend reads images; otherwise the
+        prompt names their saved copies instead. Never logged."""
+        if not shared.images:
+            return []
+        try:
+            readable = bool(self.hermes.capabilities().images)
+        except Exception:
+            readable = False
+        if not readable:
+            logger.info("speakeasy: the backend doesn't take images; naming the saved copies instead")
+            return []
+        return [_data_url(a) for a in shared.images]
+
+    def shared_prompt(self, items: list[dict[str, Any]], attached: bool, session_id: str | None,
+                      screen: bool) -> str:
+        """The prompt's block about what was shared, plus a note when this session had a screenshot
+        before and this run has none (Hermes sends the old one again with every run there)."""
+        last = None if screen else self.store.last_screen_at(session_id)
+        return " ".join(p for p in (P.shared_block(self.names, items, attached),
+                                    P.stale_screen_line(last) if last else "") if p)
+
+    # -- look at this: requests that wait for the screen, and spoken screen intents ---------------
+    async def wait_for_screen(self, delegation_id: str, revision: int, context: str, marked: Any,
+                              request: str) -> bool:
+        """A settled request that needs the user's screen (``router.needs_screen``) in a call that can
+        share but isn't sharing, carrying nothing else (no pictures or files, no capture): in a
+        ``ready`` call it waits for the button (``hold_request``); in a ``no_permission`` call the
+        voice says where to allow Screen Recording and nothing runs. True when it went no further.
+        Calls that never said they can share (an iPhone, an older Mac) go on as words, and so does a
+        follow-up the voice tied to a task (``marked``) or that continues the newest one: "what does
+        this error mean" right after a task reported one is about that task's result."""
+        attachments = self.interaction.attachments
+        if (attachments.declared not in A.DECLARATIONS or attachments.screen_on
+                or delegation_id in self.capture_ids or attachments.bound(delegation_id)
+                or not router.needs_screen(request)):
+            return False
+        if marked or router.continues_newest(request, self.open_tasks()) is not None:
+            return False
+        self.handoff_at.pop(delegation_id, None)
+        if attachments.declared == "no_permission":
+            logger.info("speakeasy: a request needs the screen but Screen Recording is off; nothing started")
+            self.interaction.feed.publish("screen.hint", {"reason": "no_permission"})
+            await self.append("session.commentary.append", delegation_id, P.SCREEN_PERMISSION_HINT)
+            return True
+        await self.hold_request(Held(delegation_id, revision, context, marked, request))
+        return True
+
+    async def hold_request(self, held: Held) -> None:
+        """Hold a request until sharing comes on: the panel shows "Waiting for your screen" (the
+        snapshot's ``hold``), the button pulses (``screen.hint``) and the voice says how to turn it on.
+        Sharing on within HOLD_S sends it through the usual path with a capture (``sharing_turned_on``);
+        otherwise it ends unsent (``end_hold``). One at a time: a newer hold ends the older one."""
+        self.end_hold("superseded")
+        with self.interaction.lock:
+            self.hold_token += 1
+            held.token = self.hold_token
+            self.held = held
+            self.interaction.hold = {"state": "waiting", "text": P.HOLD_WAITING, "since": held.since}
+            self.stop_words_after = time.monotonic()  # words said before it can't call it off
+        attachments = self.interaction.attachments
+        if attachments.screen_on:
+            self.sharing_turned_on()  # it came on while this request was settling
+            return
+        timer = threading.Timer(HOLD_S, self.end_hold, args=("expired", held.token))
+        timer.daemon = True
+        timer.start()
+        logger.info("speakeasy: request held until screen sharing comes on (up to %d s)", int(HOLD_S))
+        self.publish()
+        self.interaction.feed.publish("screen.hint", {"reason": "screen_off"})
+        await self.append("session.commentary.append", held.delegation_id, P.screen_off_hint())
+        if attachments.ended:
+            self.end_hold("ended", held.token)  # the call paused or ended meanwhile
+
+    def end_hold(self, reason: str, token: int | None = None) -> bool:
+        """The request waiting for the screen won't run: HOLD_S passed (``expired``), a newer request
+        came (``superseded``), "stop looking" (``stopped``), or the call paused or ended. Its line
+        reads "Not sent: screen sharing was off" for HOLD_OUTCOME_S, then clears. ``token``: only that
+        hold. Thread-safe (the expiry timer, HTTP threads, the call's loop). True when one ended."""
+        with self.interaction.lock:
+            held = self.held
+            if held is None or token is not None and held.token != token:
+                return False
+            self.held = None
+            outcome = {"state": "not_sent", "text": P.HOLD_NOT_SENT, "since": time.time()}
+            self.interaction.hold = outcome
+        logger.info("speakeasy: held request not sent (%s)", reason)
+        clear = threading.Timer(HOLD_OUTCOME_S, self._clear_hold_outcome, args=(outcome,))
+        clear.daemon = True
+        clear.start()
+        self.publish()
+        if reason in {"expired", "superseded"}:
+            self.speak_from_thread("session.thinking.append", P.HOLD_DROPPED_NOTE)
+        return True
+
+    def _clear_hold_outcome(self, outcome: dict[str, Any]) -> None:
+        with self.interaction.lock:
+            if self.interaction.hold is not outcome:
+                return  # a newer hold, or already cleared
+            self.interaction.hold = None
+        self.publish()
+
+    def sharing_turned_on(self) -> None:
+        """Sharing just came on (the panel's button, on an HTTP thread): a request waiting for the
+        screen goes now, through the usual path, so it gets a capture of its own. Words said before
+        now can't turn sharing off. Thread-safe."""
+        loop = self.loop
+        with self.interaction.lock:
+            self.stop_words_after = time.monotonic()
+            held = self.held
+            if held is None or loop is None or loop.is_closed():
+                return  # nothing waiting (a call whose loop is gone ends its hold with end_shared)
+            self.held, self.interaction.hold = None, None
+        logger.info("speakeasy: screen sharing came on; the held request goes now")
+        self.publish()
+        try:
+            loop.call_soon_threadsafe(self._start_release, held)
+        except RuntimeError:  # the call's loop closed just now
+            with self.interaction.lock:
+                self.held = held
+            self.end_hold("ended", held.token)
+            return
+        self.released_hold = (held.request, time.monotonic())  # "now look at my screen" right after: the same
+
+    def repeats_released(self, request: str) -> bool:
+        """Said within RELEASED_REPEAT_S of a held request going: the same words, talk about turning
+        sharing on ("it's on, take a look"), or only a request to look ("now look at my screen"). The
+        request that went has the screen; this one adds nothing."""
+        released = self.released_hold
+        if released is None or not request.strip() or time.monotonic() - released[1] > RELEASED_REPEAT_S:
+            return False
+        return (_same_words(request, released[0]) or router.about_sharing_on(request)
+                or router.needs_screen(request) and router.only_looks(request))
+
+    def _start_release(self, held: Held) -> None:
+        task = asyncio.get_running_loop().create_task(self.dispatch_held(held))
+        self.dispatch_tasks.add(task)
+        task.add_done_callback(self.dispatch_tasks.discard)
+
+    async def dispatch_held(self, held: Held) -> None:
+        """The held request, now that sharing is on: it claims what's waiting on the panel and asks for
+        a capture like any handoff (``bind_shared``), then goes on from where it was held. Ends visibly
+        like ``dispatch``. While it runs it owns the handoff's binding (``releasing``): the handoff that
+        was held may still be finishing (its hint can be on its way when sharing comes on), and must
+        not give back what was just bound here."""
+        self.releasing.add(held.delegation_id)
+        try:
+            await self.append("session.thinking.append", held.delegation_id, P.HOLD_RELEASED_NOTE)
+            showing = self.bind_shared(held.delegation_id, held.request)
+            try:
+                await self._dispatch_bound(held.delegation_id, held.revision, held.context, held.marked,
+                                           held.request, showing, released=True)
+            finally:
+                self.finish_shared(held.delegation_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("speakeasy: held request failed before its task started (%s: %s)",
+                           type(exc).__name__, str(exc)[:200])
+            await self._handoff_failed(held.delegation_id, held.revision, exc)
+        finally:
+            self.releasing.discard(held.delegation_id)
+
+    async def screen_words(self, delegation_id: str, intent: str, more: bool = False) -> None:
+        """A handoff about screen sharing itself (``router.screen_intent``), answered here: ``stop``
+        turns it off (``stop_looking``); ``share`` explains the button, since the voice can never turn
+        sharing on. A request waiting for the screen keeps waiting on ``share``. No task starts for
+        these words; ``more``: the handoff asked for something else too, which the caller dispatches."""
+        if not more:
+            self.handoff_at.pop(delegation_id, None)
+        attachments = self.interaction.attachments
+        logger.info("speakeasy: spoken screen intent (%s); no task started", intent)
+        if intent == "stop":
+            await self.stop_looking(delegation_id, handoff=True)
+        elif attachments.declared == "no_permission":
+            self.interaction.feed.publish("screen.hint", {"reason": "no_permission"})
+            await self.append("session.commentary.append", delegation_id, P.SCREEN_PERMISSION_HINT)
+        elif attachments.screen_on:
+            await self.append("session.commentary.append", delegation_id, P.SCREEN_ALREADY_SHARED)
+        else:
+            self.interaction.feed.publish("screen.hint", {"reason": "share_request"})
+            await self.append("session.commentary.append", delegation_id, P.share_hint())
+
+    async def stop_looking(self, delegation_id: str | None, handoff: bool) -> bool:
+        """"Stop looking at my screen": sharing goes off from the plugin's side (the app adopts it from
+        ``screen.state``; open capture requests close), a request waiting for the screen ends unsent,
+        and one short line confirms it. Heard in the transcript and handed off for the same words, it
+        acts once. A handoff while sharing was off anyway gets a brief answer. Never a Hermes task.
+        True when something changed."""
+        attachments = self.interaction.attachments
+        state = attachments.stop_sharing()
+        cancelled = self.end_hold("stopped")
+        now = time.monotonic()
+        if state is not None:
+            logger.info("speakeasy: screen sharing turned off by voice on %s", self.interaction.interaction_id[:10])
+            self.publish()  # the snapshot first, so a polling app sees it too
+            self.interaction.feed.publish("screen.state", state)
+            for kind, value in attachments.take_notes():
+                await self.append("session.thinking.append", None, P.sharing_note(kind, value))
+            line: str | None = P.SCREEN_STOPPED
+        elif cancelled:
+            line = P.SCREEN_HOLD_CANCELLED
+        elif handoff and now - self.stopped_at > STOP_DEBOUNCE_S:
+            line = P.SCREEN_ALREADY_OFF
+        else:
+            line = None  # heard in the transcript and handed off too: confirmed once already
+        if state is not None or cancelled:
+            self.stopped_at = now
+        if line:
+            await self.append("session.commentary.append", delegation_id, line)
+        return state is not None or cancelled
+
+    def _recent_user_words(self) -> tuple[list[str], float]:
+        """The user's words not spent yet from the last STOP_WINDOW_S, as two readings (pieces run
+        together, for word pieces; and spaced, for whole turns), and when the newest piece arrived."""
+        now = time.monotonic()
+        recent = [f for f in list(self.fragments) if f["speaker"] == "user" and f["at"] > self.stop_words_after
+                  and now - f["at"] <= STOP_WINDOW_S]
+        if not recent:
+            return [], 0.0
+        return ["".join(f["text"] for f in recent)[-600:], " ".join(f["text"] for f in recent)[-600:]], recent[-1]["at"]
+
+    def listen_for_stop(self) -> None:
+        """Each piece of the user's transcript as it arrives (both voice backends): "stop looking at my
+        screen" turns sharing off even when the voice answers without handing it off. Only while
+        sharing is on or a request waits for it, and acted on STOP_HEARD_SETTLE_S later, so words that
+        follow ("... in Zoom") can still rule it out."""
+        attachments = self.interaction.attachments
+        if attachments.declared != "ready" or not (attachments.screen_on or self.held is not None):
+            return
+        if self.stop_check is not None and not self.stop_check.done():
+            return
+        texts, _ = self._recent_user_words()
+        if any(router.stops_looking(text) for text in texts):
+            self.stop_check = asyncio.get_running_loop().create_task(self._stop_heard())
+
+    async def _stop_heard(self) -> None:
+        await asyncio.sleep(STOP_HEARD_SETTLE_S)
+        texts, newest = self._recent_user_words()
+        if not any(router.stops_looking(text) for text in texts):
+            return  # the words that followed made it something else
+        with self.interaction.lock:
+            self.stop_words_after = max(self.stop_words_after, newest)  # these words are spent
+        logger.info("speakeasy: heard a stop-looking phrase in the transcript")
+        await self.stop_looking(None, handoff=False)
+
     async def start_parts(self, delegation_id: str, revision: int, context: str, parts: list[str],
                           choice: channels.Choice) -> None:
         """A compound request: one parallel task per part, one spoken acknowledgement for all."""
@@ -1653,14 +2292,17 @@ class SidebandWorker:
         channel wants one (and Hermes can), else run here and post the answer to the channel."""
         if choice.clarify:
             self.handoff_at.pop(delegation_id, None)
+            self.keep_capture(delegation_id)  # the answer carries what was on screen when this was asked
             await self.append("session.commentary.append", delegation_id, choice.clarify)
             return
         channel = choice.channel
         routed = channel is not None and not channel.default
         runner = self.rt.threads
-        if channel is not None and channel.new_thread and runner is not None:
+        # A thread is a group chat's session: what the user shared never goes there.
+        if channel is not None and channel.new_thread and runner is not None and not self.carries(delegation_id):
             available = await asyncio.to_thread(runner.available, channel.target)
             if available:
+                self.forgo_capture(delegation_id)
                 await self.start_thread_task(delegation_id, revision, context, request, channel,
                                              named=choice.how == "named")
                 return
@@ -1713,6 +2355,19 @@ class SidebandWorker:
             return
         earlier = notice_text(self.store.request_text(key), 200) or "an earlier request"
         placed = self.store.continued_for(key)
+        sharing = self.shares_with_task(delegation_id)
+
+        async def answered_home(why: str) -> None:
+            # A new task that references the running one carries what was shared, answered home.
+            logger.info("speakeasy: %s; starting a task that references it", why)
+            await self.start_task(delegation_id, revision, context, f"{part.request} (following up: {earlier})",
+                                  focus=P.follow_up_focus(part.request, earlier, None, status))
+
+        if status in ACTIVE_RUN_STATES and sharing and target.deliver_to:
+            # A running task that posts its answer to a channel (one the user may never have named for
+            # this) or works in a chat thread (a group chat's session) never gets what was shared.
+            await answered_home("shared things never go into a task that posts to a channel or a thread")
+            return
         if status in ACTIVE_RUN_STATES and not run_id and await self.message_thread_task(delegation_id, target, part.request):
             return
         opening_thread = placed is None and not run_id and status in ACTIVE_RUN_STATES and target.deliver_to
@@ -1724,13 +2379,32 @@ class SidebandWorker:
         if placed is not None:
             conv = await asyncio.to_thread(continuity.conversation_by_session, self.rt.state_db, placed["session_id"])
             if conv is not None:
+                # Only the user's own DM takes what was shared (start_continuity_task decides).
                 joins = status in ACTIVE_RUN_STATES
                 await self.start_continuity_task(delegation_id, revision, context, part.request, conv,
                                                  joins=target if joins else None)
                 return
+            if status in ACTIVE_RUN_STATES and sharing:
+                # It continued a chat that can't be looked up now, so nobody can tell it's the user's own:
+                # what was shared never goes into that chat's running turn.
+                await answered_home("a running task continued a chat that can't be looked up")
+                return
         if run_id and status in {"running", "working"}:
-            accepted = await asyncio.to_thread(self.hermes.steer, run_id, P.steer_text(self.names, part.request))
+            items: list[dict[str, Any]] = []
+            if sharing:
+                # A running task can't take new image parts: the steer names Speakeasy's saved copies,
+                # which it opens itself (vision_analyze, its file tools).
+                shared = await self.collect_shared(delegation_id, key)
+                items = self.save_shared(shared, key) if shared else []
+            text = (P.shared_steer_text(self.names, part.request, P.shared_block(self.names, items, attached=False))
+                    if items else P.steer_text(self.names, part.request))
+            nameable = all(i["path"] for i in items)  # an image with no saved copy can't be pointed at
+            accepted = nameable and await asyncio.to_thread(self.hermes.steer, run_id, text)
             if accepted:
+                if items:
+                    self.store.add_shared(key, items)
+                else:
+                    self.drop_capture(delegation_id)  # a plain follow-up: words only, the capture is dropped
                 self.store.progress(key, "milestone", f"You added: {notice_text(part.request, 200)}")
                 with self.interaction.lock:
                     self.interaction.latest_delegation_id = target.delegation_id
@@ -1741,9 +2415,16 @@ class SidebandWorker:
         work = self.store.work(idem_key=key) or {}
         result = notice_text((work.get("result") or {}).get("spoken"), 300)
         focus = P.follow_up_focus(part.request, earlier, result, status)
+        # Carrying what the user shared: never into a chat's session (the task continued a
+        # conversation), and answered home rather than in the task's channel.
+        carrying = self.carries(delegation_id)
+        if (placed or target.deliver_to) and not carrying:
+            # It continues that chat's session or posts to the task's channel (topical or named, it can't
+            # tell): no riding-along capture, as with a new request routed to a topical channel.
+            self.forgo_capture(delegation_id)
         await self.start_task(delegation_id, revision, context, f"{part.request} (following up: {earlier})",
-                              focus=focus, session_id=self.store.session_for(key), replaces=target.delegation_id,
-                              deliver_to=target.deliver_to)
+                              focus=focus, session_id=None if carrying and placed else self.store.session_for(key),
+                              replaces=target.delegation_id, deliver_to=None if carrying else target.deliver_to)
 
     async def message_thread_task(self, delegation_id: str, target: BackendRun, request: str) -> bool:
         """A task running in a chat thread: put what was just said into that thread, exactly as if it
@@ -1764,7 +2445,10 @@ class SidebandWorker:
         if not platform or not thread_id or runner is None or not hasattr(runner, "post"):
             return False
         earlier = notice_text(self.store.request_text(key), 200) or "the task"
-        wants_picture = router.wants_to_see(request)
+        # In a call that can share, "look at my screen" is about theirs, never a request for the task's
+        # picture; elsewhere (an iPhone, an older Mac) the words ask for the picture as before.
+        wants_picture = router.wants_to_see(request) and not (
+            self.interaction.attachments.declared and router.refers_to_screen(request))
         message = P.thread_follow_up(self.names, request, show=wants_picture)
         delivered = await asyncio.to_thread(runner.post, platform, str(thread_id), message=message,
                                             delivery_id=f"{key[:40]}-{secrets.token_hex(4)}")
@@ -1810,14 +2494,15 @@ class SidebandWorker:
         if replaced_key:
             self.store.dismiss_key(replaced_key)
         self.publish()
+        continuing = bool(session_id)  # an existing session: it may hold an earlier screenshot
         if not session_id:
             session_id = TASK_SESSION_PREFIX + hashlib.sha256(idem.encode()).hexdigest()[:24]
         label = self.rt.channel_label(deliver_to) if deliver_to else self.rt.delivery_label()
         show = self._take_show(voice_id or task_id, idem)
         if show:
             focus = (focus or request) + P.SHOW_IT_FOCUS
-        prompt = P.build_task_prompt(self.names, revision, context, focus, label,
-                                     room=self.room_handoff_text(voice_id or task_id))
+        # Read now, before any await: the call may end (and drop its room text) while what was shared is collected.
+        room = self.room_handoff_text(voice_id or task_id)
         state, known_run = self.store.reserve_run(idem, self.interaction.interaction_id, task_id, revision)
         if state != "created":
             if known_run:
@@ -1840,8 +2525,22 @@ class SidebandWorker:
                 await self.say_where(delegation_id, ack, place=ack_place, named=named)
             else:
                 self.handoff_at.pop(delegation_id, None)
+        # What the user shared goes with the run: images as image parts of its input, every saved
+        # copy named in the prompt (files are opened with Hermes' own tools), shown on the task's card.
+        shared = await self.collect_shared(task_id, idem)
+        images = self.image_urls(shared)
+        items = self.save_shared(shared, idem) if shared else []
+        if items:
+            self.store.add_shared(idem, items)
+            self.publish()
+        prompt = P.build_task_prompt(self.names, revision, context, focus, label, shared=self.shared_prompt(
+            items, bool(images), session_id if continuing else None, shared.capture is not None), room=room)
         try:
-            run_id = await asyncio.to_thread(self.hermes.start_run, prompt, idem, session_id)
+            run_id = await asyncio.to_thread(self.hermes.start_run, prompt, idem, session_id,
+                                             **({"images": images} if images else {}))
+            images = []
+            if voice_id is None:
+                shared.forget_bytes()  # the run has them; a split request's parts still share theirs
             self.store.update_run(idem, run_id, "running")
             with self.interaction.lock:
                 backend.run_id, backend.status = run_id, "running"
@@ -1887,7 +2586,18 @@ class SidebandWorker:
     async def start_continuity_task(self, task_id: str, revision: int, context: str, request: str,
                                     conv: continuity.Conversation, joins: "BackendRun | None" = None) -> None:
         """Run the request inside an existing Hermes conversation's own session: it sees that
-        conversation's history, and the reply posts back to that chat."""
+        conversation's history, and the reply posts back to that chat.
+
+        Only the user's own DM may take what they shared: a request that carries a screen, picture or
+        file and would continue a group chat (or one Hermes recorded no type for) runs as a new task
+        answered home instead. That covers follow-ups to finished thread tasks too."""
+        if not conv.private and self.carries(task_id):
+            logger.info("speakeasy: shared things never go into a group chat; starting a task answered home")
+            await self.start_task(task_id, revision, context, request,
+                                  focus=P.group_chat_focus(request, notice_text(conv.where, 100) or "that chat"))
+            return
+        if not conv.private:
+            self.forgo_capture(task_id)  # a group chat's session never gets a riding-along capture
         idem = self._idem(task_id, revision)
         backend = BackendRun(task_id, revision, idem, deliver_to=joins.deliver_to if joins else None)
         delegation_id = backend.say_id
@@ -1920,6 +2630,13 @@ class SidebandWorker:
         if joins is None:
             await self.quiet("continuing:" + delegation_id, delegation_id, P.continuing_in_note(where))
             self.handoff_at.pop(delegation_id, None)
+        # Taken now, while it's what the user was looking at, even if this turn waits for another.
+        shared = await self.collect_shared(task_id, idem) if conv.private else Shared()
+        images = self.image_urls(shared)
+        items = self.save_shared(shared, idem) if shared else []
+        if items:
+            self.store.add_shared(idem, items)
+            self.publish()
         waited = 0
         while joins is not None:  # hold until the first turn is done, then take over its row
             with self.interaction.lock:
@@ -1950,8 +2667,11 @@ class SidebandWorker:
             waited += CONTINUITY_POLL_S
         try:
             asked = request + (P.SHOW_IT_FOCUS if self._take_show(task_id, idem) else "")
-            message = P.continuation_message(self.names, asked, notice_text(request, 200) or "voice request",
+            note = self.shared_prompt(items, bool(images), conv.session_id, shared.capture is not None)
+            message = P.continuation_message(self.names, asked + (f"\n\n{note}" if note else ""),
+                                             notice_text(request, 200) or "voice request",
                                              room=self.room_handoff_text(task_id))
+            content = user_content(message, images) if images else message
             loop = asyncio.get_running_loop()
             final: dict[str, Any] = {}
 
@@ -1979,7 +2699,7 @@ class SidebandWorker:
                     final["error"] = payload.get("error")
 
             terminal = await asyncio.to_thread(continuity.stream_session_chat, self.hermes.base, self.rt.hermes_key(),
-                                               conv, message, on_event)
+                                               conv, content, on_event)
             status = final.get("status") or ("completed" if terminal and final.get("text") else "ambiguous")
             output = P.without_voice_header(final.get("text", ""))
             if status == "ambiguous" and backend.run_id:

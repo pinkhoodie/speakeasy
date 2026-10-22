@@ -42,11 +42,15 @@ engine ignores unknown ones.
 Session ids: ``start_run(session_id=…)`` continues an existing conversation. For Hermes that is a
 Hermes session id; for Codex a thread id; for Claude Code a session UUID. Speakeasy stores them
 opaquely per task, so follow-ups land in the same agent conversation.
+
+Images: ``start_run(images=[…])`` sends pictures with the prompt (a screen capture, a dropped
+photo), each a base64 ``data:image/…`` URL. Only a backend whose capabilities say ``images`` gets
+them; one without it ignores the argument.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, Sequence, runtime_checkable
 
 EventCallback = Callable[[dict[str, Any]], None]
 
@@ -82,6 +86,7 @@ class Capabilities:
     email_drafts: bool = False
     daily_brief: bool = False
     needs_workspace: bool = False               # tasks run in a project folder the user picks
+    images: bool = False                        # start_run takes images and the agent can read them
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -96,10 +101,11 @@ class TaskBackend(Protocol):
     def health(self, timeout: float = 2) -> bool: ...
 
     def start_run(self, prompt: str, idem_key: str, session_id: str | None = None,
-                  session_key: str | None = None) -> str:
+                  session_key: str | None = None, images: Sequence[str] | None = None) -> str:
         """Start a task and return its run id immediately (the work continues in the background).
         Same ``idem_key`` → same run id, never a second run. ``session_key`` is Hermes-only
-        routing and other backends ignore it."""
+        routing and other backends ignore it. ``images`` are base64 ``data:image/…`` URLs sent
+        with the prompt (see Images above); without them the prompt goes as plain text."""
         ...
 
     def events(self, run_id: str, callback: EventCallback) -> bool:

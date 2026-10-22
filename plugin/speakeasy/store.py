@@ -23,6 +23,9 @@ from .text import (MAX_CARDS, AUTHORED_PRECEDENCE_S, SETTLED, TERMINAL, notice_t
 
 STALE_AFTER_S = 90
 MAX_REVIEWS = 3  # finished-image review cards carried onto the call panel
+SHARED_KINDS = frozenset({"screen", "picture", "file"})
+MAX_SHARED = 12  # things shared with one task kept on its card (a running task can be shown more): the
+                 # first ones, so a position never renumbers (the app fetches images by position)
 
 
 JOB_NAME_TAIL = {"a", "an", "and", "the", "of", "for", "to", "in", "on", "with", "from", "by", "at", "or", "my", "your"}
@@ -51,6 +54,14 @@ def _placed_session(continued: str | None) -> str | None:
 def local_run_id(idem_key: str) -> str:
     """The id for a task Hermes ran without a run id (same scheme as calls.LOCAL_RUN_PREFIX)."""
     return "lr_" + hashlib.sha256(idem_key.encode()).hexdigest()[:32]
+
+
+def _is_stand_in(title: str | None, request: str | None, continued: str | None = None) -> bool:
+    """A task title that is only the word-based label made from its own request (or missing). A task
+    in a chat thread shows the thread's name, which a rename here would split from the thread itself."""
+    if '"thread_id"' in (continued or ""):
+        return False
+    return not title or title == short_title(notice_text(request, 1200) or "")
 
 
 class StateStore:
@@ -92,6 +103,11 @@ class StateStore:
             self._db.execute("""CREATE TABLE IF NOT EXISTS live_images (
                 idem_key TEXT PRIMARY KEY, kind TEXT NOT NULL, ref TEXT NOT NULL, name TEXT NOT NULL,
                 source TEXT NOT NULL, seq INTEGER NOT NULL, updated REAL NOT NULL)""")
+            # Speakeasy's copies of files a task carried (attachments.SharedFolder paths): deleted when
+            # the task is cleared and no other task still records the same copy.
+            self._db.execute("""CREATE TABLE IF NOT EXISTS shared_files (
+                idem_key TEXT NOT NULL, path TEXT NOT NULL, created REAL NOT NULL, PRIMARY KEY (idem_key, path))""")
+            self._db.execute("CREATE INDEX IF NOT EXISTS shared_files_path ON shared_files(path)")
             # A job is the Hermes session its tasks live in (across calls and days); its short name is
             # kept here once, from the first task's own title (never a chat thread's name).
             self._db.execute("""CREATE TABLE IF NOT EXISTS jobs (
@@ -104,6 +120,8 @@ class StateStore:
                 self._db.execute("ALTER TABLE runs ADD COLUMN timings TEXT")
             if "failure" not in columns:  # why a run failed: a failures.py kind, never provider text
                 self._db.execute("ALTER TABLE runs ADD COLUMN failure TEXT")
+            if "shared" not in columns:  # what the user shared with the task (its card), see add_shared
+                self._db.execute("ALTER TABLE runs ADD COLUMN shared TEXT")
             if "plan" not in columns:  # the steps a handed-off task will go through (JSON list)
                 self._db.execute("ALTER TABLE runs ADD COLUMN plan TEXT")
             if "set_aside" not in columns:  # when the user set its question aside (handled, or not needed)
@@ -315,6 +333,102 @@ class StateStore:
                 if cursor.rowcount:
                     done.append(run_id)
         return done
+
+    # -- shared files ------------------------------------------------------------------
+    def add_shared_files(self, key: str, paths: list[str]) -> None:
+        """Record the saved copies a task carried (screens, pictures and files shared with it)."""
+        now = time.time()
+        with self._lock, self._db:
+            self._db.executemany("INSERT OR IGNORE INTO shared_files VALUES (?,?,?)",
+                                 [(key, str(p), now) for p in paths if p])
+
+    def shared_files(self, key: str) -> list[str]:
+        with self._lock:
+            rows = self._db.execute("SELECT path FROM shared_files WHERE idem_key=? ORDER BY created", (key,)).fetchall()
+        return [r[0] for r in rows]
+
+    def forget_shared_files(self, keys: list[str]) -> list[str]:
+        """These tasks were cleared: drop their records and return the copies they named (the
+        caller deletes the ones nothing else still uses)."""
+        if not keys:
+            return []
+        marks = ",".join("?" * len(keys))
+        with self._lock, self._db:
+            rows = self._db.execute(f"SELECT DISTINCT path FROM shared_files WHERE idem_key IN ({marks})",
+                                    keys).fetchall()
+            self._db.execute(f"DELETE FROM shared_files WHERE idem_key IN ({marks})", keys)
+        return [r[0] for r in rows]
+
+    def shared_paths_in_use(self, paths: set[str]) -> set[str]:
+        """Which of these copies a task still records."""
+        if not paths:
+            return set()
+        wanted = sorted(paths)
+        marks = ",".join("?" * len(wanted))
+        with self._lock:
+            rows = self._db.execute(f"SELECT DISTINCT path FROM shared_files WHERE path IN ({marks})",
+                                    wanted).fetchall()
+        return {r[0] for r in rows}
+
+    def prune_shared_files(self, before: float) -> int:
+        """Forget records older than ``before`` (their copies are pruned on the same schedule)."""
+        with self._lock, self._db:
+            return self._db.execute("DELETE FROM shared_files WHERE created < ?", (before,)).rowcount
+
+    def add_shared(self, key: str, items: list[dict[str, Any]]) -> None:
+        """What the user shared with this task, for its card: ``{kind, app, name, path, at}`` per
+        screen, picture or file. Paths stay on the server (``shared_items``); the app gets
+        ``work()["shared"]`` and fetches images by position (``shared_image``), so the first MAX_SHARED
+        are kept and a later one never shifts them (its saved copy is still recorded and cleared with
+        the task: ``add_shared_files``)."""
+        clean = [{k: item.get(k) for k in ("kind", "app", "name", "path", "at")} for item in items
+                 if item.get("kind") in SHARED_KINDS]
+        if not clean:
+            return
+        with self._lock, self._db:
+            row = self._db.execute("SELECT shared FROM runs WHERE idem_key=?", (key,)).fetchone()
+            if row is None:
+                return
+            known = self._shared_list(row[0])
+            self._db.execute("UPDATE runs SET shared=? WHERE idem_key=?",
+                             (json.dumps((known + clean)[:MAX_SHARED]), key))
+
+    @staticmethod
+    def _shared_list(raw: str | None) -> list[dict[str, Any]]:
+        try:
+            items = json.loads(raw) if raw else []
+        except ValueError:
+            return []
+        return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+
+    def shared_items(self, key: str) -> list[dict[str, Any]]:
+        """Server-side view of what was shared with a task, paths included."""
+        with self._lock:
+            row = self._db.execute("SELECT shared FROM runs WHERE idem_key=?", (key,)).fetchone()
+        return self._shared_list(row[0] if row else None)
+
+    def shared_image(self, run_id: str, number: int) -> str | None:
+        """The saved copy of the ``number``-th thing (1-based) shared with this run, when it is an image."""
+        with self._lock:
+            row = self._db.execute("SELECT shared FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        items = self._shared_list(row[0] if row else None)
+        if not 1 <= number <= len(items):
+            return None
+        item = items[number - 1]
+        path = item.get("path")
+        return path if item.get("kind") in {"screen", "picture"} and isinstance(path, str) else None
+
+    def last_screen_at(self, session_id: str | None) -> float | None:
+        """When a screenshot last went into this Hermes session (it stays in the session's history and
+        is sent again with every later run there), or None."""
+        if not session_id:
+            return None
+        with self._lock:
+            rows = self._db.execute("SELECT shared FROM runs WHERE session_id=? AND shared LIKE '%\"screen\"%'",
+                                    (session_id,)).fetchall()
+        times = [float(i.get("at") or 0) for (raw,) in rows for i in self._shared_list(raw)
+                 if i.get("kind") == "screen" and i.get("at")]
+        return max(times) if times else None
 
     def hide_key(self, key: str) -> None:
         """Keep a row out of the task list regardless of status (a tail waiting to join its task)."""
@@ -644,6 +758,7 @@ class StateStore:
             work = self.work(idem_key=key)
             if work is not None:
                 work["task_id"] = task_id
+                work["carried"] = True
                 out.append(work)
         return out
 
@@ -652,6 +767,61 @@ class StateStore:
         with self._lock:
             row = self._db.execute("SELECT delegation_id FROM runs WHERE idem_key=?", (key,)).fetchone()
         return (row[0] if row and row[0] else key)
+
+    # -- AI thread titles ----------------------------------------------------------------------
+
+    def key_for_task(self, task_id: str) -> str | None:
+        """A run's idem key by the id the app knows it by (its delegation id, else the key)."""
+        with self._lock:
+            row = self._db.execute("SELECT idem_key FROM runs WHERE delegation_id=? OR idem_key=?",
+                                   (task_id, task_id)).fetchone()
+        return row[0] if row else None
+
+    def stand_in_titles(self, limit: int = 40) -> list[dict[str, Any]]:
+        """Past tasks whose shown title is still the stand-in label built from their own words
+        (the titler never landed: out of credits, reload mid-name) or that never got one.
+        These are what the Mac app's on-device Apple Intelligence titler may rename. Only
+        finished tasks: a running one may still get the cloud titler's name."""
+        marks = ",".join("?" * len(TERMINAL))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT r.idem_key, r.delegation_id, r.title, r.updated, r.continued, "
+                "(SELECT e.text FROM work_events e WHERE e.idem_key=r.idem_key AND e.kind='request' "
+                " ORDER BY e.seq LIMIT 1) FROM runs r "
+                f"WHERE r.status IN ({marks}) ORDER BY r.updated DESC LIMIT 400",
+                tuple(sorted(TERMINAL))).fetchall()
+        out = []
+        for key, delegation_id, title, updated, continued, request_text in rows:
+            request = notice_text(request_text, 1200)
+            if not request or not _is_stand_in(title, request_text, continued):
+                continue  # a real name (the titler's, a chat thread's, an older row's), or nothing to title from
+            out.append({"task_id": delegation_id or key, "title": title or "",
+                        "request": request, "updated": float(updated or 0)})
+            if len(out) >= limit:
+                break
+        return out
+
+    def rename_stand_in(self, key: str, title: str) -> bool:
+        """Set the app's on-device title only while the task still shows its stand-in label, checked
+        and written under one lock: a name the cloud titler or a chat thread gave it always wins."""
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT r.title, r.continued, (SELECT e.text FROM work_events e WHERE e.idem_key=r.idem_key "
+                "AND e.kind='request' ORDER BY e.seq LIMIT 1) FROM runs r WHERE r.idem_key=?", (key,)).fetchone()
+            if not row or not _is_stand_in(row[0], row[2], row[1]):
+                return False
+            self._db.execute("UPDATE runs SET title=? WHERE idem_key=?", (title, key))
+            name = job_name(title)
+            if name:
+                self._db.execute("UPDATE runs SET own_title=? WHERE idem_key=?", (title, key))
+                # The job this task named takes the new name only while it still has the stand-in's
+                # name; a job named any other way keeps its name.
+                stand_ins = {n for n in (job_name(row[0]), job_name(short_title(notice_text(row[2], 1200) or "")),
+                                         "Voice task") if n}
+                marks = ",".join("?" * len(stand_ins))
+                self._db.execute(f"UPDATE jobs SET name=?, updated=? WHERE from_key=? AND name IN ({marks})",
+                                 (name, time.time(), key, *stand_ins))
+        return True
 
     # -- live view ("what it's looking at") -------------------------------------------------
     def set_live_image(self, key: str, kind: str, ref: str, name: str, source: str) -> bool:
@@ -745,7 +915,7 @@ class StateStore:
              assistant_name: str = "Hermes") -> dict[str, Any] | None:
         """The latest admitted job or one exact server-owned run, including past calls."""
         cols = """idem_key,run_id,status,updated,short_status,detail,progress_updated,
-                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,session_id,set_aside,seen"""
+                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,shared,session_id,set_aside,seen"""
         with self._lock:
             if idem_key:
                 row = self._db.execute(f"SELECT {cols} FROM runs WHERE idem_key=?", (idem_key,)).fetchone()
@@ -756,8 +926,8 @@ class StateStore:
             if row is None:
                 return None
             (key, actual_run_id, status, updated, short_status, detail, progress_updated,
-             status_source, result_json, title, dismissed, summary, continued, settled_at, failure, session_id,
-             set_aside, seen) = row
+             status_source, result_json, title, dismissed, summary, continued, settled_at, failure, shared,
+             session_id, set_aside, seen) = row
             events = self._db.execute(
                 "SELECT kind,text,created FROM work_events WHERE idem_key=? ORDER BY seq DESC LIMIT 30", (key,)).fetchall()
         stale = status not in TERMINAL | {"waiting_for_approval"} and time.time() - updated > STALE_AFTER_S
@@ -807,6 +977,11 @@ class StateStore:
         if review:
             # Image cards still waiting on the call panel's review card (numbers address /voice/card-image).
             work["review"] = {"images": review, "settled_at": settled_at}
+        items = self._shared_list(shared)
+        if items:
+            # What the user shared with it (a thumbnail or file chip each); images are fetched by
+            # position from /voice/shared-image/<run_id>/<n>. Paths never leave the server.
+            work["shared"] = [{k: i[k] for k in ("kind", "app", "name") if i.get(k)} for i in items]
         if continued:
             try:
                 work["continued_in"] = json.loads(continued).get("label")

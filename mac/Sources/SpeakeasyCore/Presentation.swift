@@ -33,13 +33,13 @@ public func parseServerStreamEvent(_ event: SSEEvent) -> [VoiceEvent] {
     case "snapshot":
         guard let object = json as? [String: Any] else { return [] }
         var events: [VoiceEvent] = []
-        if let interaction = InteractionSnapshot(json: object["interaction"]) { events.append(.interaction(interaction)) }
+        if let interaction = InteractionSnapshot(json: object["interaction"]) { events += interactionEvents(interaction) }
         if let work = WorkInfo(json: object["work"]) { events.append(.work(work)) }
         if object.keys.contains("approval") { events.append(.approval(ApprovalInfo(json: object["approval"]))) }
         if let tasks = TaskItem.list(json: object["tasks"]) { events.append(.tasks(tasks)) }
         return events
     case "interaction":
-        return InteractionSnapshot(json: json).map { [.interaction($0)] } ?? []
+        return InteractionSnapshot(json: json).map(interactionEvents) ?? []
     case "work":
         return WorkInfo(json: json).map { [.work($0)] } ?? []
     case "approval":
@@ -48,6 +48,17 @@ public func parseServerStreamEvent(_ event: SSEEvent) -> [VoiceEvent] {
         return TaskItem.list(json: json).map { [.tasks($0)] } ?? []
     case "show":
         return ShowRequest(json: json).map { [.show($0)] } ?? []
+    case "capture":
+        // The plugin wants a capture of the frontmost window for a request (screen sharing is on).
+        guard let id = nonEmpty((json as? [String: Any])?["capture_id"]) else { return [] }
+        return [.sharing(.captureRequested(id))]
+    case "screen.hint":
+        // A request needs the screen while sharing is off (or Screen Recording is): the button pulses.
+        let reason = nonEmpty((json as? [String: Any])?["reason"]) ?? "screen"
+        return [.sharing(.hint(String(reason.prefix(40))))]
+    case "screen.state":
+        // Sharing changed on the plugin's side ("stop looking at my screen").
+        return ScreenToggle(json: json).map { [.sharing(.state($0))] } ?? []
     case "closed":
         let object = json as? [String: Any]
         let fin: Finalization = (object?["finalization"] as? String) == "complete" ? .complete : .incomplete
@@ -212,6 +223,11 @@ public func present(_ s: VoiceState) -> PillPresentation {
         }
     }
     if case .failed = s.connection, let error = s.lastError { secondary = error; tone = .error }
+    // A refused drop or the Screen Recording hint shows for a few seconds; an approval still wins.
+    if s.connection.isInCall, let notice = s.sharing.notice, notice.isFresh(at: now), tone != .attention {
+        secondary = notice.text
+        tone = .warning
+    }
 
     let inCall = s.connection == .live || s.connection == .connecting
     let workActive: Bool = {

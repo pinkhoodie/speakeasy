@@ -102,7 +102,7 @@ enum PreviewFixtures {
         return rep.representation(using: .png, properties: [:])
     }
 
-    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "looking", "email-draft", "ended", "home", "failed", "busy"] + jobNames
+    static let names = ["listening", "speaking", "muted", "working", "waiting", "stale", "approval", "done", "expanded", "tasks", "tasklist", "paused", "products", "image", "design-review", "looking", "email-draft", "ended", "home", "failed", "busy", "text-reply", "text-reply-compact"] + jobNames
 
     static func state(_ name: String) -> (VoiceState, workExpanded: Bool)? {
         if let job = jobState(name) { return job }
@@ -309,6 +309,18 @@ enum PreviewFixtures {
             s.connection = .ended(.complete)
             s.interactionID = nil
             s.exchange = Exchange(you: "That's all, thanks.", assistant: "Talk soon.", replyStarted: true)
+        case "text-reply", "text-reply-compact":
+            // A finished task's full written answer in the expanded transcript; the voice said the short line.
+            s.speech = .speaking(lastDelta: now)
+            s.transcript = [
+                TranscriptTurn(id: 0, speaker: .you, text: "Find me flights to Denver on Friday morning."),
+                TranscriptTurn(id: 1, speaker: .assistant, text: "On it."),
+                TranscriptTurn(textReply: "Three flights fit your window.\n\n1. **UA 123** leaves 8:05, lands 10:40 — $214.\n2. **F9 77** leaves 11:30, lands 2:05 — $129.\n3. **WN 410** leaves 6:15 pm — $188.\n\nFrontier is cheapest; United is the only morning nonstop. [Fares](https://example.com/fares)",
+                               id: 2, taskID: "flights", taskName: "Flights to Denver"),
+                TranscriptTurn(id: 3, speaker: .assistant, text: "Three flights fit; the cheapest is Frontier at 11:30."),
+            ]
+            s.exchange = Exchange(you: "Find me flights to Denver on Friday morning.",
+                                  assistant: "Three flights fit; the cheapest is Frontier at 11:30.", replyStarted: true)
         case "expanded":
             s.runID = "run_preview"; s.delegationAt = now - 95
             s.workInfo = work("working", short: "Checking UA 123 status", age: 4)

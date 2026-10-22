@@ -14,6 +14,8 @@ enum Prefs {
     static let callShortcutKey = "callShortcut"
     static let muteShortcut = "muteShortcut"
     static let pauseShortcut = "pauseShortcut"
+    /// Screen sharing on/off during a call (default ⌃⌥S; empty string = off).
+    static let screenShortcut = "screenShortcut"
     static let startMuted = "startMuted"
     static let showPanelOnStart = "showPanelOnStart"
     static let followSystemAudio = "followSystemAudio"
@@ -36,11 +38,15 @@ enum Prefs {
     static let listeningShortcut = "listeningShortcut"
     /// The one-time explainer was shown before listening mode was first turned on.
     static let listeningExplained = "listeningExplained"
+    /// Past threads renamed on device by Apple Intelligence (Settings › General; off until turned on).
+    static let renameThreadsWithAI = "renameThreadsWithAI"
+    /// When the last automatic rename sweep ran (throttle: one per six hours).
+    static let lastAITitleSweep = "lastAITitleSweep"
 
     static func register() {
         UserDefaults.standard.register(defaults: [showPanelOnStart: true, followSystemAudio: true, startMuted: false, startSlim: false,
                                                  showCaptions: true, notifyWhenDone: true, panelOnAllSpaces: true,
-                                                 showInDock: true])
+                                                 showInDock: true, renameThreadsWithAI: false])
     }
 
     /// The call shortcut (default ⌃⌥Space). Stored as e.g. `ctrl+opt+space`.
@@ -49,6 +55,11 @@ enum Prefs {
               case .success(let s) = KeyShortcut.parse(raw, reserved: nil) else { return .call }
         return s
     }
+}
+
+/// The Settings window's tabs, so other parts of the app can open it at the right one.
+enum SettingsTab: String, Hashable {
+    case general, shortcuts, voice, brief, behavior, delivery, home, connection, about
 }
 
 /// App-wide state shared by the menu bar, onboarding and Settings.
@@ -94,6 +105,18 @@ final class AppModel: ObservableObject {
     @Published var callShortcut: KeyShortcut = Prefs.callShortcut
     @Published var callShortcutProblem: String?
     @Published var micAuthorization: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    /// Screen Recording is allowed for Speakeasy (checked without prompting; refreshed with the status).
+    /// A grant only takes effect after a relaunch.
+    @Published var screenRecordingAllowed = false
+    /// Whether the paired Hermes takes screens, pictures and files; nil from plugins before 0.2.48.
+    /// The app delegate hands it to the call client whenever the status refreshes.
+    var attachmentSupport: AttachmentSupport? { status?.attachments }
+    /// Settings › General › Allow was pressed this launch (macOS shows its prompt at most once).
+    @Published private(set) var screenRecordingAsked = false
+    /// A call is open (paused included); set by the app delegate. Relaunch waits for it to end.
+    @Published var inCall = false
+    /// The Settings tab showing (or to show next).
+    @Published var settingsTab: SettingsTab = .general
 
     /// The delegate re-wires the call client and hotkeys when these change.
     let configChanged = PassthroughSubject<AppConfig, Never>()
@@ -104,6 +127,7 @@ final class AppModel: ObservableObject {
     /// Why the mute / pause shortcut isn't active (set by the delegate), shown in Settings.
     @Published var muteShortcutProblem: String?
     @Published var pauseShortcutProblem: String?
+    @Published var screenShortcutProblem: String?
     @Published var listeningShortcutProblem: String?
     /// Onboarding "Try it" and Settings ask the delegate to start a call.
     var startCall: () -> Void = {}
@@ -112,6 +136,7 @@ final class AppModel: ObservableObject {
         Prefs.register()
         config = AppConfig.resolve(savedServer: UserDefaults.standard.string(forKey: Prefs.serverURL),
                                    savedToken: Self.readSavedToken())
+        screenRecordingAllowed = ScreenCapture.permitted
     }
 
     /// Automated runs (smoke tests, snapshots, previews) never touch the Keychain. Dev builds are
@@ -273,6 +298,47 @@ final class AppModel: ObservableObject {
         }
         onboarding = try? await api.onboarding()
         micAuthorization = AVCaptureDevice.authorizationStatus(for: .audio)
+        screenRecordingAllowed = ScreenCapture.permitted
+        Task { await sweepThreadTitles() }
+    }
+
+    // MARK: AI thread titles
+
+    /// A rename sweep is in flight (the automatic one or Settings' Rename now).
+    private var titleSweepRunning = false
+
+    /// Renames past threads that still show their stand-in label, on device, with Apple
+    /// Intelligence — the Wing thread-titler applied to Speakeasy's voice threads. Touches
+    /// only stand-in labels, runs at most once every six hours (or forced from Settings),
+    /// and does nothing at all when Apple Intelligence isn't available on this Mac.
+    @discardableResult
+    func sweepThreadTitles(force: Bool = false) async -> Int {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: Prefs.renameThreadsWithAI) as? Bool ?? false else { return 0 }
+        guard isPaired, ThreadTitler.isAvailable(), !titleSweepRunning, let api else { return 0 }
+        if !force {
+            let last = defaults.object(forKey: Prefs.lastAITitleSweep) as? Date ?? .distantPast
+            guard Date().timeIntervalSince(last) > 6 * 3600 else { return 0 }
+        }
+        titleSweepRunning = true   // refresh() runs often: one sweep at a time
+        defer { titleSweepRunning = false }
+        // No list (server unreachable, or an older plugin without the route): try again next refresh.
+        guard let pending = try? await api.pendingThreadTitles() else { return 0 }
+        defaults.set(Date(), forKey: Prefs.lastAITitleSweep)
+        var renamed = 0
+        for candidate in pending.prefix(30) {
+            let material = candidate.request.isEmpty ? candidate.title : candidate.request
+            guard let raw = await ThreadTitler.shared.generateTitle(for: material),
+                  let title = ThreadTitles.sanitized(raw), title != candidate.title else { continue }
+            do {
+                try await api.renameThread(taskID: candidate.taskID, title: title)
+                renamed += 1
+            } catch let error as ServerClient.HTTPError where error.status == 409 || error.status == 404 {
+                continue  // named meanwhile (the cloud titler won) or cleared: skip just this one
+            } catch { break }  // server gone: stop quietly, finish next sweep
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return renamed
     }
 
     /// Loads home control: whether Home Assistant is found, on/off, every device it could use.
@@ -470,7 +536,7 @@ final class AppModel: ObservableObject {
     }
 
     func resetShortcuts() {
-        for key in [Prefs.muteShortcut, Prefs.pauseShortcut, Prefs.listeningShortcut] { UserDefaults.standard.removeObject(forKey: key) }
+        for key in [Prefs.muteShortcut, Prefs.pauseShortcut, Prefs.screenShortcut, Prefs.listeningShortcut] { UserDefaults.standard.removeObject(forKey: key) }
         setCallShortcut(.call)
         objectWillChange.send()
     }
@@ -492,6 +558,48 @@ final class AppModel: ObservableObject {
         let granted = await AVCaptureDevice.requestAccess(for: .audio)
         micAuthorization = AVCaptureDevice.authorizationStatus(for: .audio)
         return granted
+    }
+
+    // MARK: Screen Recording ("Look at this")
+
+    /// Settings, at `tab` (nil: wherever it was).
+    func showSettings(_ tab: SettingsTab? = nil) {
+        if let tab { settingsTab = tab }
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+    }
+
+    /// Settings › General › Screen › Allow: macOS's own prompt, at most once per launch. A grant
+    /// takes effect after Speakeasy relaunches.
+    func allowScreenRecording() {
+        screenRecordingAsked = true
+        screenRecordingAllowed = ScreenCapture.requestPermission()
+    }
+
+    /// Re-read Screen Recording (never prompts), e.g. when the user comes back from System Settings.
+    func refreshScreenRecording() {
+        let allowed = ScreenCapture.permitted
+        if allowed != screenRecordingAllowed { screenRecordingAllowed = allowed }
+    }
+
+    /// Only the real app bundle can reopen itself (a bare debug binary has nothing to `open`).
+    static var canRelaunch: Bool { Bundle.main.bundleURL.pathExtension == "app" }
+
+    /// Quits and reopens Speakeasy so a new Screen Recording grant takes effect. Never during a call.
+    /// A small shell waits for this process to exit, then opens the same app bundle again.
+    func relaunch() {
+        guard Self.canRelaunch, !inCall else { return }
+        let waiter = Process()
+        waiter.executableURL = URL(fileURLWithPath: "/bin/sh")
+        waiter.arguments = ["-c", "while /bin/kill -0 \"$0\" 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open \"$1\"",
+                            String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundleURL.path]
+        do {
+            try waiter.run()
+        } catch {
+            lastError = "Couldn't relaunch Speakeasy: \(error.localizedDescription)"
+            return
+        }
+        NSApp.terminate(nil)
     }
 
     static func openMicrophonePrivacySettings() {

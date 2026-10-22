@@ -24,8 +24,9 @@ Decisions made so the port could ship; each took the simplest option. Revisit wi
    setting.
 9. **Hotkey while a call is live** ends the call rather than toggling panel visibility.
    The close (x) button hides the panel during a call; the menu bar "Show panel" brings it back.
-10. **Mute/Pause shortcuts** keep their defaults (⌃⌥M, ⌃⌥P) and are not in the Settings recorder yet;
-    only the call hotkey is recordable.
+10. **Mute, Pause and Screen shortcuts** (defaults ⌃⌥M, ⌃⌥P, ⌃⌥S) are recordable in Settings › Shortcuts,
+    next to the call hotkey; each can be turned off, and "Restore default shortcuts" brings their defaults back.
+    They only work during a call (Screen only on a call that can share the screen).
 11. **Launch at login** uses `SMAppService.mainApp`; it only works from a signed `.app` in a stable location —
     from `swift run` the toggle shows the error the system returns.
 12. **Ad-hoc signing** means macOS asks for microphone access again after every rebuild. Set

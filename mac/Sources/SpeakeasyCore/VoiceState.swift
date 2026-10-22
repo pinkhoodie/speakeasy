@@ -65,11 +65,25 @@ public struct Exchange: Equatable, Sendable {
 /// during a call: a new turn only appends.
 public struct TranscriptTurn: Equatable, Sendable, Identifiable {
     public enum Speaker: Equatable, Sendable { case you, assistant }
+    /// `speech` is what was said on the call; `text` is a task's full written answer, shown only in the
+    /// expanded transcript (the voice still speaks its short spoken version as usual).
+    public enum Kind: Equatable, Sendable { case speech, text }
     public var id: Int
     public var speaker: Speaker
     public var text: String
+    public var kind: Kind = .speech
+    /// The task a text reply answers, and its name for the bubble's label.
+    public var taskID: String?
+    public var taskName: String?
     public init(id: Int, speaker: Speaker, text: String) { self.id = id; self.speaker = speaker; self.text = text }
-    public var cleanedText: String { cleanTranscript(text) }
+    public init(textReply text: String, id: Int, taskID: String, taskName: String?) {
+        self.id = id; self.speaker = .assistant; self.text = text; self.kind = .text
+        self.taskID = taskID; self.taskName = taskName
+    }
+    /// Written replies stay as written: the speech cleaner would eat bracketed markdown link names.
+    public var cleanedText: String {
+        kind == .text ? text.trimmingCharacters(in: .whitespacesAndNewlines) : cleanTranscript(text)
+    }
 }
 
 public struct VoiceState: Equatable, Sendable {
@@ -101,6 +115,11 @@ public struct VoiceState: Equatable, Sendable {
     public var resumeFrom: String?
     /// The whole call so far, oldest first (kept across Pause/Resume).
     public var transcript: [TranscriptTurn] = []
+    /// Tasks whose full answer is already a text reply in `transcript` (one bubble per task).
+    public var textRepliedTaskIDs: Set<String> = []
+    /// The call's first task list arrived: tasks in it that were already finished (an earlier call's
+    /// draft or review) are not answers of this conversation; ones that show up finished later are.
+    public var tasksBaselined = false
     /// When the last piece of the user's speech arrived; transcription of his words
     /// can trail behind the assistant's first words by a moment.
     public var lastInputAt: Date?
@@ -119,6 +138,9 @@ public struct VoiceState: Equatable, Sendable {
     public var micHealth: MicHealth = .ok
     /// What was heard while connecting, as transcribed so far.
     public var earlyHeard = ""
+    /// Screen sharing, capture requests and pending pictures and files ("Look at this"). Off at the
+    /// start of every call and every resume.
+    public var sharing = CallSharing()
 
     public init() {}
 
@@ -202,6 +224,8 @@ public enum VoiceEvent: Equatable, Sendable {
     case earlyHeard(String)
     /// The mic check's verdict changed.
     case micHealth(MicHealth)
+    /// Screen sharing, capture requests, pictures and files.
+    case sharing(SharingEvent)
 }
 
 /// Pure reducer. `now` is supplied by the caller so tests are deterministic.
@@ -223,6 +247,7 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
 
     case .sessionAdmitted(let id):
         s.interactionID = id
+        s.sharing.admitted()
 
     case .earlyListening(let on):
         s.earlyListening = on && s.connection == .connecting
@@ -252,9 +277,13 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
         s.lastError = nil
         s.exchange.replyStarted = true   // next words start a fresh visible exchange
         s.lastInputAt = nil
+        s.sharing.resumed()
 
     case .tasks(let tasks):
+        let before = s.tasks
         s.tasks = tasks.filter { !s.dismissedRunIDs.contains($0.info.runID ?? "") }
+        appendTextReplies(&s, before: before)
+        s.tasksBaselined = true
 
     case .show(let request):
         s.showRequest = request
@@ -292,8 +321,9 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
             s.exchange.you += text
             if trailing, let i = s.transcript.lastIndex(where: { $0.speaker == .you }) {
                 s.transcript[i].text += text
-            } else if let last = s.transcript.last, last.speaker == .you {
-                s.transcript[s.transcript.count - 1].text += text
+            } else if let i = s.transcript.lastIndex(where: { $0.kind == .speech }), s.transcript[i].speaker == .you {
+                // A text reply may sit after the user's unfinished sentence; the sentence still continues.
+                s.transcript[i].text += text
             } else {
                 s.transcript.append(TranscriptTurn(id: s.transcript.count, speaker: .you, text: text))
             }
@@ -309,8 +339,12 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
         s.exchange.replyStarted = true
         s.exchange.assistant += text
         s.lastActivityAt = now
-        if let last = s.transcript.last, last.speaker == .assistant {
+        if let last = s.transcript.last, last.speaker == .assistant, last.kind == .speech {
             s.transcript[s.transcript.count - 1].text += text
+        } else if case .speaking = s.speech, let i = s.transcript.lastIndex(where: { $0.kind == .speech }),
+                  s.transcript[i].speaker == .assistant, s.transcript[(i + 1)...].allSatisfy({ $0.kind == .text }) {
+            // A text reply landed mid-sentence: the rest of the sentence stays with its start.
+            s.transcript[i].text += text
         } else {
             s.transcript.append(TranscriptTurn(id: s.transcript.count, speaker: .assistant, text: text))
         }
@@ -390,6 +424,14 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
         }
         s.approval = snapshot.approval
         if let error = snapshot.error { s.lastError = error }
+        // Sharing state only from this call's own snapshots, and never while it pauses (the plugin
+        // has dropped what was waiting; it goes again after Resume).
+        if s.connection.isInCall, !s.pausing, let current = s.interactionID,
+           snapshot.interactionID == nil || snapshot.interactionID == current {
+            var own = snapshot
+            own.interactionID = current
+            s.sharing.reconcile(own, now: now)
+        }
         switch snapshot.finalization {
         case "confirmed", "complete":
             if s.connection.isInCall && s.connection != .connecting { s.connection = .ended(.complete) }
@@ -409,6 +451,11 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
         if case .speaking(let last) = s.speech, now.timeIntervalSince(last) >= VoiceState.speechQuietGap {
             s.speech = .idle
         }
+        s.sharing.tick(now: now)
+
+    case .sharing(let event):
+        let live = (s.connection == .live || s.connection == .connecting) && !s.pausing
+        s.sharing.apply(event, now: now, admitted: s.interactionID, live: live)
 
     case .reset:
         s = s.fresh()
@@ -422,6 +469,10 @@ public func reduce(_ state: VoiceState, _ event: VoiceEvent, now: Date) -> Voice
         s.speech = .idle
         if s.lastError == "Voice connection lost; final usage confirmation unavailable" { s.lastError = nil }
     }
+    // Paused: sharing is off and nothing is captured; pictures and files not sent yet wait for Resume.
+    // Ended: nothing of the call's sharing is kept.
+    if s.connection == .paused { s.sharing.callClosed(paused: true) }
+    else if !s.connection.isOpen { s.sharing.callClosed(paused: false) }
     s.work = deriveWork(s, now: now)
     return s
 }
@@ -430,6 +481,46 @@ private func isEnded(_ phase: ConnectionPhase) -> Bool {
     if case .ended = phase { return true }
     if case .failed = phase { return true }
     return false
+}
+
+/// A task of this call that finished with a written answer becomes one text reply in the
+/// transcript (shown only in the expanded view). The voice is untouched: it still speaks the short
+/// spoken version. A task of this call counts even when it first shows up already finished (a quick
+/// task, or the first list after a reconnect); earlier calls' carried tasks never do.
+private func appendTextReplies(_ s: inout VoiceState, before: [TaskItem]) {
+    guard !s.workOnly else { return }
+    let previous = Dictionary(before.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+    for task in s.tasks where task.info.status == "completed" && !s.textRepliedTaskIDs.contains(task.id) {
+        if let was = previous[task.id] {
+            guard !was.info.isTerminal else { continue }
+        } else if task.info.carried {
+            continue
+        } else if !s.tasksBaselined, !task.info.emailDrafts.isEmpty || !task.info.reviewImages.isEmpty {
+            // An older server doesn't mark carried tasks: on the call's first list, one holding a
+            // draft or review card is an earlier call's.
+            continue
+        }
+        // Home commands ("lights off") have nothing to read; the server already counts them as seen.
+        guard !task.info.seen, let full = textReply(for: task.info.result) else { continue }
+        s.textRepliedTaskIDs.insert(task.id)
+        s.transcript.append(TranscriptTurn(textReply: full, id: s.transcript.count, taskID: task.id,
+                                           taskName: task.info.title ?? task.info.summary))
+    }
+}
+
+/// The written answer worth a text reply: the full text, unless it says nothing more than the
+/// spoken line the voice reads out anyway (compared ignoring case, punctuation and spacing).
+public func textReply(for result: WorkResult?) -> String? {
+    guard let full = result?.full?.trimmingCharacters(in: .whitespacesAndNewlines), !full.isEmpty else { return nil }
+    return replyWords(full) == replyWords(result?.spoken ?? "") ? nil : full
+}
+
+/// Lowercased words only, so "Lights off." and "lights off" read the same.
+private func replyWords(_ text: String) -> String {
+    text.lowercased()
+        .components(separatedBy: CharacterSet.alphanumerics.inverted)
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
 }
 
 /// Work axis is a pure function of api-owned inputs; never of speech or mic.

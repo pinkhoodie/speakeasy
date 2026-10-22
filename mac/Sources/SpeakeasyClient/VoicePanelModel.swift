@@ -190,6 +190,54 @@ public final class VoicePanelModel: ObservableObject {
         return true
     }
 
+    // MARK: Look at this (screen, pictures and files)
+    /// The screen button: unavailable (this call can't share), off, on, or needs Screen Recording.
+    public var screenState: ScreenButton { state.sharing.button }
+    /// Grows each time the plugin asks for the button to be noticed (`screen.hint`): pulse once per increase.
+    public var screenHintPulse: Int { state.sharing.hintPulse }
+    /// Why it last asked (`screen.hint` reason, e.g. "permission"); nil after a resume.
+    public var screenHintReason: String? { state.sharing.hint }
+    /// The screen button or shortcut.
+    public var onToggleScreen: () -> Void = {}
+    /// Speakeasy Settings › General › Screen, where Screen Recording is allowed (the "Set up" on the
+    /// needs-permission line).
+    public var onOpenScreenSettings: () -> Void = {}
+    /// e.g. "⌃⌥S: share your screen or stop". Empty when no shortcut.
+    @Published public var screenShortcutHint = ""
+
+    /// This Hermes takes pictures and files (drops and pastes are offered).
+    @Published public var attachmentsSupported = false
+    /// A drag the panel would take hovers over it (thin accent ring).
+    @Published public var dropTargeted = false
+    /// Pictures and files waiting to go with the next request, in drop order.
+    public var pendingAttachments: [PendingAttachmentItem] {
+        state.sharing.visibleAttachments.map { item in
+            PendingAttachmentItem(id: item.id, kind: item.kind, name: item.name, phase: item.phase,
+                                  thumbnail: attachmentThumbnails[item.id])
+        }
+    }
+    /// Previews of pending pictures, by attachment id (files have none).
+    @Published public var attachmentThumbnails: [String: CGImage] = [:]
+    /// Dropped or pasted items, already encoded with `AttachmentEncoder`.
+    public var onAttach: ([EncodedAttachment]) -> Void = { _ in }
+    /// An item that couldn't be encoded: its `AttachmentFailure` raw value, shown as a short line.
+    public var onAttachRefused: (String) -> Void = { _ in }
+    /// The ✕ on a pending picture or file (its id).
+    public var onRemoveAttachment: (String) -> Void = { _ in }
+
+    /// A request waiting for the screen, or how that ended (nil: none).
+    public var hold: ScreenHold? { state.sharing.hold }
+    /// "Waiting for your screen", "Not sent: screen sharing was off", or nil.
+    public var holdText: String? { state.sharing.hold?.line }
+    /// A short line about sharing ("Up to 3 at a time", "Screen Recording is off · Set up"); also
+    /// on the status line while fresh. `action` says what tapping it does.
+    public var shareNotice: ShareNotice? {
+        guard let notice = state.sharing.notice, notice.isFresh(at: state.now) else { return nil }
+        return notice
+    }
+    /// A screen capture or picture a task carried (run id, `SharedItem.number`), through the authenticated api.
+    public var loadSharedImage: (String, Int) async -> Data? = { _, _ in nil }
+
     // MARK: Panel visibility
     /// The close (x) button: hide the panel (ends nothing).
     public var onClosePanel: () -> Void = {}
@@ -206,8 +254,12 @@ public final class VoicePanelModel: ObservableObject {
 
     /// Width of the folded orb panel.
     public static let orbWidth: CGFloat = 132
+    /// Width of the folded orb panel in a call that can share its screen: the eye sits beside the mic,
+    /// so sharing stays visible (and can be stopped) while folded.
+    public static let orbWidthWithScreen: CGFloat = 164
+    public var foldedWidth: CGFloat { screenState == .unavailable ? Self.orbWidth : Self.orbWidthWithScreen }
     /// The panel's width right now: the orb when folded, else the user's width.
-    public var displayWidth: CGFloat { showsSlim ? Self.orbWidth : panelWidth }
+    public var displayWidth: CGFloat { showsSlim ? foldedWidth : panelWidth }
     /// The job open in the job view (a `Job.id`); nil shows the board.
     @Published public var selectedJobID: String?
     /// The board tile the arrow keys are on.
@@ -268,8 +320,11 @@ public final class VoicePanelModel: ObservableObject {
         }
     }
     /// The header's second line: the orb's reason when it has one, else the live status.
-    public var headerStatus: String { orbReason?.text ?? shownStatus }
-    public var headerTone: StatusTone { orbReason?.tone ?? shownTone }
+    /// A fresh screen-sharing notice ("Screen Recording is off · Set up", "Up to 3 at a time") is on
+    /// the status line now: it wins over the orb's summary, which would otherwise hide it (and its tap).
+    private var showingShareNotice: Bool { shareNotice.map { $0.text == shownStatus } ?? false }
+    public var headerStatus: String { showingShareNotice ? shownStatus : (orbReason?.text ?? shownStatus) }
+    public var headerTone: StatusTone { showingShareNotice ? shownTone : (orbReason?.tone ?? shownTone) }
     public var selectedJob: Job? { selectedJobID.flatMap { id in jobs.first { $0.id == id } } }
     /// The board replaces the task list once there's more than one task, anything needs you, or a
     /// task brought back a card. Cards never pile up under the board: each lives in its job's view.
@@ -388,5 +443,19 @@ public final class VoicePanelModel: ObservableObject {
             let target = at.map { all[$0] } ?? all.first { $0.stage == .needsYou(.decide) }
             return target.map { pick(digit, in: $0) } ?? false
         }
+    }
+}
+
+/// A picture or file on the panel's pending row.
+public struct PendingAttachmentItem: Identifiable {
+    public let id: String
+    public let kind: PendingAttachment.Kind
+    public let name: String
+    public let phase: PendingAttachment.Phase
+    /// Pictures only, once made.
+    public let thumbnail: CGImage?
+
+    public init(id: String, kind: PendingAttachment.Kind, name: String, phase: PendingAttachment.Phase, thumbnail: CGImage?) {
+        self.id = id; self.kind = kind; self.name = name; self.phase = phase; self.thumbnail = thumbnail
     }
 }

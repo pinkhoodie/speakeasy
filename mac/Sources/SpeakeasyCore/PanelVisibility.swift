@@ -61,7 +61,10 @@ public struct PanelAutoHide: Equatable, Sendable {
 
 /// Slim mode's one-line task summary: "2 running · 1 done", or "N task(s) need you"
 /// when an approval or a pending email draft is waiting. nil when there are no tasks.
-public func slimTaskSummary(_ tasks: [TaskItem], approvalPending: Bool = false) -> String? {
+/// `holdActive`: a request is waiting for screen sharing to come on; that wins, since it only
+/// waits a few seconds (an approval keeps its own row in slim mode).
+public func slimTaskSummary(_ tasks: [TaskItem], approvalPending: Bool = false, holdActive: Bool = false) -> String? {
+    if holdActive { return slimHoldSummary }
     guard !tasks.isEmpty || approvalPending else { return nil }
     var waiting = tasks.filter { $0.info.status == "waiting_for_approval" || !$0.info.pendingDrafts.isEmpty }.count
     if approvalPending && waiting == 0 { waiting = 1 }
@@ -72,3 +75,6 @@ public func slimTaskSummary(_ tasks: [TaskItem], approvalPending: Bool = false) 
     return active == total ? (active == 1 ? "1 task running" : "\(active) tasks running")
         : "\(active) running · \(total - active) done"
 }
+
+/// The slim summary while a request waits for the screen (the full panel's hold line says the same).
+public let slimHoldSummary = "Waiting for your screen"

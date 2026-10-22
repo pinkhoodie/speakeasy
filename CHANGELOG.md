@@ -2,6 +2,19 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Mac 0.3.5 and Plugin 0.3.13 — Look at this
+
+- **Let Hermes see your screen when you want it to.** A new eye next to the mic turns screen sharing on for the call; press it again, press ⌃⌥S, or say "stop looking at my screen" to turn it off. It's off at the start of every call. While it's on, each new request takes a picture of the window you're working in along with your words, so "what's this error?" or "reply to this email" just works.
+- **Drop or paste pictures and files onto the panel.** A screenshot, a photo, a PDF or a log goes with your next request (up to 3 at a time), whether or not screen sharing is on. They wait as small thumbnails you can remove.
+- **Ask to look while it's off and it waits for you.** Say "look at my screen" with sharing off and the eye lights up; turn it on within 30 seconds and your request goes ahead with your screen.
+- **Private by design.** Your screen and files go only to your own Hermes, never to the voice model. Speakeasy never captures its own windows, password managers or a password you're typing, and anything you share never goes into a group chat or a channel you didn't name. The first time a request takes your screen without you mentioning it, you'll hear which window went.
+- **Needs Screen Recording permission** for the screen part (Settings › General › Screen). macOS asks Speakeasy to relaunch after you allow it, and reminds you about once a month.
+
+## Plugin 0.3.12 — A live status that keeps you company
+
+- **The status line tells you what's actually happening.** While a request runs, the agent now gives you a fresh update at every real step — starting or finishing a piece of work it handed to a helper, a build or big search kicking off and landing, a change of plan, and the moment before it writes the answer — with the specifics (names, numbers, files) of what it's thinking through, researching, and running in the background, not just "working on it." *(Plugin)*
+- **No more filler.** It skips an update that would only repeat the last one and never pads with "still working," so each line is new and worth reading. *(Plugin)*
+
 ## Mac 0.3.4 and Plugin 0.3.11 — Clear an answer without opening it
 
 - **Every new answer has an ×.** Tap it (or long-press the answer and pick Dismiss) and it leaves New answers without opening; it's still in Done today if you want it later. *(Mac app and iPhone app)*
