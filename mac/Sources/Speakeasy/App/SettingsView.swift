@@ -202,7 +202,7 @@ private struct ScreenSettingsSection: View {
         } header: {
             Text("Screen")
         } footer: {
-            Text("Sharing is off at the start of every call. macOS asks about once a month to keep allowing it.")
+            Text("Sharing is off at the start of every call. Screenshots you share are saved in the Hermes session history with the request and stay there after the call ends. Password managers are never captured. macOS asks about once a month to keep allowing it.")
         }
         .onAppear { app.refreshScreenRecording() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in

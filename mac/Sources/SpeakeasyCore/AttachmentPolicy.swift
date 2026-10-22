@@ -105,12 +105,20 @@ public enum AttachmentPolicy {
     // MARK: Password managers
 
     /// Apps never captured while frontmost: 1Password (8 and 7), Bitwarden, Dashlane, LastPass,
-    /// Keychain Access and Passwords. Browser password-manager extensions aren't covered.
+    /// KeePassXC, Strongbox, Proton Pass, Enpass, Keeper, NordPass, RoboForm, Keychain Access and
+    /// Passwords. Browser password-manager extensions aren't covered. Entries are lowercase.
     public static let passwordManagerBundleIDs: Set<String> = [
         "com.1password.1password", "com.agilebits.onepassword7",
         "com.bitwarden.desktop",
-        "com.dashlane.dashlanephonefinal",
+        "com.dashlane.dashlanephonefinal", "com.dashlane.dashlane",
         "com.lastpass.lastpass",
+        "org.keepassxc.keepassxc", "org.keepassx.keepassxc",
+        "com.markmcguill.strongbox", "com.markmcguill.strongbox.mac", "com.markmcguill.strongbox.mac.pro",
+        "me.proton.pass.electron",
+        "in.sinew.enpass-desktop",
+        "com.keepersecurity.passwordmanager",
+        "com.nordsec.nordpass",
+        "com.sibersystems.roboform",
         "com.apple.keychainaccess",
         "com.apple.passwords",
     ]

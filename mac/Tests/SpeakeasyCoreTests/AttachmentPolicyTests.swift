@@ -81,6 +81,17 @@ final class AttachmentPolicyTests: XCTestCase {
         XCTAssertFalse(AttachmentPolicy.isPasswordManager(bundleID: nil))
     }
 
+    func testOtherDesktopPasswordManagersAreRefused() {
+        for id in ["org.keepassxc.keepassxc", "com.markmcguill.strongbox.mac", "com.markmcguill.strongbox.mac.pro",
+                   "me.proton.pass.electron", "in.sinew.Enpass-Desktop", "com.keepersecurity.passwordmanager",
+                   "com.nordsec.nordpass", "com.SiberSystems.RoboForm", "com.dashlane.Dashlane"] {
+            XCTAssertTrue(AttachmentPolicy.isPasswordManager(bundleID: id), id)
+        }
+        for id in AttachmentPolicy.passwordManagerBundleIDs {
+            XCTAssertEqual(id, id.lowercased(), "entries must be lowercase to match")
+        }
+    }
+
     // MARK: Classification
 
     func testPicturesBecomeImagesDocumentsBecomeFiles() {
