@@ -17,11 +17,12 @@ final class TextRepliesTests: XCTestCase {
     }
 
     func task(_ id: String = "d1", _ status: String, full: String? = nil, spoken: String? = "Three flights fit.",
-              seen: Bool = false) -> TaskItem {
+              seen: Bool = false, carried: Bool = false) -> TaskItem {
         var info = WorkInfo(runID: "run_\(id)", status: status, updated: t0,
                             result: status == "completed" ? WorkResult(spoken: spoken, full: full) : nil,
                             title: "Flights to Denver")
         info.seen = seen
+        info.carried = carried
         return TaskItem(id: id, info: info)
     }
 
@@ -84,8 +85,39 @@ final class TextRepliesTests: XCTestCase {
 
     func testEarlierCallsCarriedTasksAreNotReplies() {
         // The first list of a call carries an earlier call's finished task (a draft or review): not an answer here.
-        let s = reduce(live(), .tasks([task("old", "completed", full: report)]), now: t0 + 1)
+        var s = reduce(live(), .tasks([task("old", "completed", full: report, carried: true)]), now: t0 + 1)
         XCTAssertTrue(texts(s).isEmpty)
+        // Nor when it shows up later in the call.
+        s = reduce(s, .tasks([task("old", "completed", full: report, carried: true),
+                              task("old2", "completed", full: report, carried: true)]), now: t0 + 5)
+        XCTAssertTrue(texts(s).isEmpty)
+    }
+
+    func testOlderServerCarriedReviewTaskOnTheFirstListIsNotAReply() {
+        var old = task("old", "completed", full: report)
+        old.info.reviewImages = [1]
+        let s = reduce(live(), .tasks([old]), now: t0 + 1)
+        XCTAssertTrue(texts(s).isEmpty)
+    }
+
+    func testThisCallsTaskFirstSeenFinishedAfterAReconnectGetsExactlyOneReply() {
+        // The app reconnected: the call's first task list already has this call's finished task.
+        var s = reduce(live(), .tasks([task("d1", "completed", full: report)]), now: t0 + 1)
+        XCTAssertEqual(texts(s).count, 1)
+        XCTAssertEqual(texts(s).first?.taskID, "d1")
+        s = reduce(s, .tasks([task("d1", "completed", full: report)]), now: t0 + 2)
+        s = reduce(s, .tasks([]), now: t0 + 3)
+        s = reduce(s, .tasks([task("d1", "completed", full: report)]), now: t0 + 4)
+        XCTAssertEqual(texts(s).count, 1)
+        // A finished home command first seen the same way still adds nothing.
+        s = reduce(s, .tasks([task("h1", "completed", full: "Done. Kitchen lights off.", seen: true)]), now: t0 + 5)
+        XCTAssertEqual(texts(s).count, 1)
+    }
+
+    func testCarriedFlagIsReadFromTheServer() {
+        let json: [String: Any] = ["task_id": "d9", "run_id": "r9", "status": "completed", "carried": true]
+        XCTAssertEqual(TaskItem(json: json)?.info.carried, true)
+        XCTAssertEqual(TaskItem(json: ["task_id": "d9", "run_id": "r9", "status": "completed"])?.info.carried, false)
     }
 
     func testNoTextReplyWhenNothingMoreToRead() {
@@ -131,5 +163,10 @@ final class TextRepliesTests: XCTestCase {
         XCTAssertNil(textReply(for: nil))
         XCTAssertNil(textReply(for: WorkResult(spoken: "Done.", full: "  Done. ")))
         XCTAssertEqual(textReply(for: WorkResult(spoken: "Short.", full: "Short.\nLong part.")), "Short.\nLong part.")
+        // Same words, different case, punctuation or spacing: nothing more to read.
+        XCTAssertNil(textReply(for: WorkResult(spoken: "Lights off.", full: "lights   off")))
+        XCTAssertNil(textReply(for: WorkResult(spoken: "Done — the kitchen's lights are off!", full: "Done. The kitchen's lights are off.")))
+        XCTAssertNil(textReply(for: WorkResult(spoken: "It's 72 degrees.", full: "it's 72 degrees")))
+        XCTAssertEqual(textReply(for: WorkResult(spoken: "It's 72 degrees.", full: "It's 72 degrees, sunny.")), "It's 72 degrees, sunny.")
     }
 }

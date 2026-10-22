@@ -459,17 +459,21 @@ private func isEnded(_ phase: ConnectionPhase) -> Bool {
     return false
 }
 
-/// A task of this call that just finished with a written answer becomes a text reply in the
+/// A task of this call that finished with a written answer becomes one text reply in the
 /// transcript (shown only in the expanded view). The voice is untouched: it still speaks the short
-/// spoken version. Only a task seen running in this call, or one that first appears already finished
-/// after the call's first task list, counts; earlier calls' carried tasks never do.
+/// spoken version. A task of this call counts even when it first shows up already finished (a quick
+/// task, or the first list after a reconnect); earlier calls' carried tasks never do.
 private func appendTextReplies(_ s: inout VoiceState, before: [TaskItem]) {
     guard !s.workOnly else { return }
     let previous = Dictionary(before.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
     for task in s.tasks where task.info.status == "completed" && !s.textRepliedTaskIDs.contains(task.id) {
         if let was = previous[task.id] {
             guard !was.info.isTerminal else { continue }
-        } else if !s.tasksBaselined {
+        } else if task.info.carried {
+            continue
+        } else if !s.tasksBaselined, !task.info.emailDrafts.isEmpty || !task.info.reviewImages.isEmpty {
+            // An older server doesn't mark carried tasks: on the call's first list, one holding a
+            // draft or review card is an earlier call's.
             continue
         }
         // Home commands ("lights off") have nothing to read; the server already counts them as seen.
@@ -481,11 +485,18 @@ private func appendTextReplies(_ s: inout VoiceState, before: [TaskItem]) {
 }
 
 /// The written answer worth a text reply: the full text, unless it says nothing more than the
-/// spoken line the voice reads out anyway.
+/// spoken line the voice reads out anyway (compared ignoring case, punctuation and spacing).
 public func textReply(for result: WorkResult?) -> String? {
     guard let full = result?.full?.trimmingCharacters(in: .whitespacesAndNewlines), !full.isEmpty else { return nil }
-    let spoken = result?.spoken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    return full == spoken ? nil : full
+    return replyWords(full) == replyWords(result?.spoken ?? "") ? nil : full
+}
+
+/// Lowercased words only, so "Lights off." and "lights off" read the same.
+private func replyWords(_ text: String) -> String {
+    text.lowercased()
+        .components(separatedBy: CharacterSet.alphanumerics.inverted)
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
 }
 
 /// Work axis is a pure function of api-owned inputs; never of speech or mic.
