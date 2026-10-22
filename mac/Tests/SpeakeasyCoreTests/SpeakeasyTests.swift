@@ -281,6 +281,15 @@ final class SlimSummaryTests: XCTestCase {
         XCTAssertEqual(slimTaskSummary([task("a", "completed", drafts: [sent])]), "1 task done")
         XCTAssertEqual(slimTaskSummary([], approvalPending: true), "1 task needs you")
     }
+
+    func testHoldShowsInSlimMode() {
+        XCTAssertEqual(slimTaskSummary([], holdActive: true), "Waiting for your screen")
+        XCTAssertEqual(slimTaskSummary([task("a", "working"), task("b", "completed")], holdActive: true),
+                       "Waiting for your screen", "a held request only waits seconds, so it wins over the counts")
+        XCTAssertEqual(slimTaskSummary([task("a", "waiting_for_approval")], approvalPending: true, holdActive: true),
+                       "Waiting for your screen", "the approval keeps its own row in slim mode")
+        XCTAssertEqual(slimTaskSummary([task("a", "working")], holdActive: false), "1 task running")
+    }
 }
 
 final class DeliveryChannelsTests: XCTestCase {

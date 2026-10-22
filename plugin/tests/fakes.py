@@ -96,13 +96,20 @@ class FakeHermes(BaseHTTPRequestHandler):
         parts = self.path.strip("/").split("/")
         if parts == ["v1", "runs"]:
             idem = self.headers.get("Idempotency-Key", "")
+            # Hermes replays a run only for the same key AND the same body; a changed body is a 409.
+            fingerprint = json.dumps([body, self.headers.get("X-Hermes-Session-Key", "")], sort_keys=True)
             with self.state.lock:
                 if idem and idem in self.state.by_idem:
+                    if self.state.idem_bodies.get(idem) != fingerprint:
+                        self._json(409, {"error": {"code": "idempotency_key_conflict"}})
+                        return
                     self._json(202, {"run_id": self.state.by_idem[idem], "status": "started"})
                     return
                 self.state.counter += 1
                 run_id = f"run_{self.state.counter:04d}"
                 self.state.by_idem[idem] = run_id
+                self.state.idem_bodies[idem] = fingerprint
+            # ``input`` is recorded as sent: a string, or a list of messages with text and image parts.
             prompt, session_id = body.get("input", ""), body.get("session_id")
             self.state.calls.append({"run_id": run_id, "input": prompt, "session_id": session_id, "idem": idem})
             output = self.state.responder(prompt, session_id)
@@ -162,6 +169,7 @@ class FakeHermesServer:
         self.lock = threading.Lock()
         self.runs: dict[str, dict[str, Any]] = {}
         self.by_idem: dict[str, str] = {}
+        self.idem_bodies: dict[str, str] = {}  # what each idempotency key was first sent with
         self.calls: list[dict[str, Any]] = []
         self.approvals: list[dict[str, Any]] = []
         self.counter = 0
@@ -247,6 +255,68 @@ class FakeLiveWorker(SidebandWorker):
         self.feed({"type": "session.input_transcript.delta", "delta": words, "start_ms": 1, "end_ms": 2})
         self.feed({"type": "session.delegation.created", "offset_ms": 5,
                    "delegation": {"id": delegation_id, "target": "client", **extra}})
+
+
+def upload_attachment(base: str, token: str, interaction_id: str, data: bytes, kind: str = "picture",
+                      ctype: str = "image/jpeg", headers: dict[str, str] | None = None) -> tuple[int, Any]:
+    """POST raw bytes to /voice/interactions/{id}/attachments the way the Mac app does."""
+    req = urllib.request.Request(f"{base}/voice/interactions/{interaction_id}/attachments", data=data, method="POST")
+    req.add_header("Content-Type", ctype)
+    req.add_header("X-Speakeasy-Kind", kind)
+    req.add_header("Authorization", f"Bearer {token}")
+    for name, value in (headers or {}).items():
+        req.add_header(name, value)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+class FakeMac:
+    """The Mac app's side of screen sharing: it answers every ``capture`` event on a call's feed over
+    real HTTP, as the app does (``capturing`` first; only on 200 the upload or a failure).
+    ``reply(capture_id)`` decides: ``{"data": bytes, "app": "Xcode", "delay": s}`` uploads,
+    ``{"fail": reason}`` reports a failed capture, None ignores the event."""
+
+    def __init__(self, base: str, token: str, interaction: Any, reply: Callable[[str], dict[str, Any] | None]):
+        self.base, self.token, self.interaction, self.reply = base, token, interaction, reply
+        self.seen: list[str] = []                  # capture ids, in the order the events arrived
+        self.answers: dict[str, tuple[int, int]] = {}  # capture id -> (capturing status, upload/fail status)
+        self._stop = threading.Event()
+        threading.Thread(target=self._watch, daemon=True).start()
+
+    def _watch(self) -> None:
+        while not self._stop.is_set():
+            for _, kind, payload in list(self.interaction.feed.ring):
+                capture_id = payload.get("capture_id") if kind == "capture" else None
+                if capture_id and capture_id not in self.seen:
+                    self.seen.append(capture_id)
+                    threading.Thread(target=self._answer, args=(capture_id,), daemon=True).start()
+            time.sleep(0.02)
+
+    def _answer(self, capture_id: str) -> None:
+        how = self.reply(capture_id)
+        if how is None:
+            return
+        time.sleep(how.get("delay", 0))
+        iid = self.interaction.interaction_id
+        url = f"/voice/interactions/{iid}/captures/{capture_id}"
+        status, _ = http(self.base, "POST", url, {"status": "capturing"}, self.token)
+        if status != 200:
+            self.answers[capture_id] = (status, 0)
+            return
+        if "fail" in how:
+            done, _ = http(self.base, "POST", url, {"status": "failed", "reason": how["fail"]}, self.token)
+        else:
+            headers = {"X-Speakeasy-Capture-Id": capture_id}
+            if how.get("app"):
+                headers["X-Speakeasy-App"] = how["app"]
+            done, _ = upload_attachment(self.base, self.token, iid, how["data"], "screen", headers=headers)
+        self.answers[capture_id] = (status, done)
+
+    def stop(self) -> None:
+        self._stop.set()
 
 
 def wait_for(predicate: Callable[[], Any], timeout: float = 10.0) -> Any:

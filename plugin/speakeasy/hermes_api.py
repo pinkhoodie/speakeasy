@@ -1,16 +1,24 @@
 """Client for the user's Hermes API server on loopback (/v1/runs, events, stop, steer, approval)."""
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
+from . import attachments as A
 from .text import ID_RE, TERMINAL
+
+logger = logging.getLogger(__name__)
 
 MAX_BODY = 512 * 1024
 RUN_EVENTS_TIMEOUT_S = 1800
+# The image formats every vision provider Hermes talks to accepts as they are.
+IMAGE_DATA_URL_RE = re.compile(r"data:image/(?:jpeg|png|gif|webp);base64,[A-Za-z0-9+/]+={0,2}")
 
 
 class HermesError(Exception):
@@ -33,6 +41,76 @@ def _loopback(base: str) -> str:
     return base.rstrip("/")
 
 
+def user_content(text: str, images: Sequence[str] | None = None) -> str | list[dict[str, Any]]:
+    """One user turn as Hermes takes it: the plain text, or with images the canonical OpenAI vision
+    parts (a text part, then one ``image_url`` part per data URL). ``/v1/runs`` hands its input to
+    the agent without normalizing it, so this is the one spelling sent (never ``input_image``)."""
+    if not images:
+        return text
+    sizes = []
+    for url in images:
+        if not isinstance(url, str) or not IMAGE_DATA_URL_RE.fullmatch(url):
+            raise HermesError(400, "images must be base64 JPEG, PNG, GIF or WebP data URLs")
+        sizes.append((len(url) - url.index(",") - 1) * 3 // 4)  # decoded bytes, give or take padding
+    if len(sizes) > A.MAX_REQUEST_IMAGES or max(sizes) > A.MAX_IMAGE_BYTES or sum(sizes) > A.MAX_REQUEST_IMAGE_BYTES:
+        raise HermesError(413, "images are over the request limit")
+    return [{"type": "text", "text": text}, *({"type": "image_url", "image_url": {"url": url}} for url in images)]
+
+
+# -- can Hermes read images? ---------------------------------------------------------------------
+#
+# The plugin runs inside Hermes, so this asks Hermes' own code. Image parts in a run's input reach
+# ``agent.vision_message_prep``: a main model with vision sees them as they are; otherwise each one
+# is replaced by an auxiliary vision model's description (Hermes' ``vision_analyze``).
+
+def image_input_available() -> bool:
+    """Whether this Hermes has the image input path at all. Cheap and offline (the gateway has
+    imported these already); False outside Hermes and on versions that predate it."""
+    try:
+        from agent.image_routing import _lookup_supports_vision  # type: ignore  # noqa: F401
+        from agent.vision_message_prep import VisionMessagePrepMixin  # type: ignore  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def detect_image_support() -> dict[str, Any]:
+    """``{images, vision}``: can a run carry images, and how the agent reads them. ``vision`` is
+    ``native`` (the main model sees them), ``described`` (an auxiliary vision model describes them
+    to a main model without vision), ``none`` (neither) or ``unknown`` (the check itself failed).
+
+    Can wait on the network (the models.dev catalog, provider probes): run it off the request path
+    and cache the result (``HermesAPI.refresh_image_support``)."""
+    if not image_input_available():
+        return {"images": False, "vision": "none"}
+    try:
+        from agent.auxiliary_client import _read_main_model, _read_main_provider  # type: ignore
+        from agent.image_routing import _lookup_supports_vision  # type: ignore
+        from hermes_cli.config import load_config  # type: ignore
+        from .router import _profile_scope
+        with _profile_scope():
+            # The same test the agent makes per turn (VisionMessagePrepMixin._model_supports_vision).
+            if _lookup_supports_vision(_read_main_provider(), _read_main_model(), load_config()) is True:
+                return {"images": True, "vision": "native"}
+            return {"images": True, "vision": "described" if _auxiliary_vision() else "none"}
+    except Exception as exc:
+        logger.info("speakeasy: could not tell whether Hermes reads images (%s)", type(exc).__name__)
+        return {"images": True, "vision": "unknown"}
+
+
+def _auxiliary_vision() -> bool:
+    """Whether Hermes can resolve an auxiliary vision model, as its own vision tool gate does
+    (``tools.vision_tools.check_video_requirements``): the configured ``auxiliary.vision``
+    backend, then auto. Probe mode resolves providers without building real clients."""
+    from agent.auxiliary_client import resolve_vision_provider_client  # type: ignore
+    try:
+        from agent.auxiliary_client import aux_probe_mode  # type: ignore
+    except ImportError:
+        aux_probe_mode = contextlib.nullcontext
+    with aux_probe_mode():
+        return any(resolve_vision_provider_client(**kw)[1] is not None for kw in ({}, {"provider": "auto"}))
+
+
 class HermesAPI:
     """`key_fn` is called per request so a key written by `hermes voice setup` is picked up
     without a restart; the key is never logged or returned."""
@@ -43,6 +121,8 @@ class HermesAPI:
         self.base = f"{root}/p/{profile}" if profile else root
         self.key_fn, self.opener = key_fn, opener
         self.last_error = ""  # Hermes' own message for the last failed background run
+        # Whether Hermes reads images: "unknown" until the first check (refresh_image_support).
+        self.image_support: dict[str, Any] = {"images": image_input_available(), "vision": "unknown"}
 
     def _request(self, path: str, body: dict[str, Any] | None = None, method: str | None = None,
                  headers: dict[str, str] | None = None) -> urllib.request.Request:
@@ -75,8 +155,16 @@ class HermesAPI:
 
     def capabilities(self):
         from .backends.base import Capabilities
+        support = self.image_support
         return Capabilities(kind="hermes", display_name="Hermes", chat_delivery=True, threads=True,
-                            conversation_continuity=True, email_drafts=True, daily_brief=True)
+                            conversation_continuity=True, email_drafts=True, daily_brief=True,
+                            images=bool(support["images"]) and support["vision"] != "none")
+
+    def refresh_image_support(self) -> dict[str, Any]:
+        """Check again whether Hermes reads images and cache it. Slow at times: never call it on a
+        request (the service runs it at startup and then hourly)."""
+        self.image_support = detect_image_support()
+        return self.image_support
 
     def health(self, timeout: float = 2) -> bool:
         try:
@@ -86,8 +174,10 @@ class HermesAPI:
             return False
 
     def start_run(self, prompt: str, idem_key: str, session_id: str | None = None,
-                  session_key: str | None = None) -> str:
-        body: dict[str, Any] = {"input": prompt}
+                  session_key: str | None = None, images: Sequence[str] | None = None) -> str:
+        # Text alone stays a plain string; with images, one user message of vision parts.
+        body: dict[str, Any] = {"input": [{"role": "user", "content": user_content(prompt, images)}]
+                                if images else prompt}
         if session_id:
             # A task's own Hermes session: tasks in separate sessions run at the same time.
             body["session_id"] = session_id

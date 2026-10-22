@@ -53,6 +53,8 @@ def test_review_waits_until_dismissed_and_survives_new_calls(service):
     store.update_run("se_new", "run_new", "running")
     carried = [t for t in store.latest_tasks() if t["task_id"] == "item_se_design"]
     assert carried and carried[0]["review"]["images"] == [1, 2]
+    assert carried[0]["carried"] is True  # the app never turns it into a text reply of this call
+    assert "carried" not in next(t for t in store.latest_tasks() if t["task_id"] == "item_new")
     assert all("path" not in c for c in carried[0]["result"]["cards"])  # never a raw path to the app
     assert store.dismiss_review("run_design", [1]) == [1]
     assert store.work(idem_key="se_design")["review"]["images"] == [2]

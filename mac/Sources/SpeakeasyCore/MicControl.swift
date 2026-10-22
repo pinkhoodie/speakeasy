@@ -30,6 +30,9 @@ public struct KeyShortcut: Equatable, Sendable {
     /// Default Pause/Resume shortcut: Control–Option–P, registered while a call
     /// is open or paused.
     public static let defaultPause = KeyShortcut(keyCode: 0x23, modifiers: control | option, keyName: "P")
+    /// Default screen-sharing on/off shortcut: Control–Option–S. Like Mute, registered only while
+    /// a call that can share its screen is open (and not paused).
+    public static let defaultScreen = KeyShortcut(keyCode: 0x01, modifiers: control | option, keyName: "S")
     /// Suggested listening mode shortcut: Control–Option–L. Off until the user sets one (Settings ›
     /// Shortcuts); Delete in the recorder picks this.
     public static let suggestedListening = KeyShortcut(keyCode: 0x25, modifiers: control | option, keyName: "L")

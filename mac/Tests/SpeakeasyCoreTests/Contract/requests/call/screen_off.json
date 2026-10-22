@@ -1,0 +1,8 @@
+{
+  "body" : {
+    "on" : false,
+    "seq" : 2
+  },
+  "method" : "POST",
+  "path" : "\/voice\/interactions\/{interaction_id}\/screen"
+}
