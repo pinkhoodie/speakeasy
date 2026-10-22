@@ -1,0 +1,11 @@
+{
+  "body" : null,
+  "headers" : {
+    "Content-Type" : "image\/jpeg",
+    "X-Speakeasy-Filename" : "Header%20idea.jpg",
+    "X-Speakeasy-Kind" : "picture"
+  },
+  "method" : "POST",
+  "path" : "\/voice\/interactions\/{interaction_id}\/attachments",
+  "raw_body" : "jpeg"
+}

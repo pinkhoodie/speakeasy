@@ -292,6 +292,49 @@ public struct BriefTune: Codable, Equatable, Sendable {
 }
 
 /// `GET /voice/status`.
+/// `/voice/status` › `attachments`: whether this Hermes can take screens, pictures and files.
+public struct AttachmentSupport: Codable, Equatable, Sendable {
+    /// Hermes' image input path exists.
+    public var images: Bool
+    /// `native` (the main model sees images), `described` (a vision model describes them), `none`
+    /// or `unknown` (not checked yet, or the check failed).
+    public var vision: String
+    public var maxAttachments: Int?
+    public var maxImageBytes: Int?
+    public var maxRequestImageBytes: Int?
+    public var maxFileBytes: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case images, vision, maxAttachments = "max_attachments", maxImageBytes = "max_image_bytes"
+        case maxRequestImageBytes = "max_request_image_bytes", maxFileBytes = "max_file_bytes"
+    }
+
+    public init(images: Bool, vision: String = "unknown", maxAttachments: Int? = nil, maxImageBytes: Int? = nil,
+                maxRequestImageBytes: Int? = nil, maxFileBytes: Int? = nil) {
+        self.images = images; self.vision = vision; self.maxAttachments = maxAttachments
+        self.maxImageBytes = maxImageBytes; self.maxRequestImageBytes = maxRequestImageBytes; self.maxFileBytes = maxFileBytes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        images = (try? c.decodeIfPresent(Bool.self, forKey: .images)) ?? false
+        vision = (try? c.decodeIfPresent(String.self, forKey: .vision)).flatMap { $0 } ?? "unknown"
+        maxAttachments = try? c.decodeIfPresent(Int.self, forKey: .maxAttachments)
+        maxImageBytes = try? c.decodeIfPresent(Int.self, forKey: .maxImageBytes)
+        maxRequestImageBytes = try? c.decodeIfPresent(Int.self, forKey: .maxRequestImageBytes)
+        maxFileBytes = try? c.decodeIfPresent(Int.self, forKey: .maxFileBytes)
+    }
+
+    /// Sharing is offered: images go in, and Hermes doesn't say it can't see them.
+    public var supported: Bool { images && vision != "none" }
+
+    /// Why a drop is refused when sharing isn't offered (`shareRefusalLine` reason).
+    public static func refusalReason(_ support: AttachmentSupport?) -> String {
+        guard let support else { return "old_plugin" }
+        return support.images ? "no_vision" : "no_images"
+    }
+}
+
 public struct ServerStatus: Codable, Equatable, Sendable {
     public var assistantName: String?
     public var provider: String?
@@ -319,6 +362,8 @@ public struct ServerStatus: Codable, Equatable, Sendable {
     /// The address `hermes voice setup` advertised for other devices (empty = local only).
     public var advertisedURL: String?
     public var tailscaleName: String?
+    /// Whether Hermes reads pictures, and the attachment limits (plugin 0.2.48 on); nil from older plugins.
+    public var attachments: AttachmentSupport?
     /// The server accepts what listening mode heard with a new call (`room` on POST /voice/sessions).
     /// Missing on older plugins, which reject unknown session fields: never send `room` then.
     public var roomListening: Bool?
@@ -334,6 +379,7 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         case routingModel = "routing_model", routingHint = "routing_hint", routingChoice = "routing_choice"
         case routingExplainer = "routing_explainer"
         case advertisedURL = "advertised_url", tailscaleName = "tailscale_name"
+        case attachments
         case roomListening = "room_listening", roomOnResume = "room_on_resume"
     }
 
@@ -363,9 +409,14 @@ public struct ServerStatus: Codable, Equatable, Sendable {
         routingExplainer = try? c.decodeIfPresent(String.self, forKey: .routingExplainer)
         advertisedURL = try? c.decodeIfPresent(String.self, forKey: .advertisedURL)
         tailscaleName = try? c.decodeIfPresent(String.self, forKey: .tailscaleName)
+        attachments = try? c.decodeIfPresent(AttachmentSupport.self, forKey: .attachments)
         roomListening = try? c.decodeIfPresent(Bool.self, forKey: .roomListening)
         roomOnResume = try? c.decodeIfPresent(Bool.self, forKey: .roomOnResume)
     }
+
+    /// The screen button, drops and pastes are offered: the plugin takes attachments and Hermes can
+    /// read images (natively or described by a vision model).
+    public var attachmentsSupported: Bool { attachments?.supported == true }
 
     /// A new thread can be opened for tasks sent to `target` (the server supports it and the
     /// target's platform has threads).
