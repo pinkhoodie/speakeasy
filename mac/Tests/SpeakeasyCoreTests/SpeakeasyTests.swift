@@ -122,6 +122,16 @@ final class ServerSettingsTests: XCTestCase {
         XCTAssertEqual(back.brief, s.brief)
         XCTAssertEqual(back.continuity?.enabled, true)
         XCTAssertEqual(back.idleTimeout, 180)
+        XCTAssertNil(object?["audio_duck"], "left alone unless edited")
+    }
+
+    func testAudioDuckSettingRoundTrips() throws {
+        let read = try ServerSettings.decode(Data(#"{"settings":{"audio_duck":{"enabled":false,"level":30,"hold_s":4.0}}}"#.utf8))
+        XCTAssertEqual(read.audioDuck?.enabled, false)
+        var s = read
+        s.audioDuck?.enabled = true
+        let object = try JSONSerialization.jsonObject(with: s.patchBody()) as? [String: Any]
+        XCTAssertEqual(object?["audio_duck"] as? [String: Bool], ["enabled": true], "only the switch: level and hold stay as set")
     }
 
     func testBriefDecoding() throws {

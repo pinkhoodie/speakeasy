@@ -89,6 +89,13 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         public init(progress: Bool? = nil) { self.progress = progress }
     }
 
+    /// Lower the Mac's volume while the assistant speaks on a call from the Mac running Hermes
+    /// (`audio_duck`; off by default). Only `enabled` is edited here; level and hold stay as set.
+    public struct AudioDuck: Codable, Equatable, Sendable {
+        public var enabled: Bool?
+        public init(enabled: Bool? = nil) { self.enabled = enabled }
+    }
+
     public var assistantName: String?
     public var userName: String?
     public var voice: Voice?
@@ -101,10 +108,12 @@ public struct ServerSettings: Codable, Equatable, Sendable {
     public var maxCallMinutes: Int?
     public var instructionsExtra: String?
     public var brief: Brief?
+    public var audioDuck: AudioDuck?
 
     enum CodingKeys: String, CodingKey {
         case assistantName = "assistant_name", userName = "user_name", voice, idlePauseMinutes = "idle_pause_minutes"
         case notifyTarget = "notify_target", delivery, continuity, speech, instructionsExtra = "instructions_extra", brief
+        case audioDuck = "audio_duck"
     }
 
     public init(assistantName: String? = nil, userName: String? = nil, voice: Voice? = nil, idlePauseMinutes: Double? = nil,
@@ -128,6 +137,7 @@ public struct ServerSettings: Codable, Equatable, Sendable {
         if let v = try? c.decodeIfPresent(VoiceLimits.self, forKey: .voice) { maxCallMinutes = v.maxCallMinutes }
         instructionsExtra = try? c.decodeIfPresent(String.self, forKey: .instructionsExtra)
         brief = try? c.decodeIfPresent(Brief.self, forKey: .brief)
+        audioDuck = try? c.decodeIfPresent(AudioDuck.self, forKey: .audioDuck)
     }
 
     /// The effective delivery target (nil = off).
@@ -179,6 +189,7 @@ public struct ServerSettings: Codable, Equatable, Sendable {
             if let v = brief.includeRecentVoice { b["include_recent_voice"] = v }
             object["brief"] = b
         }
+        if let enabled = audioDuck?.enabled { object["audio_duck"] = ["enabled": enabled] }
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }
 

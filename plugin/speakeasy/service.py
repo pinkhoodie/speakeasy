@@ -21,6 +21,7 @@ from typing import Any, Callable
 from . import __version__
 from . import attachments as A
 from . import delivery as D
+from . import duck as duck_mod
 from .brief import BriefInvalid, BriefManager
 from .calls import (ACTIVE_RUN_STATES, MAX_TASKS, ServiceError, Interaction, Notices, Runtime, SidebandWorker,
                     end_shared, interaction_tasks, publish_state)
@@ -110,7 +111,8 @@ class VoiceService:
                  polish_call: Callable[[str], str | None] | None = None,
                  status_call: Callable[[str], str | None] | None = None,
                  home_plan_call: Callable[..., Any] | None = None, home_client: Callable[..., Any] | None = None,
-                 tune_run: Callable[[str, str], tuple[str, str]] | None = None):
+                 tune_run: Callable[[str, str], tuple[str, str]] | None = None,
+                 volume_backend: duck_mod.VolumeBackend | None = None):
         self.home = Path(hermes_home)
         self.dir = self.home / "speakeasy"
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -141,6 +143,11 @@ class VoiceService:
         from .tune import CallLog, TuneManager, merge_calls
         self.call_log = CallLog(self.dir)
         self.rt.call_log = self.call_log
+        # Only the gateway's long-lived service (start_threads) drives the volume: a short-lived CLI
+        # service would otherwise restore, at its start, a duck the gateway is holding mid-call.
+        backend = volume_backend or (duck_mod.default_backend() if start_threads else None)
+        self.duck = duck_mod.Ducker(self.home, self.settings.get, backend)
+        self.rt.duck = self.duck
         self.tune = TuneManager(self.dir, tune_run or brief_run or self._tune_run, self.brief,
                                 lambda: merge_calls(self.call_log.recent(), self.store.calls_from_tasks()),
                                 names=self._tune_names)
@@ -203,6 +210,7 @@ class VoiceService:
                     worker.stop_transport()
                 except Exception:
                     pass
+        self.duck.close()  # put the volume back before a reload swaps this code out
 
     # -- auth ---------------------------------------------------------------------------------
     def authenticate(self, headers: Any) -> str:
@@ -246,7 +254,8 @@ class VoiceService:
                                          tour=P.tour_block(names, tour, label, s["delivery"]["channels"])
                                          if tour is not None else "", room=room)
 
-    def create_session(self, body: dict[str, Any], request_id: str, device_id: str = "") -> dict[str, Any]:
+    def create_session(self, body: dict[str, Any], request_id: str, device_id: str = "",
+                       local: bool = False) -> dict[str, Any]:
         if self.updated_underneath():
             raise ServiceError(503, RESTART_NEEDED)
         resume_from = body.get("resume_from")
@@ -349,7 +358,7 @@ class VoiceService:
             screen = source.attachments.declared  # a resume that doesn't say keeps the call's declaration
         interaction = Interaction(interaction_id=interaction_id, live_session_id=live_id, away=away,
                                   device_id=device_id, attachments=A.CallAttachments(screen),
-                                  room=room if source is None else "")
+                                  room=room if source is None else "", local=local)
         if source is not None:  # a resume: adopt moves the room text over from the paused call
             self.adopt(source, interaction, history)
             client_result["resumed_from"] = source.interaction_id
