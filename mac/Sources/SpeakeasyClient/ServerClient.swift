@@ -103,6 +103,20 @@ public final class ServerClient: @unchecked Sendable {
     public func dismissTune() async throws {
         _ = try await data("/voice/brief/tune/dismiss", method: "POST", body: Data("{}".utf8))
     }
+
+    // MARK: AI thread titles
+
+    /// Past threads still under their stand-in label (empty on an older plugin: no route yet).
+    public func pendingThreadTitles() async throws -> [ThreadTitleCandidate] {
+        let raw = try await data("/voice/titles", timeout: 15)
+        return ThreadTitles.decodePending(raw) ?? []
+    }
+
+    /// Persists one on-device generated title; the server refines the thread's job name too.
+    public func renameThread(taskID: String, title: String) async throws {
+        try await data("/voice/titles", method: "POST",
+                       body: try ThreadTitles.renameBody(taskID: taskID, title: title))
+    }
     public func destinations() async throws -> [Destination] { Destination.list(try await data("/voice/destinations")) }
     public func destinationsWithSuggestion() async throws -> ([Destination], String?) {
         let raw = try await data("/voice/destinations")

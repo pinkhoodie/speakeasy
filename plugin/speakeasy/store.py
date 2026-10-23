@@ -56,6 +56,14 @@ def local_run_id(idem_key: str) -> str:
     return "lr_" + hashlib.sha256(idem_key.encode()).hexdigest()[:32]
 
 
+def _is_stand_in(title: str | None, request: str | None, continued: str | None = None) -> bool:
+    """A task title that is only the word-based label made from its own request (or missing). A task
+    in a chat thread shows the thread's name, which a rename here would split from the thread itself."""
+    if '"thread_id"' in (continued or ""):
+        return False
+    return not title or title == short_title(notice_text(request, 1200) or "")
+
+
 class StateStore:
     def __init__(self, path: Path, hermes_home: Path | None = None):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -759,6 +767,61 @@ class StateStore:
         with self._lock:
             row = self._db.execute("SELECT delegation_id FROM runs WHERE idem_key=?", (key,)).fetchone()
         return (row[0] if row and row[0] else key)
+
+    # -- AI thread titles ----------------------------------------------------------------------
+
+    def key_for_task(self, task_id: str) -> str | None:
+        """A run's idem key by the id the app knows it by (its delegation id, else the key)."""
+        with self._lock:
+            row = self._db.execute("SELECT idem_key FROM runs WHERE delegation_id=? OR idem_key=?",
+                                   (task_id, task_id)).fetchone()
+        return row[0] if row else None
+
+    def stand_in_titles(self, limit: int = 40) -> list[dict[str, Any]]:
+        """Past tasks whose shown title is still the stand-in label built from their own words
+        (the titler never landed: out of credits, reload mid-name) or that never got one.
+        These are what the Mac app's on-device Apple Intelligence titler may rename. Only
+        finished tasks: a running one may still get the cloud titler's name."""
+        marks = ",".join("?" * len(TERMINAL))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT r.idem_key, r.delegation_id, r.title, r.updated, r.continued, "
+                "(SELECT e.text FROM work_events e WHERE e.idem_key=r.idem_key AND e.kind='request' "
+                " ORDER BY e.seq LIMIT 1) FROM runs r "
+                f"WHERE r.status IN ({marks}) ORDER BY r.updated DESC LIMIT 400",
+                tuple(sorted(TERMINAL))).fetchall()
+        out = []
+        for key, delegation_id, title, updated, continued, request_text in rows:
+            request = notice_text(request_text, 1200)
+            if not request or not _is_stand_in(title, request_text, continued):
+                continue  # a real name (the titler's, a chat thread's, an older row's), or nothing to title from
+            out.append({"task_id": delegation_id or key, "title": title or "",
+                        "request": request, "updated": float(updated or 0)})
+            if len(out) >= limit:
+                break
+        return out
+
+    def rename_stand_in(self, key: str, title: str) -> bool:
+        """Set the app's on-device title only while the task still shows its stand-in label, checked
+        and written under one lock: a name the cloud titler or a chat thread gave it always wins."""
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT r.title, r.continued, (SELECT e.text FROM work_events e WHERE e.idem_key=r.idem_key "
+                "AND e.kind='request' ORDER BY e.seq LIMIT 1) FROM runs r WHERE r.idem_key=?", (key,)).fetchone()
+            if not row or not _is_stand_in(row[0], row[2], row[1]):
+                return False
+            self._db.execute("UPDATE runs SET title=? WHERE idem_key=?", (title, key))
+            name = job_name(title)
+            if name:
+                self._db.execute("UPDATE runs SET own_title=? WHERE idem_key=?", (title, key))
+                # The job this task named takes the new name only while it still has the stand-in's
+                # name; a job named any other way keeps its name.
+                stand_ins = {n for n in (job_name(row[0]), job_name(short_title(notice_text(row[2], 1200) or "")),
+                                         "Voice task") if n}
+                marks = ",".join("?" * len(stand_ins))
+                self._db.execute(f"UPDATE jobs SET name=?, updated=? WHERE from_key=? AND name IN ({marks})",
+                                 (name, time.time(), key, *stand_ins))
+        return True
 
     # -- live view ("what it's looking at") -------------------------------------------------
     def set_live_image(self, key: str, kind: str, ref: str, name: str, source: str) -> bool:

@@ -824,6 +824,30 @@ class VoiceService:
             raise ServiceError(404, "not found")
         return {"work": self.store.work(run_id, assistant_name=self.settings.get()["assistant_name"])}
 
+    # -- AI thread titles ------------------------------------------------------------------------
+
+    def pending_thread_titles(self) -> dict[str, Any]:
+        """Past tasks still under their stand-in label, for the app's on-device titler."""
+        return {"tasks": self.store.stand_in_titles()}
+
+    def rename_thread(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Set one task's title from the app's on-device Apple Intelligence titler. Same store
+        path as the cloud titler's answer: the title also refines the name of the job it named."""
+        task_id, title = body.get("task_id"), body.get("title")
+        if (not set(body) <= {"task_id", "title"} or not isinstance(task_id, str)
+                or not 1 <= len(task_id) <= 128 or not isinstance(title, str)):
+            raise ServiceError(400, "task_id and title are required")
+        title = " ".join(title.split())
+        if not 2 <= len(title) <= 90:
+            raise ServiceError(400, "title needs 2-90 characters")
+        key = self.store.key_for_task(task_id)
+        if key is None:
+            raise ServiceError(404, "task not found")
+        if not self.store.rename_stand_in(key, title):
+            # The cloud titler (or a chat thread) named it after the app asked: that name wins.
+            raise ServiceError(409, "task already has a title")
+        return {"task_id": task_id, "title": title, "renamed": True}
+
     # -- look at this: screen sharing, pictures and files ------------------------------------------
     @staticmethod
     def _refused(exc: A.Refused) -> ServiceError:

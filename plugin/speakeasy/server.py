@@ -253,6 +253,7 @@ class Handler(BaseHTTPRequestHandler):
             work = re.fullmatch(rf"/voice/work/{_ID}", path)
             routes = {
                 "/voice/work/latest": self.service.work_latest,
+                "/voice/titles": self.service.pending_thread_titles,
                 "/voice/settings": self.service.get_settings,
                 "/voice/brief": self.service.get_brief,
                 "/voice/status": self.service.status,
@@ -298,6 +299,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/voice/tasks/dismiss":
                 self._reply(200, self.service.dismiss_tasks(self._body()))
+                return
+            if path == "/voice/titles":
+                self._reply(200, self.service.rename_thread(self._body()))
                 return
             if path == "/voice/destinations/suggest":
                 self._reply(200, self.service.suggest_channels())
