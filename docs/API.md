@@ -226,7 +226,7 @@ The stream ends after `closed`.
 | `interaction` | same as `GET /voice/interactions/{id}` |
 | `work` | the call's latest task (same as `work` in `/voice/work/latest`) or `null` |
 | `tasks` | the call's task list (same items as `tasks` in `/voice/work/latest`) |
-| `approval` | `{"run_id", "request_id", "description", "choices": ["once", "deny"]}` or `null` |
+| `approval` | `{"run_id", "request_id", "description", "choices"}` or `null`; `choices` is `["once", "deny"]`, plus `"session"` (the rest of that task) when Hermes offered it. Never `"always"` |
 | `email_drafts` | every visible draft of the call's tasks, each with `task_id` and `run_id` added; published whenever a draft appears or changes status |
 | `closed` | `{"finalization": "complete" \| "incomplete", "error"}` |
 | `capture` | `{"capture_id"}`: capture the user's window for one request (see Look at this) |
@@ -270,7 +270,9 @@ Body `{}`. Pauses the call (the voice transport is closed, tasks keep running). 
 
 ## POST /voice/interactions/{id}/approval
 
-Answers a Hermes tool approval for one run. Only `once` and `deny` are accepted from the app.
+Answers a Hermes tool approval for one run. `once` and `deny` are accepted, and `session` only when
+the approval's `choices` include it. `always` (permanent) is refused with 400 from every surface;
+the call's voice can answer the same approval ("just this once", "no") under the same rules.
 ```json
 {"run_id": "run_0001", "request_id": "req_7f2c", "choice": "once"}
 ```
@@ -325,9 +327,15 @@ already has a real title: the cloud titler or a chat thread named it after the a
 
 The newest task (`work`), the task list (`tasks`, newest last, finished ones hidden after
 dismissal) and the recap of results that finished while no call was open (`away`). Each task has
-`task_id`, `run_id`, `status` (`admitting`, `working`, `waiting_for_approval`, `completed`,
-`failed`, `cancelled`, `interrupted`, `ambiguous`), live `short_status`/`detail`, `events`,
-`result` (`spoken`, `full`, optional `label`, optional `cards`) and `email_drafts`. An earlier
+`task_id`, `run_id`, `status` (`admitting`, `working`, `waiting_for_approval`, `waiting_on_task`,
+`completed`, `failed`, `cancelled`, `interrupted`, `ambiguous`), live `short_status`/`detail`, `events`,
+`result` (`spoken`, `full`, optional `label`, optional `cards`) and `email_drafts`.
+`follow_ups` (only when present) lists what the user added while it ran, oldest first:
+`{"text", "milestone", "state", "at"}`, where `milestone` is the matching `You added: …` event and
+`state` is `queued` (Hermes accepted it; the task has not read it yet), `landed` (it is in the task's
+transcript, or the run finished without handing it back) or `not_read` (the run ended first).
+A task with status `waiting_on_task` was held so two tasks don't edit one project at once; it has
+`waiting: {"name", "project"}` (the task it waits for) and starts when that task ends. An earlier
 call's task shown only for its pending draft or review card has `carried: true`.
 Product and image cards appear as `result.cards`; image cards are fetched through
 `/voice/card-image/...`, never by path.

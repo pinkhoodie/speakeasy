@@ -2,6 +2,12 @@
 
 Speakeasy has two parts that update separately: the **Mac app** (updates through Check for Updates) and the **Hermes plugin** (updates itself in the background; no restart needed). Each entry says which one it came with.
 
+## Mac 0.3.6 and Plugin 0.3.14 — Honest follow-ups, approvals by voice, one task per project
+
+- **You can see whether a task actually read what you added.** When you add something to a running task, its card shows it as *queued* until the task really reads it, then *read by the task*. If the task finishes or is stopped first, the card says so, and the voice tells you and offers to start it as new work instead of letting it drop. *(Plugin and Mac app)*
+- **Answer an approval out loud.** When a task stops for your OK, the voice asks once what it wants to do. Say "just this once" or "no", or "for the rest of this task" when Hermes allows that. It only says it's approved after Hermes confirms it. Speakeasy never approves anything permanently, by voice or from the card. With two approvals waiting, a plain "yeah" gets asked which one. The Approve once and Deny buttons still work. *(Plugin)*
+- **Two tasks don't edit the same project at once.** If you ask for a change to a repo or project that a running task is already changing, the new task waits and the voice tells you which task is in the way. You can let it wait, stop the other one, or start it anyway. A waiting task shows *Waiting* on the board with what it's waiting for, and starts by itself when that task ends. Questions and lookups never wait. *(Plugin and Mac app)*
+
 ## Mac 0.3.5 and Plugin 0.3.13 — Look at this
 
 - **Let Hermes see your screen when you want it to.** A new eye next to the mic turns screen sharing on for the call; press it again, press ⌃⌥S, or say "stop looking at my screen" to turn it off. It's off at the start of every call. While it's on, each new request takes a picture of the window you're working in along with your words, so "what's this error?" or "reply to this email" just works.
