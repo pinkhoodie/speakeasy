@@ -23,7 +23,7 @@ from . import attachments as A
 from . import delivery as D
 from . import duck as duck_mod
 from .brief import BriefInvalid, BriefManager
-from .calls import (ACTIVE_RUN_STATES, MAX_TASKS, ServiceError, Interaction, Notices, Runtime, SidebandWorker,
+from .calls import (ACTIVE_RUN_STATES, APPROVED_MILESTONE, MAX_TASKS, ServiceError, Interaction, Notices, Runtime, SidebandWorker,
                     end_shared, interaction_tasks, publish_state)
 from .cards import ImageRejected, _sniff, default_image_roots, fetch_image, read_local_image
 from .devices import DeviceStore
@@ -718,17 +718,21 @@ class VoiceService:
         request_id, run_id, choice = body.get("request_id"), body.get("run_id"), body.get("choice")
         if (set(body) != {"request_id", "run_id", "choice"}
                 or not isinstance(request_id, str) or not ID_RE.fullmatch(request_id)
-                or not isinstance(run_id, str) or not ID_RE.fullmatch(run_id) or choice not in {"once", "deny"}):
-            raise ServiceError(400, "exact run_id, request_id, and once|deny are required")
+                or not isinstance(run_id, str) or not ID_RE.fullmatch(run_id) or choice not in {"once", "session", "deny"}):
+            # Never "always": Speakeasy grants at most the rest of one task (hermes_api.approve).
+            raise ServiceError(400, "exact run_id, request_id, and once|session|deny are required")
         with interaction.lock:
             backend = self._run(interaction, run_id)
             approval = backend.approval
             if backend.status != "waiting_for_approval" or not approval or request_id != approval.get("request_id"):
                 raise ServiceError(409, "approval is stale or not pending for that run")
+            offered = list(approval.get("choices") or ["once", "deny"])
+            if choice not in offered:
+                raise ServiceError(400, "that approval can't be answered that way")
             backend.approval, backend.status = None, "resolving_approval"
         name = self.settings.get()["assistant_name"]
         try:
-            result = self.hermes.approve(backend.run_id, request_id, choice)
+            result = self.hermes.approve(backend.run_id, request_id, choice, offered)
         except Exception:
             with interaction.lock:
                 if backend.status == "resolving_approval":
@@ -739,7 +743,7 @@ class VoiceService:
             if backend.status == "resolving_approval":
                 backend.status = "working"
         self.store.update_run(backend.idem_key, None, "working")
-        self.store.progress(backend.idem_key, "milestone", "Approved once" if choice == "once" else "Approval denied")
+        self.store.progress(backend.idem_key, "milestone", APPROVED_MILESTONE[choice])
         publish_state(self.store, interaction, name)
         return {"interaction_id": interaction_id, "choice": choice, "run_id": backend.run_id,
                 "resolved": result.get("resolved", 0)}

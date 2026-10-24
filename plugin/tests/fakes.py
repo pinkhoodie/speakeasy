@@ -115,7 +115,9 @@ class FakeHermes(BaseHTTPRequestHandler):
             output = self.state.responder(prompt, session_id)
             run = {"status": "completed", "output": output, "done": threading.Event(),
                    "events": [{"event": "tool.started", "tool": "web_search", "preview": "weather"},
-                              {"event": "run.completed", "output": output}]}
+                              # Hermes' terminal fields (terminal_run_status) ride on every run.* event.
+                              {"event": "run.completed", "output": output, "completed": True, "partial": False,
+                               "interrupted": False}]}
             if self.state.fail_with is not None:
                 # Hermes' shape for a turn that failed (api_server_runs._execute_run): no output, the
                 # provider's redacted error line in ``error`` on the event and on GET /v1/runs/{id}.
@@ -130,7 +132,7 @@ class FakeHermes(BaseHTTPRequestHandler):
                 run["events"] = [e for e in run["events"] if not e["event"].startswith("run.")]
             if self.state.approval_first:
                 run["pre_events"] = [{"event": "approval.request", "request_id": "apr_" + run_id,
-                                      "description": "Delete an old file"}]
+                                      "description": "Delete an old file", "choices": list(self.state.approval_choices)}]
             if self.state.live_events:
                 run["pre_events"] = run.get("pre_events", []) + list(self.state.live_events)
             if self.state.hold or self.state.approval_first:
@@ -155,6 +157,9 @@ class FakeHermes(BaseHTTPRequestHandler):
                 self._json(200, {"accepted": run["status"] == "running"})
             elif parts[3] == "approval":
                 self.state.approvals.append(body)
+                if body.get("choice") not in self.state.approval_choices:
+                    self._json(400, {"error": {"code": "invalid_approval_choice"}})
+                    return
                 run["status"] = "completed"
                 run["done"].set()
                 self._json(200, {"resolved": 1})
@@ -175,6 +180,7 @@ class FakeHermesServer:
         self.counter = 0
         self.hold = False
         self.approval_first = False
+        self.approval_choices = ("once", "deny")  # the approval.request ``choices`` Hermes offers
         self.live_events: list[dict[str, Any]] = []  # streamed while a held run is still working
         self.steers: list[tuple[str, str]] = []
         self.fail_with: str | None = None  # every run fails with this Hermes error line

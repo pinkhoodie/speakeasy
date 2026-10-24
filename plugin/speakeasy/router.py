@@ -1375,3 +1375,70 @@ def set_aside_kind(request: str) -> str | None:
     if _ASIDE_WEAK.search(said):
         return "weak"
     return None
+
+
+# Answering a waiting approval by voice. Short replies only: anything longer, or anything that asks
+# for other work, goes on as a normal request. "always"/"permanently" is recognized so it can be
+# refused: a spoken answer never grants more than this one task.
+_APPROVE_ALWAYS = re.compile(
+    r"(?i)\b(?:always|permanent(?:ly)?|forever|from\s+now\s+on|every\s+time|for\s+good|all\s+the\s+time|"
+    r"don't\s+ask\s+(?:me\s+)?again|never\s+ask)\b")
+_APPROVE_SESSION = re.compile(
+    r"(?i)\b(?:for\s+(?:the\s+rest\s+of\s+)?(?:this|the)\s+(?:session|task|job|run)|for\s+the\s+rest\s+of\s+(?:it|this|the\s+task)|"
+    r"(?:this|the)\s+whole\s+(?:session|task)|until\s+(?:it's|it\s+is|this\s+is)\s+(?:done|finished))\b")
+_APPROVE_ONCE = re.compile(
+    r"(?i)\b(?:(?:just\s+)?(?:this|the)\s+once|just\s+(?:this|the)\s+(?:one\s+)?time|one\s+time|only\s+once|once)\b")
+_APPROVE_DENY = re.compile(
+    r"(?i)^\W*(?:(?:um+|uh+|actually|oh|well|so)\W+)*(?:no|nope|nah|deny(?:\s+it)?|don't(?:\s+do\s+it)?|do\s+not|"
+    r"don't\s+allow\s+(?:it|that)|decline(?:\s+it)?|reject(?:\s+it)?|not\s+that)\b")
+_APPROVE_YES = re.compile(
+    r"(?i)^\W*(?:(?:um+|uh+|oh|ok|okay|so|well)\W+)*(?:yes|yeah|yep|yup|sure|ok|okay|go\s+ahead|do\s+it|"
+    r"approve(?:d)?(?:\s+it)?|allow(?:\s+it)?|fine|go\s+for\s+it|that's\s+fine|please\s+do|sounds\s+good)\b")
+_APPROVE_OTHER_WORK = re.compile(r"(?i)\b(?:can\s+you|could\s+you|look\s+up|find|search|what|how|why|when|where|who|"
+                                 r"also|and\s+then|instead|book|buy|order|send|email|text|call)\b")
+
+
+def approval_answer(request: str) -> str | None:
+    """A short spoken answer to a waiting approval: once | session | deny | always (refused by the
+    caller) | yes (a bare "yeah": once when only one approval waits and it was just asked) | None."""
+    said = " ".join((request or "").split())
+    if not said or len(said.split()) > 12 or _APPROVE_OTHER_WORK.search(said):
+        return None
+    if _APPROVE_ALWAYS.search(said) and not re.search(r"(?i)\bnot\s+(?:always|permanent|forever)", said):
+        return "always"  # "yes, always", "don't ask me again": refused by the caller, never granted
+    if _APPROVE_DENY.search(said) and not _APPROVE_YES.search(said):
+        return "deny"
+    if _APPROVE_SESSION.search(said):
+        return "session"
+    if _APPROVE_ONCE.search(said):
+        return "once"
+    if _APPROVE_YES.search(said):
+        return "yes"
+    return None
+
+
+# A new task held behind another one editing the same project: what the user says about it.
+_FENCE_ANYWAY = re.compile(
+    r"(?i)\b(?:start\s+(?:it|this|that|mine|the\s+new\s+one)?\s*(?:anyway|now|right\s+away)|"
+    r"(?:go\s+ahead|run\s+(?:it|both|them\s+both))\s+anyway|don't\s+wait|do\s+not\s+wait|no\s+need\s+to\s+wait|"
+    r"run\s+(?:them\s+)?both|both\s+at\s+once|at\s+the\s+same\s+time|in\s+parallel|anyway)\b")
+_FENCE_STOP = re.compile(
+    r"(?i)\b(?:stop|cancel|kill|end|abort)\s+(?:the\s+)?(?:other|first|old|older|running|current|earlier)(?:\s+(?:one|task))?\b|"
+    r"\b(?:stop|cancel|kill)\s+(?:that|it)\s+(?:one\s+)?(?:first|and\s+start)\b")
+_FENCE_WAIT = re.compile(
+    r"(?i)^\W*(?:(?:ok|okay|yeah|yes|sure|fine|no)\W+)*(?:(?:just\s+)?wait(?:\s+for\s+(?:it|that|that\s+one))?|"
+    r"queue\s+it|let\s+it\s+wait|that's\s+fine|after\s+(?:it|that)(?:\s+one)?(?:\s+finishes)?|keep\s+it\s+queued)\b")
+
+
+def fence_choice(request: str) -> str | None:
+    """anyway | stop | wait for a task waiting on another, from a short reply; else None."""
+    said = " ".join((request or "").split())
+    if not said or len(said.split()) > 14:
+        return None
+    if _FENCE_STOP.search(said):
+        return "stop"
+    if _FENCE_ANYWAY.search(said):
+        return "anyway"
+    if _FENCE_WAIT.search(said):
+        return "wait"
+    return None

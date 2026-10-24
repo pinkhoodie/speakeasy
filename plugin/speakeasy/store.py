@@ -112,7 +112,19 @@ class StateStore:
             # kept here once, from the first task's own title (never a chat thread's name).
             self._db.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 job_id TEXT PRIMARY KEY, name TEXT NOT NULL, from_key TEXT, updated REAL NOT NULL)""")
+            # What the user added to a running task by voice (/steer), and whether it is known to have
+            # reached the agent: queued -> landed | not_read (see receipts.py). ``body`` is the exact text
+            # sent, kept server-side only to look for it in the transcript; clients get ``words``.
+            self._db.execute("""CREATE TABLE IF NOT EXISTS follow_ups (
+                follow_up_id TEXT PRIMARY KEY, idem_key TEXT NOT NULL, words TEXT NOT NULL, body TEXT NOT NULL,
+                milestone TEXT NOT NULL, state TEXT NOT NULL, after_id INTEGER NOT NULL,
+                created REAL NOT NULL, settled REAL)""")
+            self._db.execute("CREATE INDEX IF NOT EXISTS follow_ups_key ON follow_ups(idem_key, created)")
+            # A new task held back because a running task is already editing the same project: it
+            # starts when that one ends. Clients get the blocker's name in ``waiting``.
             columns = {row[1] for row in self._db.execute("PRAGMA table_info(runs)")}
+            if "waiting" not in columns:
+                self._db.execute("ALTER TABLE runs ADD COLUMN waiting TEXT")
             if "own_title" not in columns:  # the task's name from its words or the titler, never a thread title
                 self._db.execute("ALTER TABLE runs ADD COLUMN own_title TEXT")
             self._db.execute("CREATE INDEX IF NOT EXISTS runs_session ON runs(session_id)")
@@ -622,6 +634,49 @@ class StateStore:
             items.append(item)
         return items
 
+    # -- follow-ups added to a running task (receipts.py) --------------------------------
+    def add_follow_up(self, key: str, words: str, body: str, milestone: str, after_id: int) -> str:
+        follow_up_id = "fu_" + secrets.token_hex(8)
+        with self._lock, self._db:
+            self._db.execute("INSERT INTO follow_ups VALUES (?,?,?,?,?,?,?,?,NULL)",
+                             (follow_up_id, key, notice_text(words, 200) or "", body[:4000], re.sub(r"\s+", " ", milestone).strip()[:240],
+                              "queued", int(after_id or 0), time.time()))
+            self._db.execute("UPDATE runs SET updated=? WHERE idem_key=?", (time.time(), key))
+        return follow_up_id
+
+    def open_follow_ups(self, key: str) -> list[dict[str, Any]]:
+        """Follow-ups to this task still queued (not yet seen in its transcript), oldest first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT follow_up_id, words, body, after_id FROM follow_ups WHERE idem_key=? AND state='queued' "
+                "ORDER BY created", (key,)).fetchall()
+        return [{"id": i, "words": w, "body": b, "after_id": a} for i, w, b, a in rows]
+
+    def settle_follow_up(self, follow_up_id: str, state: str) -> bool:
+        """queued -> landed | not_read, once (a settled receipt never changes again)."""
+        if state not in {"landed", "not_read"}:
+            return False
+        with self._lock, self._db:
+            cur = self._db.execute("UPDATE follow_ups SET state=?, settled=? WHERE follow_up_id=? AND state='queued'",
+                                   (state, time.time(), follow_up_id))
+            if cur.rowcount:
+                self._db.execute("UPDATE runs SET updated=? WHERE idem_key=(SELECT idem_key FROM follow_ups "
+                                 "WHERE follow_up_id=?)", (time.time(), follow_up_id))
+        return cur.rowcount > 0
+
+    def follow_ups(self, key: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT words, milestone, state, created FROM follow_ups WHERE idem_key=? ORDER BY created DESC LIMIT 10",
+                (key,)).fetchall()
+        return [{"text": w, "milestone": m, "state": s, "at": c} for w, m, s, c in reversed(rows)]
+
+    # -- a new task waiting for another to finish (same-project fence) -------------------
+    def set_waiting(self, key: str, waiting: dict[str, Any] | None) -> None:
+        with self._lock, self._db:
+            self._db.execute("UPDATE runs SET waiting=?, updated=? WHERE idem_key=?",
+                             (json.dumps(waiting) if waiting else None, time.time(), key))
+
     def progress(self, key: str, kind: str, text: str) -> None:
         """Persist only bounded, user-facing milestones; never tool arguments or reasoning."""
         if kind not in {"request", "milestone", "tool", "result"} or not text.strip():
@@ -915,7 +970,7 @@ class StateStore:
              assistant_name: str = "Hermes") -> dict[str, Any] | None:
         """The latest admitted job or one exact server-owned run, including past calls."""
         cols = """idem_key,run_id,status,updated,short_status,detail,progress_updated,
-                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,shared,session_id,set_aside,seen"""
+                  status_source,result_json,title,dismissed,summary,continued,settled_at,failure,shared,session_id,set_aside,seen,waiting"""
         with self._lock:
             if idem_key:
                 row = self._db.execute(f"SELECT {cols} FROM runs WHERE idem_key=?", (idem_key,)).fetchone()
@@ -927,10 +982,10 @@ class StateStore:
                 return None
             (key, actual_run_id, status, updated, short_status, detail, progress_updated,
              status_source, result_json, title, dismissed, summary, continued, settled_at, failure, shared,
-             session_id, set_aside, seen) = row
+             session_id, set_aside, seen, waiting) = row
             events = self._db.execute(
                 "SELECT kind,text,created FROM work_events WHERE idem_key=? ORDER BY seq DESC LIMIT 30", (key,)).fetchall()
-        stale = status not in TERMINAL | {"waiting_for_approval"} and time.time() - updated > STALE_AFTER_S
+        stale = status not in TERMINAL | {"waiting_for_approval", "waiting_on_task"} and time.time() - updated > STALE_AFTER_S
         display_status, display_detail, display_updated = short_status, detail, progress_updated
         source = (status_source or "authored") if short_status else None
         if stale:
@@ -964,6 +1019,23 @@ class StateStore:
         if seen:
             # Nothing to read (a home command that went through): not a new answer (only sent when true).
             work["seen"] = True
+        follow_ups = self.follow_ups(key)
+        if follow_ups:
+            # What the user added while it ran, each with what is known of it: queued (Hermes took it, the
+            # task hasn't read it yet), landed (it is in the task's transcript) or not_read (it ended first).
+            # ``milestone`` is the matching "You added: ..." step text.
+            work["follow_ups"] = follow_ups
+        if waiting and status == "waiting_on_task":
+            try:
+                held = json.loads(waiting)
+            except ValueError:
+                held = None
+            if isinstance(held, dict) and held.get("name"):
+                # Held back so it doesn't edit the same project at once: starts when that task ends.
+                work["waiting"] = {"name": str(held["name"])[:120], "project": str(held.get("project") or "")[:80]}
+                work["short_status"] = "Waiting for another task"
+                work["detail"] = f"Starts when \"{work['waiting']['name']}\" finishes (same project)."
+                work["status_source"] = "system"
         why = public_failure(failure, self.hermes_home) if status == "failed" else None
         if why:
             # Speakeasy's own words for why it failed: a row label when the reason is known, and a

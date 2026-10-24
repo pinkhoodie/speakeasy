@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 MAX_BODY = 512 * 1024
 RUN_EVENTS_TIMEOUT_S = 1800
+# What Speakeasy may ever answer an approval with. "always" (permanent) is never sent, from any
+# surface: a spoken or tapped answer grants at most the rest of one task.
+APPROVAL_CHOICES = frozenset({"once", "session", "deny"})
 # The image formats every vision provider Hermes talks to accepts as they are.
 IMAGE_DATA_URL_RE = re.compile(r"data:image/(?:jpeg|png|gif|webp);base64,[A-Za-z0-9+/]+={0,2}")
 
@@ -233,9 +236,15 @@ class HermesAPI:
         except HermesError:
             return False
 
-    def approve(self, run_id: str, request_id: str, choice: str) -> dict[str, Any]:
-        if choice not in {"once", "deny"}:
-            raise HermesError(400, "approval choice must be once or deny")
+    def approve(self, run_id: str, request_id: str, choice: str,
+                offered: Sequence[str] | None = None) -> dict[str, Any]:
+        """Answer one approval request. Speakeasy never grants a permanent approval ("always"), from
+        any surface; "session" (the rest of this task) only when Hermes offered it for this request
+        (the ``choices`` on its ``approval.request`` event, passed as ``offered``)."""
+        if choice not in APPROVAL_CHOICES:
+            raise HermesError(400, "approval choice must be once, session or deny")
+        if choice == "session" and "session" not in (offered or ()):
+            raise HermesError(400, "this approval can only be allowed once or denied")
         return self._json("POST", f"/v1/runs/{run_id}/approval", {"request_id": request_id, "choice": choice})
 
     def session_messages(self, session_id: str, limit: int = 60, timeout: float = 1.5) -> list[dict[str, Any]]:

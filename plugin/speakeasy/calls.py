@@ -27,12 +27,14 @@ from . import channels, continuity, failures, router, threads
 from .duck import Ducker
 from . import home_control as home_control_mod
 from . import instant as instant_mod
+from . import fence as fence_mod
 from . import jev as jev_mod
+from . import receipts
 from . import quick as quick_mod
 from . import views as views_mod
 from . import attachments as A
 from .attachments import Attachment, CallAttachments
-from .hermes_api import user_content
+from .hermes_api import HermesError, user_content
 from .settings import valid_delivery_target
 from .prompt import builder as P
 from . import text as text_mod
@@ -52,6 +54,12 @@ SETTLE_S = 1.5         # wait this long after a handoff for the user to keep goi
 SETTLE_MAX_S = 6.0     # and never longer than this in total
 ABSORB_WINDOW_S = 15.0 # a handoff of words already folded into an earlier task is dropped
 ECHO_WINDOW_S = 8.0    # a second handoff this soon that only repeats the last request's words is dropped
+# The card's step for an approval answered from the call (the panel's buttons record the same words).
+APPROVED_MILESTONE = {"once": "Approved once", "session": "Approved for the rest of this task", "deny": "Approval denied"}
+FOLLOW_UP_POLL_S = 2.0 # how often a queued follow-up is looked for in the task's transcript (receipts.py)
+FOLLOW_UP_SETTLE_S = 3.0  # after the run ends, how long its transcript gets to show a follow-up it read
+FENCE_POLL_S = 2.0     # how often a task held behind another (same project) checks on it
+FENCE_MAX_WAIT_S = 4 * 3600  # never held longer than this: it then starts and says so
 
 
 def _same_words(fragment: str, request: str) -> bool:
@@ -95,7 +103,7 @@ EARLY_PREFIX = "early_"    # handoffs for words said while the call was still co
 EARLY_MAX_CHARS = 1000
 MAX_TASKS = 8
 ACTIVE_RUN_STATES = {"admitting", "running", "working", "waiting_for_approval", "resolving_approval",
-                     "cancel_requested"}
+                     "cancel_requested", "waiting_on_task"}
 CONTINUITY_WAIT_S = 600
 THREAD_OPEN_WAIT_S = 20
 # Thread tasks whose answer this process is waiting for right now, with when the wait began
@@ -266,6 +274,13 @@ class BackendRun:
     activity_count: int = 0         # steps seen so far
     told_count: int = 0             # steps already covered by a spoken update
     told: list[str] = dataclasses.field(default_factory=list)      # updates already spoken
+    # Same-project fence (fence.py): the projects this task names or touched, whether it is known to
+    # edit them, and, for a task held behind another, the blocker and whether the user said go anyway.
+    projects: set[str] = dataclasses.field(default_factory=set)
+    edits: bool = False
+    blocked_by: str | None = None
+    released: bool = False
+    held_words: list[str] = dataclasses.field(default_factory=list)  # added while it waited to start
 
     @property
     def say_id(self) -> str:
@@ -391,7 +406,8 @@ def publish_state(store: Any, interaction: Interaction, assistant_name: str = "H
         approval = None
         if pending:
             approval = {"run_id": pending.get("run_id"), "request_id": pending.get("request_id"),
-                        "description": pending.get("description"), "choices": ["once", "deny"]}
+                        "description": pending.get("description"),
+                        "choices": [c for c in (pending.get("choices") or ["once", "deny"]) if c in {"once", "session", "deny"}]}
         tasks = interaction_tasks(store, interaction, assistant_name)
         drafts = [dict(d, task_id=t["task_id"], run_id=t.get("run_id")) for t in tasks for d in t.get("email_drafts") or []]
         feed.publish("interaction", snap)
@@ -1366,6 +1382,200 @@ class SidebandWorker:
         await self._drop(delegation_id, revision, "Set aside", None)
         return await self.set_aside(target, by_voice=True)
 
+    # -- answering an approval by voice --------------------------------------------------------
+    def pending_approvals(self) -> list[tuple[str, BackendRun]]:
+        """This call's tasks waiting on an approval Speakeasy can answer (oldest first)."""
+        with self.interaction.lock:
+            runs = [(t, r) for t, r in self.interaction.runs.items()
+                    if r.status == "waiting_for_approval" and r.approval and r.run_id]
+        return [(t, r) for t, r in runs if t not in self.set_aside_tasks]
+
+    async def _approve_by_voice(self, delegation_id: str, revision: int, request: str, marked: Any = None) -> bool:
+        """"Just this once", "no", "for the rest of this task" while an approval waits: answer it.
+        Never "always" (refused here and in hermes_api.approve); "session" only when Hermes offered it
+        for that request. With several approvals waiting and nothing naming one, ask which."""
+        pending = self.pending_approvals()
+        if not pending:
+            return False
+        choice = router.approval_answer(request)
+        if choice is None:
+            return False
+        focused, _ = self.focus()
+        target = next(((t, r) for t, r in pending if t in {marked, focused}), None)
+        if target is None and len(pending) > 1:
+            await self._drop(delegation_id, revision, "Asked which approval", None)
+            await self.append("session.commentary.append", delegation_id,
+                              P.approval_which([(r.approval or {}).get("description") or "" for _, r in pending]))
+            return True
+        task_id, run = target or pending[0]
+        offered = list((run.approval or {}).get("choices") or ["once", "deny"])
+        await self._drop(delegation_id, revision, "Answered the approval", None)
+        if choice == "always":
+            await self.append("session.commentary.append", delegation_id,
+                              P.approval_always_refused("session" in offered))
+            return True
+        if choice == "session" and "session" not in offered:
+            await self.append("session.commentary.append", delegation_id, P.SESSION_NOT_OFFERED_SPOKEN)
+            return True
+        choice = "once" if choice == "yes" else choice
+        logger.info("speakeasy: approval answered by voice (%s)", choice)
+        confirmed = await self.resolve_approval(task_id, choice)
+        if confirmed is None:
+            await self.append("session.commentary.append", delegation_id, P.approval_failed_spoken(self.names))
+            return True
+        await self.append("session.commentary.append", delegation_id, P.approval_done_spoken(choice))
+        return True
+
+    async def resolve_approval(self, task_id: str, choice: str) -> str | None:
+        """Send one answer to the approval a task is waiting on. Returns the choice once Hermes
+        confirmed it (a 2xx reply), else None with the approval left waiting (or ambiguous when the
+        reply never came)."""
+        with self.interaction.lock:
+            run = self.interaction.runs.get(task_id)
+            approval = run.approval if run else None
+            if run is None or run.status != "waiting_for_approval" or not approval or not run.run_id:
+                return None
+            run.approval, run.status = None, "resolving_approval"
+        self.publish()
+        try:
+            await asyncio.to_thread(self.hermes.approve, run.run_id, approval["request_id"], choice,
+                                    approval.get("choices") or ["once", "deny"])
+        except HermesError as exc:
+            logger.warning("speakeasy: approval by voice refused (%s)", exc.status)
+            with self.interaction.lock:
+                if run.status == "resolving_approval":
+                    if 400 <= exc.status < 500:
+                        run.approval, run.status = approval, "waiting_for_approval"  # nothing changed
+                    else:
+                        run.status, run.error = "ambiguous", "Backend approval outcome is ambiguous"
+            self.publish()
+            return None
+        except Exception:
+            with self.interaction.lock:
+                if run.status == "resolving_approval":
+                    run.status, run.error = "ambiguous", "Backend approval outcome is ambiguous"
+            self.publish()
+            return None
+        with self.interaction.lock:
+            if run.status == "resolving_approval":
+                run.status = "working"
+        self.store.update_run(run.idem_key, None, "working")
+        self.store.progress(run.idem_key, "milestone", APPROVED_MILESTONE[choice])
+        self.publish()
+        return choice
+
+    # -- same-project fence: what the user says about a task held behind another -------------
+    async def _fence_by_voice(self, delegation_id: str, revision: int, request: str, marked: Any = None) -> bool:
+        with self.interaction.lock:
+            held = [(t, r) for t, r in self.interaction.runs.items()
+                    if r.status == "waiting_on_task" and not r.released]
+        if not held:
+            return False
+        choice = router.fence_choice(request)
+        if choice is None:
+            return False
+        task_id, run = next(((t, r) for t, r in held if t == marked), held[-1])
+        with self.interaction.lock:
+            blocker = self.interaction.runs.get(run.blocked_by or "")
+        await self._drop(delegation_id, revision, "Answered about the waiting task", None)
+        if choice == "wait":
+            await self.append("session.commentary.append", delegation_id, P.FENCE_WAITING_SPOKEN)
+        elif choice == "anyway":
+            with self.interaction.lock:
+                run.released = True
+            await self.append("session.commentary.append", delegation_id, P.FENCE_ANYWAY_SPOKEN)
+        else:
+            if blocker is None or not blocker.run_id or blocker.run_id.startswith(LOCAL_RUN_PREFIX) \
+                    or blocker.status not in ACTIVE_RUN_STATES:
+                await self.append("session.commentary.append", delegation_id, P.FENCE_CANT_STOP_SPOKEN)
+                return True
+            name = self.store.title(blocker.idem_key) or notice_text(self.store.request_text(blocker.idem_key), 80) or "that task"
+            with self.interaction.lock:
+                blocker.status = "cancel_requested"
+            self.store.update_run(blocker.idem_key, None, "cancel_requested")
+            self.store.progress(blocker.idem_key, "milestone", "Stop requested")
+            self.publish()
+            try:
+                await asyncio.to_thread(self.hermes.stop, blocker.run_id)
+            except Exception:
+                with self.interaction.lock:
+                    if blocker.status == "cancel_requested":
+                        blocker.status, blocker.error = "ambiguous", "Backend stop outcome is ambiguous"
+                self.publish()
+                await self.append("session.commentary.append", delegation_id, P.FENCE_CANT_STOP_SPOKEN)
+                return True
+            await self.append("session.commentary.append", delegation_id, P.fence_stopping_spoken(name))
+        return True
+
+    def fence_blocker(self, task_id: str, request: str,
+                      exclude: set[str | None] | None = None) -> tuple[BackendRun, str] | None:
+        """A running task already editing the project this new request would edit, and that
+        project's name; None when unsure (fence.py says when it is sure)."""
+        if not fence_mod.is_edit_request(request):
+            return None
+        wanted = fence_mod.keys_in_text(request)
+        if not wanted:
+            return None
+        with self.interaction.lock:
+            running = [r for t, r in self.interaction.runs.items()
+                       if t != task_id and t not in (exclude or set()) and r.status in ACTIVE_RUN_STATES]
+        for other in reversed(running):
+            asked = self.store.request_text(other.idem_key) or ""
+            with self.interaction.lock:
+                touched, edits = set(other.projects), other.edits
+            keys = (fence_mod.keys_in_text(asked) | touched) if fence_mod.is_edit_request(asked) else \
+                (touched if edits else set())
+            project = fence_mod.overlap(wanted, keys)
+            if project:
+                return other, project
+        return None
+
+    async def wait_for_fence(self, backend: BackendRun, blocker: BackendRun, project: str, delegation_id: str) -> None:
+        """Hold a new task until the task editing the same project ends (or the user says go)."""
+        idem = backend.idem_key
+        name = self.store.title(blocker.idem_key) or notice_text(self.store.request_text(blocker.idem_key), 80) or "the other task"
+        with self.interaction.lock:
+            backend.status, backend.blocked_by = "waiting_on_task", blocker.delegation_id
+        self.store.update_run(idem, None, "waiting_on_task")
+        self.store.set_waiting(idem, {"name": name, "project": project})
+        self.store.progress(idem, "milestone", notice_text(f"Waiting for \"{name}\" ({project})", 200) or "Waiting")
+        self.publish()
+        logger.info("speakeasy: new task held behind a running task on the same project")
+        await self.append("session.commentary.append", delegation_id, P.fence_spoken(name, project))
+        waited = 0.0
+        while True:
+            with self.interaction.lock:
+                released, ended = backend.released, blocker.status
+            if released or ended not in ACTIVE_RUN_STATES or waited >= FENCE_MAX_WAIT_S:
+                break
+            self.store.touch(idem)
+            await asyncio.sleep(FENCE_POLL_S)
+            waited += FENCE_POLL_S
+        with self.interaction.lock:
+            backend.status = "admitting"
+            released, ended = backend.released, blocker.status
+        self.store.set_waiting(idem, None)
+        self.store.update_run(idem, None, "admitting")
+        self.store.progress(idem, "milestone", "Started")
+        self.publish()
+        if released:
+            return
+        if ended in ACTIVE_RUN_STATES:  # waited the longest it may: start, and say why
+            await self.append("session.commentary.append", delegation_id, P.fence_timeout_spoken(name))
+        elif ended == "completed":
+            await self.quiet("fence:" + idem, delegation_id, P.fence_started_note(name, ended))
+        else:
+            await self.append("session.commentary.append", delegation_id, P.fence_started_note(name, ended))
+
+    async def release_fenced(self, backend: BackendRun, status: str) -> None:
+        """A task ended: tasks held behind it start on their own (wait_for_fence polls; this only
+        republishes so the board updates at once)."""
+        with self.interaction.lock:
+            held = any(r.blocked_by == backend.delegation_id and r.status == "waiting_on_task"
+                       for r in self.interaction.runs.values())
+        if held:
+            self.publish()
+
     async def _drop(self, delegation_id: str, revision: int, reason: str, spoken: str | None) -> None:
         """A handoff that should never become a task. It ends visibly (no lingering "Waiting for")."""
         backend = BackendRun(delegation_id, revision, self._idem(delegation_id, revision))
@@ -1419,6 +1629,10 @@ class SidebandWorker:
             return
         aside = router.set_aside_kind(last_request)
         if aside and await self._set_aside_by_voice(delegation_id, revision, aside, marked):
+            return
+        if await self._approve_by_voice(delegation_id, revision, last_request, marked):
+            return
+        if await self._fence_by_voice(delegation_id, revision, last_request, marked):
             return
         if not marked and await self._talk_not_work(delegation_id, revision, last_request, context):
             return
@@ -2368,6 +2582,17 @@ class SidebandWorker:
             # this) or works in a chat thread (a group chat's session) never gets what was shared.
             await answered_home("shared things never go into a task that posts to a channel or a thread")
             return
+        if status == "waiting_on_task":
+            # Not started yet (held behind another task): what they add goes in with it when it starts.
+            with self.interaction.lock:
+                target.held_words.append(part.request)
+                self.interaction.latest_delegation_id = target.delegation_id
+            self.drop_capture(delegation_id)
+            self.store.progress(key, "milestone", f"You added: {notice_text(part.request, 200)}")
+            self.publish()
+            self.handoff_at.pop(delegation_id, None)
+            await self.append("session.thinking.append", delegation_id, P.held_follow_up_note(earlier))
+            return
         if status in ACTIVE_RUN_STATES and not run_id and await self.message_thread_task(delegation_id, target, part.request):
             return
         opening_thread = placed is None and not run_id and status in ACTIVE_RUN_STATES and target.deliver_to
@@ -2399,17 +2624,17 @@ class SidebandWorker:
             text = (P.shared_steer_text(self.names, part.request, P.shared_block(self.names, items, attached=False))
                     if items else P.steer_text(self.names, part.request))
             nameable = all(i["path"] for i in items)  # an image with no saved copy can't be pointed at
-            accepted = nameable and await asyncio.to_thread(self.hermes.steer, run_id, text)
+            accepted = nameable and await self.steer_follow_up(target, key, part.request, text)
             if accepted:
                 if items:
                     self.store.add_shared(key, items)
                 else:
                     self.drop_capture(delegation_id)  # a plain follow-up: words only, the capture is dropped
-                self.store.progress(key, "milestone", f"You added: {notice_text(part.request, 200)}")
                 with self.interaction.lock:
                     self.interaction.latest_delegation_id = target.delegation_id
                 self.publish()
-                await self.append("session.thinking.append", delegation_id, P.added_to_task_note(earlier))
+                # Accepted only means queued: the voice may say it's lined up, not that the task has it.
+                await self.append("session.thinking.append", delegation_id, P.follow_up_queued_note(earlier))
                 self.handoff_at.pop(delegation_id, None)
                 return
         work = self.store.work(idem_key=key) or {}
@@ -2425,6 +2650,83 @@ class SidebandWorker:
         await self.start_task(delegation_id, revision, context, f"{part.request} (following up: {earlier})",
                               focus=focus, session_id=None if carrying and placed else self.store.session_for(key),
                               replaces=target.delegation_id, deliver_to=None if carrying else target.deliver_to)
+
+    # -- follow-up receipts (receipts.py) ----------------------------------------------------
+    async def steer_follow_up(self, target: BackendRun, key: str, words: str, text: str) -> bool:
+        """Send what the user added to a running task. Accepted means Hermes queued it: the card
+        shows it as queued, and it only turns to landed once its text is in the task's transcript."""
+        after = await asyncio.to_thread(threads.last_message_id, self.rt.state_db)
+        if not target.run_id or not await asyncio.to_thread(self.hermes.steer, target.run_id, text):
+            return False
+        milestone = f"You added: {notice_text(words, 200)}"
+        self.store.progress(key, "milestone", milestone)
+        self.store.add_follow_up(key, words, text, milestone, after)
+        loop = asyncio.get_running_loop()
+        watch = loop.create_task(self.watch_follow_ups(target))
+        self.dispatch_tasks.add(watch)
+        watch.add_done_callback(self.dispatch_tasks.discard)
+        return True
+
+    def _landed_now(self, key: str) -> list[dict[str, Any]]:
+        """Queued follow-ups of this task now seen in its transcript, marked landed."""
+        session = self.store.session_for(key)
+        found = []
+        for item in self.store.open_follow_ups(key):
+            if receipts.landed(self.rt.state_db, session, item["after_id"], item["body"]) and \
+                    self.store.settle_follow_up(item["id"], receipts.LANDED):
+                found.append(item)
+        return found
+
+    async def watch_follow_ups(self, backend: BackendRun) -> None:
+        """While the run works, look for its queued follow-ups in its transcript (receipts.py)."""
+        key = backend.idem_key
+        while True:
+            with self.interaction.lock:
+                running = backend.status in ACTIVE_RUN_STATES
+            if not running or not self.store.open_follow_ups(key):
+                return
+            try:
+                landed = await asyncio.to_thread(self._landed_now, key)
+            except RuntimeError:  # shutting down: the run's end settles what is left
+                return
+            if landed:
+                self.publish()
+                if self.call_connected():
+                    earlier = notice_text(self.store.request_text(key), 200) or "the task"
+                    for item in landed:
+                        await self.quiet("landed:" + item["id"], None, P.follow_up_landed_note(earlier, item["words"]))
+            await asyncio.sleep(FOLLOW_UP_POLL_S)
+
+    async def settle_follow_ups(self, backend: BackendRun, pending_steer: Any, status: str | None = None,
+                                modern: bool = True) -> list[str]:
+        """The run ended: every follow-up still queued is now landed or not read. Returns the words of
+        the ones it never read, so the voice can say so and offer them as new work.
+
+        Landed: its text is in the transcript, or the run completed (or failed) and Hermes handed back
+        no undelivered steer text (its finalizer returns whatever is still queued as ``pending_steer``,
+        so nothing handed back means it was drained into the model's messages). A stop clears queued
+        text without handing it back, so a stopped run needs the transcript to count it as read."""
+        key = backend.idem_key
+        if not self.store.open_follow_ups(key):
+            return []
+        status = status or backend.status
+        waited = 0.0
+        while True:
+            await asyncio.to_thread(self._landed_now, key)
+            open_items = self.store.open_follow_ups(key)
+            if not open_items or waited >= FOLLOW_UP_SETTLE_S:
+                break
+            if any(receipts.still_pending(pending_steer, i["body"]) for i in open_items):
+                break  # handed back undelivered: no transcript wait will change that
+            await asyncio.sleep(0.5)
+            waited += 0.5
+        unread: list[str] = []
+        for item in self.store.open_follow_ups(key):
+            drained = modern and status in {"completed", "failed"} and not receipts.still_pending(pending_steer, item["body"])
+            if self.store.settle_follow_up(item["id"], receipts.LANDED if drained else receipts.NOT_READ) and not drained:
+                unread.append(item["words"])
+        self.publish()
+        return unread
 
     async def message_thread_task(self, delegation_id: str, target: BackendRun, request: str) -> bool:
         """A task running in a chat thread: put what was just said into that thread, exactly as if it
@@ -2515,11 +2817,20 @@ class SidebandWorker:
         if request:
             self.store.progress(idem, "request", request)
             self.name_task(idem, request)
+        # Same-project fence: a new edit to a project a running task is already editing waits for it.
+        fenced = self.fence_blocker(task_id, request, exclude={replaces}) if request else None
+        if fenced is not None:
+            self.handoff_at.pop(delegation_id, None)
+            await self.wait_for_fence(backend, fenced[0], fenced[1], delegation_id)
+            with self.interaction.lock:
+                added, backend.held_words = list(backend.held_words), []
+            if added:
+                focus = (focus or request) + "\n\nThey added while it waited to start: " + " / ".join(added)
         with self.interaction.lock:
             others = [r.idem_key for r in self.interaction.runs.values()
                       if r.delegation_id != task_id and r.status in ACTIVE_RUN_STATES]
         parallel = [r for r in (notice_text(self.store.request_text(k), 80) for k in others[-4:]) if r]
-        if voice_id is None:
+        if voice_id is None and fenced is None:
             await self.quiet("started", delegation_id, P.work_started_note(parallel))
             if deliver_to and not replaces:
                 await self.say_where(delegation_id, ack, place=ack_place, named=named)
@@ -2933,7 +3244,7 @@ class SidebandWorker:
         status = result.get("status")
         if status in TERMINAL:
             event = {"event": f"run.{status}"}
-            for field in ("output", "error"):  # a failed run's status carries Hermes' error line too
+            for field in ("output", "error", "pending_steer", "interrupted"):  # a failed run's status carries Hermes' error line too
                 if field in result:
                     event[field] = result[field]
             await self.handle_hermes_event(backend, event)
@@ -3005,6 +3316,11 @@ class SidebandWorker:
                     if not await self.maybe_speak_progress(backend, progress[0]):
                         await self.maybe_note_status(backend, progress[1])
             elif backend.status != "ambiguous":
+                keys, edits = fence_mod.keys_from_tool(event.get("tool"), event.get("preview"))
+                if keys:
+                    with self.interaction.lock:
+                        backend.projects |= keys
+                        backend.edits = backend.edits or edits
                 derived = derive_tool_status(event.get("tool"), event.get("preview"))
                 if derived:
                     self.record_activity(backend, derived[1])
@@ -3014,8 +3330,11 @@ class SidebandWorker:
             if not isinstance(request_id, str) or not ID_RE.fullmatch(request_id):
                 return
             description = safe_user_text(event.get("description") or event.get("reason"), 500)
+            # The answers Hermes offers for this request; Speakeasy never sends "always" (hermes_api.approve).
+            offered = event.get("choices") if isinstance(event.get("choices"), list) else []
+            choices = ["once"] + (["session"] if "session" in offered else []) + ["deny"]
             safe = {"request_id": request_id, "description": description or "Consequential action",
-                    "choices": ["once", "deny"]}
+                    "choices": choices}
             with self.interaction.lock:
                 if backend.status == "ambiguous":
                     return
@@ -3024,7 +3343,9 @@ class SidebandWorker:
             self.store.progress(idem, "milestone", "Waiting for your approval")
             if not self.call_connected():
                 self.notices.needs_you(request_id, safe["description"])
-            await self.append("session.commentary.append", delegation_id, P.approval_note(self.names))
+            await self.append("session.thinking.append", delegation_id, P.approval_rules_note(self.names))
+            await self.append("session.commentary.append", delegation_id,
+                              P.approval_note(self.names, description, choices))
         elif kind and kind.startswith("run."):
             status = kind.split(".", 1)[1]
             if status in TERMINAL and not backend.run_id:
@@ -3066,6 +3387,10 @@ class SidebandWorker:
                 "interrupted": "Work interrupted"}.get(status, "Work ended")))
             with self.interaction.lock:
                 backend.status, backend.approval = status, None
+            # ``interrupted`` rides on every terminal event from a Hermes that also hands back unread steer
+            # text (pending_steer); without it, "nothing handed back" proves nothing.
+            unread = await self.settle_follow_ups(backend, event.get("pending_steer"), status,
+                                                  modern="interrupted" in event or "pending_steer" in event)
             stored_drafts = [self.store.add_draft(idem, self.store.session_for(idem), d) for d in drafts]
             # Long reports get sorted into parts; any answer with numbers in it may also get a picture.
             if status == "completed" and result and (len(result.get("full") or "") >= 400 or (
@@ -3146,6 +3471,12 @@ class SidebandWorker:
                 await self.append("session.commentary.append", delegation_id, P.FAILED_SPOKEN)
             else:
                 await self.append("session.commentary.append", delegation_id, P.ended_without_result(status))
+            if unread:
+                # What they added never reached it: say so (after its outcome) and offer it as new work.
+                await self.append("session.thinking.append", delegation_id, P.follow_up_not_read_note(unread))
+                await self.append("session.commentary.append", delegation_id,
+                                  P.follow_up_not_read_spoken(unread, status == "completed"))
+            await self.release_fenced(backend, status)
 
 
 LATE_RESULT_S = 20.0  # the user spoke in the last 20 s of a task that took longer: say what it answers

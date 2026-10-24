@@ -802,9 +802,111 @@ def split_note(names: Names, parts: list[str]) -> str:
             + "; ".join(parts) + ". Results arrive one by one; say which part each answers.")[:2000]
 
 
-def approval_note(names: Names) -> str:
-    return (f"{names.assistant_name} needs explicit approval before continuing. "
-            "Review Approve once or Deny in the panel.")
+def approval_note(names: Names, description: str | None = None, choices: list[str] | tuple[str, ...] = ("once", "deny")) -> str:
+    """Spoken once when a running task stops for an approval: what it wants to do, in plain words, and
+    the answers a voice reply can give (never "always"). Works read out as it is."""
+    what = notice_text(description, 240) or "take a step it flagged as consequential"
+    offer = "just this once, for the rest of this task, or not" if "session" in choices else "just this once, or not"
+    return f"{names.assistant_name} needs your OK first: {what.rstrip('.')}. Should I allow it {offer}?"
+
+
+def approval_rules_note(names: Names) -> str:
+    """Background with every approval question: how a spoken answer is handled."""
+    return (f"An approval is waiting. You asked about it once; don't ask again or remind {names.user}. Their answer "
+            "is handled by Speakeasy: never say it is approved, allowed or declined until you are told Hermes took it. Never offer or accept allowing it always or permanently. The Approve once and Deny "
+            "buttons on the card work too.")
+
+
+def approval_done_spoken(choice: str) -> str:
+    """Spoken only after Hermes confirmed the answer (a 2xx reply to the approval route)."""
+    return {"once": "Done, allowed just this once.", "session": "Done, it's allowed for the rest of this task.",
+            "deny": "Okay, declined. It won't do that."}.get(choice, "Done.")
+
+
+def approval_failed_spoken(names: Names) -> str:
+    return (f"That approval didn't go through, so nothing changed. It's still waiting; you can use the "
+            f"buttons on the card, or tell me again.")
+
+
+def approval_always_refused(session_offered: bool) -> str:
+    more = ", or for the rest of this task" if session_offered else ""
+    return (f"I can't allow that permanently from here. I can allow it just this once{more}, or decline it. "
+            "Which do you want?")
+
+
+SESSION_NOT_OFFERED_SPOKEN = ("That one can only be allowed one time, not for the whole task. "
+                              "Allow it just this once, or not?")
+
+
+def approval_which(descriptions: list[str]) -> str:
+    listed = _listed([f"\"{notice_text(d, 80) or 'a step'}\"" for d in descriptions[:4]])
+    return f"{len(descriptions)} things are waiting for your OK: {listed}. Which one do you mean?"
+
+
+# -- what the user adds to a running task (receipts.py) -------------------------------------
+
+def follow_up_queued_note(earlier: str) -> str:
+    """Hermes accepted a follow-up for a running task: it is queued, not yet read."""
+    return (f"Queued: what they just said is lined up for the task already working on: {earlier}. Hermes took it, "
+            "but the task has not read it yet; it does at its next step. Acknowledge it in a few words (for "
+            "example that it's lined up for that task). Do not say the task has it, is on it or that it's done. "
+            "If a later note says it was read, you may say so if they ask.")
+
+
+def follow_up_landed_note(earlier: str, words: str) -> str:
+    return (f"Delivered: the task working on {earlier} has now read what they added (\"{notice_text(words, 160)}\"). "
+            "Say nothing unless they ask about it.")
+
+
+def follow_up_not_read_spoken(words: list[str], finished: bool) -> str:
+    """The task ended with something the user added still unread: say so and offer to start it."""
+    quoted = _listed([f"\"{notice_text(w, 120)}\"" for w in words[:3]])
+    how = "finished" if finished else "stopped"
+    return (f"One thing: the task {how} before it read what you added, {quoted}. "
+            "Want me to start that as new work?")
+
+
+def follow_up_not_read_note(words: list[str]) -> str:
+    """Background with the not-read line: what "yes" to the offer means."""
+    quoted = "; ".join(notice_text(w, 160) or "" for w in words[:3])
+    return ("The task ended before it read what they added. If they say yes to starting it as new work, hand "
+            f"off exactly this as a new request: {quoted}. If they say no, drop it.")
+
+
+# -- same-project fence (fence.py) ------------------------------------------------------------
+
+def fence_spoken(blocker: str, project: str) -> str:
+    return (f"\"{notice_text(blocker, 80)}\" is already working on {project}, so I've lined this up to start when "
+            "that one finishes. I can stop that one instead, or start this now anyway. Which do you want?")
+
+
+def fence_started_note(blocker: str, ended: str) -> str:
+    """The task held behind another started; spoken when the blocker failed or was stopped."""
+    if ended == "completed":
+        return (f"The task waiting for \"{notice_text(blocker, 80)}\" has started now that it finished. "
+                "Say nothing unless they ask.")
+    how = {"cancelled": "was stopped", "failed": "failed", "interrupted": "was interrupted"}.get(ended, "ended")
+    return f"\"{notice_text(blocker, 80)}\" {how}, so I've started the task that was waiting for it."
+
+
+def fence_timeout_spoken(blocker: str) -> str:
+    return (f"\"{notice_text(blocker, 80)}\" is still going after a long while, so I've started the task that "
+            "was waiting for it anyway.")
+
+
+def held_follow_up_note(earlier: str) -> str:
+    return (f"Added: what they just said goes in with the task waiting to start ({earlier}); it hasn't started yet. "
+            "Acknowledge it in a few words.")
+
+
+FENCE_WAITING_SPOKEN = "Okay, it stays lined up and starts when the other one is done."
+FENCE_ANYWAY_SPOKEN = "Okay, starting it now alongside the other one."
+FENCE_CANT_STOP_SPOKEN = ("I can't stop that one from here; it runs in its own chat thread. "
+                          "Yours stays lined up, or I can start it now anyway.")
+
+
+def fence_stopping_spoken(blocker: str) -> str:
+    return f"Stopping \"{notice_text(blocker, 80)}\". Yours starts as soon as it has stopped."
 
 
 def draft_waiting_note(names: Names, subject: str | None, to: list[str]) -> str:
