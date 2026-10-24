@@ -10,7 +10,8 @@ extension PreviewFixtures {
                            "orb-idle", "orb-talking", "orb-working", "orb-needs", "orb-failed", "orb-answers",
                            "jobs-answers", "answer-weather", "answer-nightly", "answer-laptops",
                            "declutter-board", "declutter-weather", "declutter-events", "declutter-three", "declutter-many",
-                           "events-board", "answer-events", "answer-matchup", "jobs-set-aside", "job-set-aside"]
+                           "events-board", "answer-events", "answer-matchup", "jobs-set-aside", "job-set-aside",
+                           "job-receipts", "job-not-read", "jobs-fenced", "job-fenced"]
 
     /// Answers the fixtures treat as already read (run ids), so only the new ones show as new.
     static let readAnswers = ["run_weather", "run_notes"]
@@ -41,6 +42,10 @@ extension PreviewFixtures {
         case "job-rollout-after": return JobSetup(open: "job:roll", answers: ["roll_q": "Update the last two now"])
         case "orb-idle", "orb-working", "orb-needs", "orb-failed", "orb-answers": return JobSetup(orb: true)
         case "jobs-answers": return JobSetup()
+        case "job-receipts": return JobSetup(open: "job:site")
+        case "job-not-read": return JobSetup(open: "job:trip")
+        case "jobs-fenced": return JobSetup()
+        case "job-fenced": return JobSetup(open: "job:settings")
         case "answer-weather": return JobSetup(open: "job:wx")
         case "answer-nightly": return JobSetup(open: "job:week")
         case "answer-laptops": return JobSetup(open: "job:laptops")
@@ -334,7 +339,53 @@ extension PreviewFixtures {
             "full": "Brunch at 11, the gallery opening at 3 and the night market from 7. It stays clear all day, 83° at the warmest.",
             "label": "Saturday planned", "views": [planPlaces, planAgenda, fullWeather]])
 
+        // Follow-ups and their receipts: queued (Hermes took it, not read yet), read, and not read.
+        func withFollowUps(_ base: TaskItem, _ items: [(String, String)], age: TimeInterval) -> TaskItem {
+            var json: [String: Any] = ["task_id": base.id, "run_id": base.info.runID ?? "", "status": base.info.status,
+                                       "title": base.info.title ?? "", "updated_at": now.timeIntervalSince1970 - age,
+                                       "updated": now.timeIntervalSince1970 - 1, "status_source": "authored"]
+            if let j = base.info.job { json["job"] = ["id": j.id, "name": j.name] }
+            if let short = base.info.shortStatus { json["short_status"] = short }
+            if let result = base.info.result { json["result"] = ["spoken": result.spoken ?? "", "full": result.full ?? "", "label": result.label ?? ""] }
+            var events: [[String: Any]] = base.info.events.map { ["kind": $0.kind, "text": $0.text, "at": $0.at?.timeIntervalSince1970 ?? 0] }
+            json["follow_ups"] = items.enumerated().map { i, item -> [String: Any] in
+                events.append(["kind": "milestone", "text": "You added: \(item.0)", "at": now.timeIntervalSince1970 - age + Double(i * 20)])
+                return ["text": item.0, "milestone": "You added: \(item.0)", "state": item.1, "at": now.timeIntervalSince1970 - age]
+            }
+            json["events"] = events
+            return TaskItem(json: json)!
+        }
+        let siteRun = withFollowUps(task("site", job: ("site", "Site copy update"), title: "Update the pricing page copy", status: "working",
+                                         age: 30, short: "Editing the pricing section", milestones: ["Read the current page"]),
+                                    [("keep the old prices in a footnote", "landed"), ("and use the shorter headline", "queued")], age: 90)
+        let tripDone = withFollowUps(task("trip", job: ("trip", "Lisbon trip plan"), title: "Plan a four day trip to Lisbon", age: 40,
+                                          milestones: ["Picked the neighborhoods"],
+                                          result: ["spoken": "Here's a four day plan.", "full": "Day one in Alfama, day two in Belém, day three a trip to Sintra, day four in Chiado.",
+                                                   "label": "Four days planned"]),
+                                     [("fewer museums", "not_read")], age: 60)
+        let fixRun = task("fix", job: ("fix", "Checkout bug fix"), title: "Fix the checkout bug in the shop repo", status: "working",
+                          age: 8, short: "Running the checkout tests", milestones: ["Found the failing test"])
+        var fencedJSON: [String: Any] = ["task_id": "settings", "status": "waiting_on_task", "title": "Refactor the settings page",
+                                         "updated": now.timeIntervalSince1970 - 1, "updated_at": now.timeIntervalSince1970 - 20,
+                                         "short_status": "Waiting for another task",
+                                         "detail": "Starts when \"Fix the checkout bug in the shop repo\" finishes (same project).",
+                                         "status_source": "system", "job": ["id": "settings", "name": "Settings page refactor"],
+                                         "waiting": ["name": "Fix the checkout bug in the shop repo", "project": "shop"]]
+        fencedJSON["events"] = [["kind": "request", "text": "Refactor the settings page in the shop repo", "at": now.timeIntervalSince1970 - 25],
+                                ["kind": "milestone", "text": "Waiting for \"Fix the checkout bug in the shop repo\" (shop)", "at": now.timeIntervalSince1970 - 20]]
+        let fenced = TaskItem(json: fencedJSON)!
+
         switch name {
+        case "job-receipts":
+            s.exchange = Exchange(you: "And use the shorter headline", assistant: "Lined up for the pricing page task.", replyStarted: true)
+            s.tasks = [weather, siteRun]
+        case "job-not-read":
+            s.exchange = Exchange(you: "Fewer museums", assistant: "It finished before it read that. Want me to start it as new work?", replyStarted: true)
+            s.tasks = [weather, tripDone]
+        case "jobs-fenced", "job-fenced":
+            s.exchange = Exchange(you: "Refactor the settings page in the shop repo",
+                                  assistant: "The checkout fix is already working on shop, so this starts when it's done.", replyStarted: true)
+            s.tasks = [weather, fixRun, fenced]
         case "declutter-board", "declutter-weather", "declutter-events":
             s.exchange = Exchange(you: "What's the weather this weekend?", assistant: "Warm and clear; it's on your board.", replyStarted: true)
             s.tasks = [declutterWeather, declutterEvents]

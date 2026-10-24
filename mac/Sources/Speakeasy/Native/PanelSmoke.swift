@@ -457,6 +457,22 @@ enum PanelSmoke {
             check(c.model.unreadAnswers > 0 && !c.model.orbAnswerDot && c.model.orbState.badge == 2,
                   "orb-needs: amber wins over an unread answer")
         }
+        // Follow-up receipts and the same-project fence: what the card says of each.
+        for name in ["job-receipts", "job-not-read", "jobs-fenced", "job-fenced"] {
+            guard PreviewFixtures.showJobFixture(name, on: c) else { fail("\(name): fixture missing"); continue }
+            await settle(0.9)
+            onScreen(name)
+            snap(name)
+        }
+        if PreviewFixtures.showJobFixture("job-receipts", on: c) {
+            let info = c.model.state.tasks.first { $0.id == "site" }?.info
+            check(info?.followUps.map(\.state) == [.landed, .queued], "receipts: one read, one only queued")
+        }
+        if PreviewFixtures.showJobFixture("jobs-fenced", on: c) {
+            let held = c.model.state.tasks.first { $0.id == "settings" }
+            check(held.map { taskStatusLine($0.info, now: Date()).0 } == "Waiting for \u{201C}Fix the checkout bug in the shop repo\u{201D}",
+                  "fence: the waiting task names what it waits for")
+        }
         // Board.
         guard PreviewFixtures.showJobFixture("jobs-board", on: c) else { fail("board: fixture missing"); return }
         await settle(1.0)

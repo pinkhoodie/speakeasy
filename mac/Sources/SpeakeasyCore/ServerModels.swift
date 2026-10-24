@@ -11,6 +11,35 @@ public struct WorkEventItem: Equatable, Sendable {
     public init(kind: String, text: String, at: Date?) { self.kind = kind; self.text = text; self.at = at }
 }
 
+/// Something the user added to a running task, and what is known of it. `queued`: Hermes took it, the
+/// task hasn't read it yet. `landed`: it is in the task's transcript. `notRead`: the task ended first.
+public struct FollowUp: Equatable, Sendable {
+    public enum State: String, Equatable, Sendable { case queued, landed, notRead = "not_read" }
+    public var text: String
+    /// The matching "You added: …" step on the card.
+    public var milestone: String
+    public var state: State
+    public var at: Date?
+    public init(text: String, milestone: String, state: State, at: Date? = nil) {
+        self.text = text; self.milestone = milestone; self.state = state; self.at = at
+    }
+    static func list(json: Any?) -> [FollowUp] {
+        (json as? [Any] ?? []).compactMap { raw in
+            guard let o = raw as? [String: Any], let milestone = nonEmpty(o["milestone"]),
+                  let state = (o["state"] as? String).flatMap(State.init(rawValue:)) else { return nil }
+            return FollowUp(text: nonEmpty(o["text"]) ?? "", milestone: milestone, state: state, at: decodeDate(o["at"]))
+        }
+    }
+    /// The step's second line.
+    public var label: String {
+        switch state {
+        case .queued: return "Queued: it reads this at its next step"
+        case .landed: return "Read by the task"
+        case .notRead: return "Not read: it ended first"
+        }
+    }
+}
+
 public struct ProductCard: Equatable, Sendable, Identifiable {
     public let number: Int
     public let name: String
@@ -172,6 +201,14 @@ public struct WorkInfo: Equatable, Sendable {
     /// An earlier call's task kept on this call's list only for its pending draft or review card
     /// (the server marks it); it's not an answer of this conversation.
     public var carried = false
+    /// What the user added while it ran, and whether the task read it (see FollowUp).
+    public var followUps: [FollowUp] = []
+    /// Held back so two tasks don't edit one project at once: the running task it waits for.
+    public var waitingFor: String?
+    public var waitingProject: String?
+
+    /// The receipt for one "You added: …" step, if the api sent one.
+    public func followUp(forStep text: String) -> FollowUp? { followUps.last { $0.milestone == text } }
 
     public init(runID: String?, status: String, stale: Bool = false, updated: Date? = nil,
                 shortStatus: String? = nil, detail: String? = nil, updatedAt: Date? = nil,
@@ -231,6 +268,11 @@ public struct WorkInfo: Equatable, Sendable {
         setAside = object["set_aside"] as? Bool ?? false
         seen = object["seen"] as? Bool ?? false
         carried = object["carried"] as? Bool ?? false
+        followUps = FollowUp.list(json: object["follow_ups"])
+        if status == "waiting_on_task", let waiting = object["waiting"] as? [String: Any] {
+            waitingFor = nonEmpty(waiting["name"]).map { String($0.prefix(120)) }
+            waitingProject = nonEmpty(waiting["project"]).map { String($0.prefix(80)) }
+        }
         plan = (object["plan"] as? [Any] ?? []).compactMap { $0 as? String }.filter { !$0.isEmpty }
         liveImage = LiveImage(json: object["live_image"])
         failure = status == "failed" ? WorkFailure(json: object["failure"]) : nil

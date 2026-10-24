@@ -458,7 +458,9 @@ public struct JobTile: View {
         case .needsYou(let need): JobPill(text: need.label, style: .amber)
         case .failed: JobPill(text: "Failed", style: .red)
         case .running:
-            if let p = JobBoard.progress(job.activeTask?.info ?? job.newest.info) {
+            if job.activeTask?.info.status == "waiting_on_task" {
+                JobPill(text: "Waiting", style: .grey)   // held so two tasks don't edit one project at once
+            } else if let p = JobBoard.progress(job.activeTask?.info ?? job.newest.info) {
                 JobPill(text: "\(p.done + 1) of \(p.total)", style: .blue)
             } else { JobPill(text: "Running", style: .blue) }
         case .done: JobPill(text: job.setAside ? "Set aside" : "Done", style: job.setAside ? .grey : .green)
@@ -576,6 +578,8 @@ public struct JobDetailBody: View {
     @ViewBuilder private func answerSections(_ task: TaskItem) -> some View {
         let cards = JobCards.items(job, model: model)
         let pictures = JobCards.pictures(job, model: model)
+        let unread = task.info.followUps.filter { $0.state == .notRead }
+        if !unread.isEmpty { NotReadNotice(items: unread, finished: task.info.status == "completed") }
         ForEach(JobCards.answerBlocks(job, model: model), id: \.self) { block in
             switch block {
             case .cards: JobCardStack(job: job, items: cards, model: model)
@@ -702,6 +706,11 @@ public struct JobDetailBody: View {
         let cards = JobCards.items(job, model: model)
         if !cards.isEmpty { JobCardStack(job: job, items: cards, model: model) }
         LiveSteps(job: job, model: model, allowUndo: allowUndo)
+        // A finished task that never read what the user added: say so on the card, not only aloud.
+        if let task = job.tasks.last, task.info.isTerminal {
+            let unread = task.info.followUps.filter { $0.state == .notRead }
+            if !unread.isEmpty { NotReadNotice(items: unread, finished: task.info.status == "completed") }
+        }
         let reportTask = job.tasks.last { $0.info.result != nil && $0.id != decisionTask?.id }
         if let task = reportTask {
             if let shape = task.info.result?.shape {
@@ -888,6 +897,30 @@ struct DecisionOptionRow: View {
     }
 }
 
+/// What the user added that the task never read before it ended, with the way to send it on.
+public struct NotReadNotice: View {
+    var items: [FollowUp]
+    var finished: Bool
+    @Environment(\.jobTextScale) private var s
+    public init(items: [FollowUp], finished: Bool) { self.items = items; self.finished = finished }
+    public var body: some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Color.orange).font(.system(size: 12 * s))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(finished ? "Finished before reading what you added" : "Stopped before reading what you added")
+                    .font(.system(size: 10 * s, weight: .semibold)).foregroundStyle(.secondary)
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    Text("\u{201C}\(item.text)\u{201D}").font(.system(size: 12 * s, weight: .medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("It wasn't part of this answer. Ask again to run it as new work.")
+                    .font(.system(size: 10.5 * s)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// What the job is doing now, step by step, with a way to add something or stop it.
 public struct LiveSteps: View {
     var job: Job
@@ -909,7 +942,8 @@ public struct LiveSteps: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(rows(info).enumerated()), id: \.offset) { i, row in
                         StepRow(text: row.text, sub: row.sub, state: row.state, last: i == rows(info).count - 1,
-                                undo: undoable && row.state == .done ? { model.undoStep(row.text, in: job) } : nil)
+                                undo: undoable && row.state == .done && row.receipt == nil ? { model.undoStep(row.text, in: job) } : nil,
+                                receipt: row.receipt)
                     }
                 }
                 if task.isActive && model.state.connection.isOpen {
@@ -946,7 +980,7 @@ public struct LiveSteps: View {
     /// A finished task that had a plan still shows its steps, ticked.
     private var recentPlanned: TaskItem? { job.tasks.last.flatMap { $0.info.plan.isEmpty ? nil : $0 } }
 
-    struct Row { var text: String; var sub: String?; var state: StepRow.State }
+    struct Row { var text: String; var sub: String?; var state: StepRow.State; var receipt: FollowUp.State? = nil }
 
     private func rows(_ info: WorkInfo) -> [Row] {
         let milestones = info.milestones
@@ -958,7 +992,13 @@ public struct LiveSteps: View {
                 return Row(text: step, sub: nil, state: info.isTerminal && info.status == "completed" ? .done : .next)
             }
         }
-        var out = milestones.suffix(5).map { Row(text: $0.text, sub: $0.at.map(JobStyle.clock), state: .done) }
+        var out = milestones.suffix(5).map { m -> Row in
+            // Something the user added: say what is known of it, never more (queued is not read).
+            if let f = info.followUp(forStep: m.text) {
+                return Row(text: m.text, sub: f.label, state: f.state == .landed ? .done : .next, receipt: f.state)
+            }
+            return Row(text: m.text, sub: m.at.map(JobStyle.clock), state: .done)
+        }
         if !info.isTerminal, let now = info.shortStatus { out.append(Row(text: now, sub: info.detail, state: .current)) }
         return out
     }
@@ -971,9 +1011,27 @@ public struct StepRow: View {
     var state: State
     var last: Bool
     var undo: (() -> Void)? = nil
+    /// A follow-up's receipt: its second line is tinted by what is known of it.
+    var receipt: FollowUp.State? = nil
     @Environment(\.jobTextScale) private var s
-    public init(text: String, sub: String? = nil, state: State, last: Bool, undo: (() -> Void)? = nil) {
-        self.text = text; self.sub = sub; self.state = state; self.last = last; self.undo = undo
+    public init(text: String, sub: String? = nil, state: State, last: Bool, undo: (() -> Void)? = nil,
+                receipt: FollowUp.State? = nil) {
+        self.text = text; self.sub = sub; self.state = state; self.last = last; self.undo = undo; self.receipt = receipt
+    }
+    private var subColor: Color {
+        switch receipt {
+        case .landed: return JobStyle.green
+        case .notRead: return Color.orange
+        default: return Color.secondary
+        }
+    }
+    private var receiptSymbol: String? {
+        switch receipt {
+        case .queued: return "clock"
+        case .landed: return "checkmark"
+        case .notRead: return "exclamationmark.circle"
+        case nil: return nil
+        }
     }
     public var body: some View {
         HStack(alignment: .top, spacing: 9) {
@@ -998,7 +1056,14 @@ public struct StepRow: View {
                             .accessibilityLabel("Undo \(text)")
                     }
                 }
-                if let sub { Text(sub).font(.system(size: 10.5 * s)).foregroundStyle(.secondary).lineLimit(2) }
+                if let sub {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        if let receiptSymbol { Image(systemName: receiptSymbol).font(.system(size: 9 * s, weight: .semibold)) }
+                        Text(sub).font(.system(size: 10.5 * s, weight: receipt == .notRead ? .semibold : .regular)).lineLimit(2)
+                    }
+                    .foregroundStyle(subColor)
+                    .accessibilityElement(children: .combine)
+                }
             }
             .padding(.bottom, last ? 0 : 8)
         }

@@ -136,6 +136,10 @@ public func taskStatusLine(_ info: WorkInfo, now: Date,
                            assistantName: String = VoiceState.defaultAssistantName) -> (String, StatusTone) {
     if info.status == "waiting_for_approval" { return ("Needs your approval", .attention) }
     if info.status == "cancel_requested" { return ("Stopping…", .plain) }
+    if info.status == "waiting_on_task" {
+        // Held so two tasks don't edit one project at once; it starts when that one ends.
+        return (info.waitingFor.map { "Waiting for \u{201C}\($0)\u{201D}" } ?? "Waiting for another task", .plain)
+    }
     var s = VoiceState()
     s.now = now
     s.workInfo = info
