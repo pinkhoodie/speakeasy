@@ -60,6 +60,11 @@ def _same_words(fragment: str, request: str) -> bool:
     return not f or f in _words(request)
 
 
+def _log_follow_up_failure(task: "asyncio.Task[Any]") -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("speakeasy: an answered question's follow-up failed", exc_info=task.exception())
+
+
 def _words(text: str) -> str:
     """Just the words, lowercased: to tell whether the same thing was said again."""
     return " ".join(re.findall(r"[a-z0-9']+", (text or "").lower()))
@@ -967,7 +972,9 @@ class SidebandWorker:
         if answers is None:
             answers = self.recent_answers = {}
         previous = answers.get(key)
-        if previous and now - previous[1] < ECHO_WINDOW_S:
+        if previous:
+            # The same pick for the same question, any time in this call (a retap after a slow reply,
+            # or the tap plus saying it): one follow-up only. A different answer still goes.
             logger.info("speakeasy: same answer sent again for one task; passed on once")
             return previous[0]
         delegation_id = "answer_" + secrets.token_hex(8)
@@ -977,7 +984,17 @@ class SidebandWorker:
         self.fragments.append({"speaker": "user", "text": text, "at": time.monotonic(), "start_ms": 0, "end_ms": 0})
         if self.call_connected():
             await self.append("session.thinking.append", None, P.answered_note(text))
-        await self.follow_up(delegation_id, 0, f"User: {text}", router.Part("follow_up", text, task_id))
+        # The tap is answered as soon as it's taken: following up can take a while (a task in a chat
+        # thread waits for that thread, a continued session is looked up), and the app must not see a
+        # slow reply as a failed tap and put the question back up while the answer is already working.
+        follow = asyncio.get_running_loop().create_task(
+            self.follow_up(delegation_id, 0, f"User: {text}", router.Part("follow_up", text, task_id)))
+        tasks = getattr(self, "dispatch_tasks", None)
+        if tasks is None:
+            tasks = self.dispatch_tasks = set()
+        tasks.add(follow)
+        follow.add_done_callback(tasks.discard)
+        follow.add_done_callback(_log_follow_up_failure)
         return delegation_id
 
     def waiting_on_user(self) -> list[str]:

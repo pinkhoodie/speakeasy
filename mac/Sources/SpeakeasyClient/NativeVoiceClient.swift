@@ -1438,9 +1438,14 @@ public final class NativeVoiceClient: VoiceCallClient {
         guard let api, !previewMode, let id = model.state.interactionID ?? model.state.resumeFrom else { return }
         Task { [weak self] in
             do { try await api.answer(interactionID: id, taskID: taskID, text: text) }
-            catch {
+            catch let http as ServerClient.HTTPError where (400..<500).contains(http.status) {
+                // The api refused it (call ended, task not in this call): the question is still open.
                 self?.model.answers[taskID] = nil
                 self?.dispatch(.error("Couldn't send that answer. Say it instead."))
+            } catch {
+                // A timeout or a slow reply: the api may well have taken it (seen live, the follow-up
+                // was already working). Keep the pick settled; retapping the same answer is harmless.
+                self?.dispatch(.error("Your answer may still be on its way. If nothing happens, say it instead."))
             }
         }
     }
