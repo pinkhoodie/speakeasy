@@ -991,7 +991,7 @@ struct ApprovalRow: View {
             HStack(spacing: 8) {
                 Spacer()
                 PillButton(title: "Deny", action: { onChoice("deny") })
-                PillButton(title: "Approve once", prominent: true, action: { onChoice("once") })
+                PillButton(title: "Approve", prominent: true, action: { onChoice("once") })
             }
             .disabled(busy)
         }

@@ -497,7 +497,7 @@ public struct JobTile: View {
                 .font(.system(size: 11.5 * s)).foregroundStyle(.secondary).lineLimit(3).fixedSize(horizontal: false, vertical: true)
             if approval != nil {
                 HStack(spacing: 6) {
-                    TileButton(title: "Approve once", primary: true) { model.onApproval("once") }
+                    TileButton(title: "Approve", primary: true) { model.onApproval("once") }
                     TileButton(title: "Deny") { model.onApproval("deny") }
                     if model.setAsideTarget(job) != nil { NotNeededButton { model.setAside(job) } }
                 }

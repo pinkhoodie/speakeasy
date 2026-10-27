@@ -55,7 +55,7 @@ SETTLE_MAX_S = 6.0     # and never longer than this in total
 ABSORB_WINDOW_S = 15.0 # a handoff of words already folded into an earlier task is dropped
 ECHO_WINDOW_S = 8.0    # a second handoff this soon that only repeats the last request's words is dropped
 # The card's step for an approval answered from the call (the panel's buttons record the same words).
-APPROVED_MILESTONE = {"once": "Approved once", "session": "Approved for the rest of this task", "deny": "Approval denied"}
+APPROVED_MILESTONE = {"once": "Approved", "session": "Approved for the rest of this task", "deny": "Approval denied"}
 FOLLOW_UP_POLL_S = 2.0 # how often a queued follow-up is looked for in the task's transcript (receipts.py)
 FOLLOW_UP_SETTLE_S = 3.0  # after the run ends, how long its transcript gets to show a follow-up it read
 FENCE_POLL_S = 2.0     # how often a task held behind another (same project) checks on it
@@ -1391,7 +1391,7 @@ class SidebandWorker:
         return [(t, r) for t, r in runs if t not in self.set_aside_tasks]
 
     async def _approve_by_voice(self, delegation_id: str, revision: int, request: str, marked: Any = None) -> bool:
-        """"Just this once", "no", "for the rest of this task" while an approval waits: answer it.
+        """"Approve", "approved", "no", "for the rest of this task" while an approval waits: answer it.
         Never "always" (refused here and in hermes_api.approve); "session" only when Hermes offered it
         for that request. With several approvals waiting and nothing naming one, ask which."""
         pending = self.pending_approvals()

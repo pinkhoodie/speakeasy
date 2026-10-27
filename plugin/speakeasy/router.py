@@ -1388,6 +1388,7 @@ _APPROVE_SESSION = re.compile(
     r"(?:this|the)\s+whole\s+(?:session|task)|until\s+(?:it's|it\s+is|this\s+is)\s+(?:done|finished))\b")
 _APPROVE_ONCE = re.compile(
     r"(?i)\b(?:(?:just\s+)?(?:this|the)\s+once|just\s+(?:this|the)\s+(?:one\s+)?time|one\s+time|only\s+once|once)\b")
+_APPROVE_WORD = re.compile(r"(?i)^\W*(?:(?:um+|uh+|oh|ok|okay|so|well|yes|yeah|yep)\W+)*(?:i\s+)?approve(?:d)?(?:\s+(?:it|that|this))?\W*$")
 _APPROVE_DENY = re.compile(
     r"(?i)^\W*(?:(?:um+|uh+|actually|oh|well|so)\W+)*(?:no|nope|nah|deny(?:\s+it)?|don't(?:\s+do\s+it)?|do\s+not|"
     r"don't\s+allow\s+(?:it|that)|decline(?:\s+it)?|reject(?:\s+it)?|not\s+that)\b")
@@ -1410,6 +1411,8 @@ def approval_answer(request: str) -> str | None:
         return "deny"
     if _APPROVE_SESSION.search(said):
         return "session"
+    if _APPROVE_WORD.search(said):
+        return "once"
     if _APPROVE_ONCE.search(said):
         return "once"
     if _APPROVE_YES.search(said):

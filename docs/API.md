@@ -272,7 +272,7 @@ Body `{}`. Pauses the call (the voice transport is closed, tasks keep running). 
 
 Answers a Hermes tool approval for one run. `once` and `deny` are accepted, and `session` only when
 the approval's `choices` include it. `always` (permanent) is refused with 400 from every surface;
-the call's voice can answer the same approval ("just this once", "no") under the same rules.
+the call's voice can answer the same approval ("approve", "no") under the same rules.
 ```json
 {"run_id": "run_0001", "request_id": "req_7f2c", "choice": "once"}
 ```

@@ -806,21 +806,20 @@ def approval_note(names: Names, description: str | None = None, choices: list[st
     """Spoken once when a running task stops for an approval: what it wants to do, in plain words, and
     the answers a voice reply can give (never "always"). Works read out as it is."""
     what = notice_text(description, 240) or "take a step it flagged as consequential"
-    offer = "just this once, for the rest of this task, or not" if "session" in choices else "just this once, or not"
-    return f"{names.assistant_name} needs your OK first: {what.rstrip('.')}. Should I allow it {offer}?"
+    return f"{names.assistant_name} needs your OK first: {what.rstrip('.')}. Approve it?"
 
 
 def approval_rules_note(names: Names) -> str:
     """Background with every approval question: how a spoken answer is handled."""
     return (f"An approval is waiting. You asked about it once; don't ask again or remind {names.user}. Their answer "
-            "is handled by Speakeasy: never say it is approved, allowed or declined until you are told Hermes took it. Never offer or accept allowing it always or permanently. The Approve once and Deny "
+            "is handled by Speakeasy: never say it is approved, allowed or declined until you are told Hermes took it. Never offer or accept allowing it always or permanently. The Approve and Deny "
             "buttons on the card work too.")
 
 
 def approval_done_spoken(choice: str) -> str:
     """Spoken only after Hermes confirmed the answer (a 2xx reply to the approval route)."""
-    return {"once": "Done, allowed just this once.", "session": "Done, it's allowed for the rest of this task.",
-            "deny": "Okay, declined. It won't do that."}.get(choice, "Done.")
+    return {"once": "Approved.", "session": "Approved for the rest of this task.",
+            "deny": "Denied. It won't do that."}.get(choice, "Done.")
 
 
 def approval_failed_spoken(names: Names) -> str:
@@ -829,13 +828,12 @@ def approval_failed_spoken(names: Names) -> str:
 
 
 def approval_always_refused(session_offered: bool) -> str:
-    more = ", or for the rest of this task" if session_offered else ""
-    return (f"I can't allow that permanently from here. I can allow it just this once{more}, or decline it. "
-            "Which do you want?")
+    more = " (or for the rest of this task)" if session_offered else ""
+    return f"I can't approve that permanently from here. I can approve it{more} or deny it. Which do you want?"
 
 
-SESSION_NOT_OFFERED_SPOKEN = ("That one can only be allowed one time, not for the whole task. "
-                              "Allow it just this once, or not?")
+SESSION_NOT_OFFERED_SPOKEN = ("That one can only be approved one step at a time, not for the whole task. "
+                              "Approve it?")
 
 
 def approval_which(descriptions: list[str]) -> str:
