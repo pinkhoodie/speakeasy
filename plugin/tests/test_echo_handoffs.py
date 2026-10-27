@@ -57,8 +57,47 @@ def test_same_answer_twice_reaches_the_task_once():
             sent.append((delegation_id, part.request))
 
     w = Worker()
-    a = asyncio.run(SidebandWorker.answer(w, "t1", "Fix it now"))
-    b = asyncio.run(SidebandWorker.answer(w, "t1", "fix it now."))
+
+    async def run(text):
+        out = await SidebandWorker.answer(w, "t1", text)
+        await asyncio.sleep(0)   # the follow-up runs in the background
+        return out
+
+    a = asyncio.run(run("Fix it now"))
+    b = asyncio.run(run("fix it now."))
     assert a and a == b and len(sent) == 1
-    c = asyncio.run(SidebandWorker.answer(w, "t1", "Watch it first"))   # a different answer still goes
+    w.recent_answers = {k: (d, at - calls.ECHO_WINDOW_S - 60) for k, (d, at) in w.recent_answers.items()}
+    assert asyncio.run(run("Fix it now")) == a and len(sent) == 1   # a retap much later: still once
+    c = asyncio.run(run("Watch it first"))   # a different answer still goes
     assert c != a and len(sent) == 2
+
+
+def test_a_slow_follow_up_never_holds_the_tap():
+    """Seen live: a task in a Discord thread took over 15 s to follow up, the tap timed out, and the
+    app put the question back up although the answer was already on its way."""
+    class Worker:
+        interaction = SimpleNamespace(lock=__import__("threading").Lock(), runs={"t1": object()})
+        delegations: set = set()
+        fragments: list = []
+        recent_answers: dict = {}
+        done: list = []
+
+        def touch(self):
+            pass
+
+        def call_connected(self):
+            return False
+
+        async def follow_up(self, delegation_id, revision, context, part):
+            await asyncio.sleep(0.3)
+            self.done.append(part.request)
+
+    async def main():
+        w = Worker()
+        started = asyncio.get_running_loop().time()
+        task_id = await asyncio.wait_for(SidebandWorker.answer(w, "t1", "Do it all"), 0.1)
+        assert task_id and asyncio.get_running_loop().time() - started < 0.1 and w.done == []
+        await asyncio.sleep(0.5)
+        assert w.done == ["Do it all"]
+
+    asyncio.run(main())

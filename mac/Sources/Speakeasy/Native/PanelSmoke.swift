@@ -514,6 +514,16 @@ enum PanelSmoke {
         await settle(0.3)
         check(picked == "After 3 errors, for 30 seconds", "board: 2 picks the second option (got \(picked ?? "nothing"))")
         c.model.onAnswer = saved
+        // After a tap the job shows the pick, not the question again (even if the api was slow).
+        if let routerID = c.model.jobs.first(where: { $0.name == "Router setting" })?.id {
+            c.model.answers["router_q"] = picked ?? "After 3 errors, for 30 seconds"
+            c.model.selectedJobID = routerID
+            await settle(0.8)
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/job-answered.png")); record("snapshot \(dir)/job-answered.png") }
+            catch { fail("job-answered snapshot: \(error)") }
+            c.model.selectedJobID = nil
+            await settle(0.3)
+        }
         c.model.answers["router_q"] = nil
         // "Not needed" (N on the focused tile): sets the question aside without answering it. It
         // leaves Needs you for Done today, labeled "Set aside", and the orb's count drops.
