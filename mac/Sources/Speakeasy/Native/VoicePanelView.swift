@@ -881,6 +881,32 @@ struct CaptionView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            content
+                .padding(.horizontal, 10).padding(.vertical, 7)
+            // The obvious way back: the corner glyph alone was too small to find.
+            if expanded { TranscriptShrinkBar { expanded = false } }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.055)))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(alignment: .topTrailing) {
+            Button(action: { expanded.toggle() }) {
+                Image(systemName: expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 8.5, weight: .semibold)).foregroundStyle(.tertiary).padding(6)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(expanded ? "Collapse transcript" : "Read the full exchange")
+            .accessibilityLabel(expanded ? "Collapse transcript" : "Expand transcript")
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { if !expanded { expanded = true } }
+        .help(expanded ? "Scroll to read back · Shrink to fold it away" : "Read the full exchange")
+    }
+
+    @ViewBuilder
+    private var content: some View {
         Group {
             if expanded {
                 // Opens on the latest words and follows them only while the user is
@@ -904,22 +930,6 @@ struct CaptionView: View {
                 }
             }
         }
-        .padding(.horizontal, 10).padding(.vertical, 7)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.055)))
-        .overlay(alignment: .topTrailing) {
-            Button(action: { expanded.toggle() }) {
-                Image(systemName: expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 8.5, weight: .semibold)).foregroundStyle(.tertiary).padding(6)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(expanded ? "Collapse transcript" : "Read the full exchange")
-            .accessibilityLabel(expanded ? "Collapse transcript" : "Expand transcript")
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { if !expanded { expanded = true } }
-        .help(expanded ? "Scroll to read back · collapse with the corner button" : "Read the full exchange")
     }
 
     @ViewBuilder
@@ -938,6 +948,32 @@ struct CaptionView: View {
             }
         }
         .padding(.trailing, full ? 0 : 14)
+    }
+}
+
+/// Footer strip of the expanded transcript: folds it back to the latest line. Full card width so it
+/// is easy to hit; brass on hover, like the panel's other controls.
+struct TranscriptShrinkBar: View {
+    var action: () -> Void
+    @State private var hover = false
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.down.right.and.arrow.up.left").font(.system(size: 8.5, weight: .semibold))
+                Text("Shrink").font(.system(size: 10, weight: .medium))
+            }
+            .foregroundStyle(hover ? AnyShapeStyle(Tokens.brass) : AnyShapeStyle(.secondary))
+            .frame(maxWidth: .infinity).frame(height: 20)
+            .background(Color.primary.opacity(hover ? 0.07 : 0.025))
+            .overlay(alignment: .top) { Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 0.5) }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help("Shrink the transcript back to the latest line")
+        .accessibilityLabel("Shrink transcript")
+        .accessibilityHint("Folds the full conversation back to the latest line")
+        .layoutProbe("transcript.shrink")
     }
 }
 

@@ -22,10 +22,21 @@ enum PanelSmoke {
         let savedOrb = client.model.slim
         client.model.slim = false
         Task { @MainActor in
+            // SPEAKEASY_PANEL_SMOKE_ONLY=transcript-shrink runs just the shrink check. Unattended runs need
+            // it: the drag checks press into selectable transcript text, and AppKit's text-selection
+            // tracking loop then waits for a real (not synthetic) mouse-up that never comes.
+            if ProcessInfo.processInfo.environment["SPEAKEASY_PANEL_SMOKE_ONLY"] == "transcript-shrink" {
+                await transcriptShrink(client, dir: snapshotDir)
+                client.model.slim = savedOrb
+                print("panel-smoke " + (ok ? "ok" : "FAILED"))
+                log.forEach { print("  " + $0) }
+                exit(ok ? 0 : 1)
+            }
             await workScroll(client)
             await workStatusWraps(client)
             await transcriptScroll(client)
             await drag(client)
+            await transcriptShrink(client, dir: snapshotDir)
             await endedPanel(client)
             await lookAtThis(client, dir: snapshotDir)
             if let dir = snapshotDir { await snapshots(client, dir: dir) }
@@ -307,6 +318,101 @@ enum PanelSmoke {
         check(saved != "nil", "resize: size is remembered")
         c.panel.resetPlacement(); await settle(0.4)
         check(abs(panel.frame.width - Tokens.width) < 1 && c.model.extraHeight == 0, "resize: reset restores the default size")
+    }
+
+    // MARK: 4b. Shrink folds the expanded transcript and gives the height back
+
+    static func shrinkState() -> VoiceState {
+        var (s, _) = PreviewFixtures.state("speaking")!
+        let lines: [(TranscriptTurn.Speaker, String)] = [
+            (.you, "What's on the calendar this week?"),
+            (.assistant, "Tuesday you have the design review at two, then a call with Dana at four thirty."),
+            (.you, "Anything on Wednesday?"),
+            (.assistant, "Wednesday is clear until the dentist at eleven, and the team dinner at seven."),
+            (.you, "Move the dentist to Friday if they have a slot."),
+            (.assistant, "I'll ask the dentist's office for a Friday slot and let you know what they offer."),
+        ]
+        s.transcript = lines.enumerated().map { TranscriptTurn(id: $0.offset, speaker: $0.element.0, text: $0.element.1) }
+        s.exchange = Exchange(you: lines[4].1, assistant: lines[5].1, replyStarted: true)
+        return s
+    }
+
+    /// The Shrink strip's centre as a window point, from its layout probe (SwiftUI global
+    /// coordinates: top-left origin of the panel's hosting view). Nil when it isn't drawn.
+    static func shrinkControl(_ c: NativeVoiceClient) -> NSPoint? {
+        guard let f = LayoutProbe.frames["transcript.shrink"], f.width > 100, f.height > 10 else { return nil }
+        return NSPoint(x: f.midX, y: c.panel.window.frame.height - f.midY)
+    }
+
+    static func transcriptShrink(_ c: NativeVoiceClient, dir: String?) async {
+        let panel = c.panel.window
+        c.panel.resetPlacement()
+        c.showPreview(shrinkState(), workExpanded: false, captionExpanded: false)
+        await settle()
+        let collapsed = panel.frame.height
+        check(shrinkControl(c) == nil, "shrink: no Shrink strip while the transcript is collapsed")
+        // Expand the way the user does: tap the one-line caption.
+        await click(panel, at: NSPoint(x: 150, y: 30))
+        if !c.model.captionExpanded { record("shrink: first synthetic caption tap absorbed (harness limit); tapping again"); await click(panel, at: NSPoint(x: 150, y: 30)) }
+        await settle(0.6)
+        let expanded = panel.frame.height
+        record("shrink: collapsed \(Int(collapsed))pt -> expanded \(Int(expanded))pt (captionExpanded=\(c.model.captionExpanded), extra=\(Int(c.model.extraHeight)))")
+        check(c.model.captionExpanded && expanded > collapsed + 60, "shrink: tapping the caption expands the transcript and grows the panel")
+        if let dir {
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/transcript-expanded.png")); record("snapshot \(dir)/transcript-expanded.png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
+        guard let shrink = shrinkControl(c) else { fail("shrink: no 'Shrink transcript' control in the expanded transcript"); return }
+        let probe = LayoutProbe.frames["transcript.shrink"] ?? .zero
+        record("shrink: control \(Int(probe.width))x\(Int(probe.height))pt at window \(fmt(shrink)), card width \(Int(panel.frame.width - 28))pt")
+        check(probe.width >= panel.frame.width - 30, "shrink: the Shrink strip spans the transcript card")
+        check(shrink.y < 60 && shrink.y > 10, "shrink: the Shrink strip sits at the foot of the transcript card")
+        await click(panel, at: shrink)
+        if c.model.captionExpanded { record("shrink: first synthetic Shrink click absorbed (harness limit); clicking again"); await click(panel, at: shrink) }
+        await settle(0.6)
+        let back = panel.frame.height
+        record("shrink: after Shrink \(Int(expanded))pt -> \(Int(back))pt (collapsed was \(Int(collapsed))pt) captionExpanded=\(c.model.captionExpanded)")
+        check(!c.model.captionExpanded, "shrink: clicking Shrink collapses the transcript")
+        check(abs(back - collapsed) <= 3, "shrink: the panel returns to its collapsed height (±3pt)")
+        if let dir {
+            do { try c.panel.snapshot(to: URL(fileURLWithPath: dir + "/transcript-collapsed.png")); record("snapshot \(dir)/transcript-collapsed.png") }
+            catch { fail("snapshot failed: \(error)") }
+        }
+        // A transcript the user sized on purpose (grip drag): Shrink still gives the height back,
+        // and the dragged size is kept for the next time it opens.
+        if let grip = gripViews(c).first {
+            let point = grip.convert(NSPoint(x: grip.bounds.midX, y: grip.bounds.midY), to: nil)
+            await mouseDrag(panel, from: point, by: NSSize(width: 0, height: -120))
+            await settle(0.6)
+            let sized = panel.frame.height, extra = c.model.extraHeight
+            record("shrink: grip-sized transcript \(Int(sized))pt extra=\(Int(extra))")
+            check(c.model.captionExpanded && extra > 60, "shrink: grip drag opens and sizes the transcript")
+            if let p = shrinkControl(c) {
+                await click(panel, at: p)
+                if c.model.captionExpanded { await click(panel, at: p) }
+                await settle(0.6)
+            } else { fail("shrink: no Shrink strip on the grip-sized transcript") }
+            let folded = panel.frame.height
+            record("shrink: grip-sized Shrink \(Int(sized))pt -> \(Int(folded))pt extra=\(Int(c.model.extraHeight))")
+            check(!c.model.captionExpanded && abs(folded - collapsed) <= 3, "shrink: a user-sized transcript also gives the height back")
+            check(c.model.extraHeight == extra, "shrink: the user's dragged transcript size is kept")
+            c.model.captionExpanded = true; c.panel.setNeedsResize(); await settle(0.6)
+            record("shrink: re-expanded \(Int(panel.frame.height))pt (sized was \(Int(sized))pt)")
+            check(abs(panel.frame.height - sized) <= 3, "shrink: re-expanding restores the user's size")
+            // The original corner glyph still collapses too (it sits 10pt in from the card's top-right).
+            if let sv = scrollViews(c).first, let strip = LayoutProbe.frames["transcript.shrink"] {
+                let corner = NSPoint(x: strip.maxX - 10, y: sv.convert(sv.bounds, to: nil).maxY + 7 - 10)
+                await click(panel, at: corner)
+                if c.model.captionExpanded { record("shrink: first synthetic corner click absorbed (harness limit); clicking again"); await click(panel, at: corner) }
+                await settle(0.6)
+                record("shrink: corner button at \(fmt(corner)) -> \(Int(panel.frame.height))pt captionExpanded=\(c.model.captionExpanded)")
+                check(!c.model.captionExpanded && abs(panel.frame.height - collapsed) <= 3, "shrink: the corner button still collapses and gives the height back")
+            } else { fail("shrink: no transcript to find the corner button on") }
+        } else {
+            fail("shrink: no transcript grab bar")
+        }
+        c.model.captionExpanded = false
+        c.panel.resetPlacement(); await settle(0.4)
     }
 
     /// A failed task names why in its row and explains the fix in its detail.
