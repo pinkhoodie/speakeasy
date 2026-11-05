@@ -442,16 +442,24 @@ public final class NativeVoiceClient: VoiceCallClient {
     }
 
     /// The mic state the plugin was last told, per call: muted calls get no "still working" pulse
-    /// (results, questions and approvals are spoken either way).
+    /// (results, questions and approvals are spoken either way), and an open mic gets its first one
+    /// early. Every call reports its starting state too, open included: a call that never says keeps
+    /// the plugin's older 45 s pulse.
     private var micPosted: (interaction: String, muted: Bool)?
+    /// The last mic report sent. Each one waits for the one before, so a quick open-then-mute at the
+    /// start of a call reaches the plugin in that order and the call never ends up "open" while muted.
+    private var micPostTask: Task<Void, Never>?
 
     private func postMicIfChanged() {
         guard !previewMode, let api, let id = model.state.interactionID else { return }
         let muted = model.state.mic == .muted
         if let p = micPosted, p.interaction == id, p.muted == muted { return }
-        if micPosted?.interaction != id && !muted { micPosted = (id, muted); return }  // calls start unmuted
         micPosted = (id, muted)
-        Task { _ = try? await api.post("/voice/interactions/\(id)/mic", ["muted": muted]) }
+        let previous = micPostTask
+        micPostTask = Task {
+            await previous?.value
+            _ = try? await api.post("/voice/interactions/\(id)/mic", ["muted": muted])
+        }
     }
 
     private func reportMic(_ note: String) {

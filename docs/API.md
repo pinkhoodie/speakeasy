@@ -326,9 +326,11 @@ The app found the call's mic wasn't getting through and reopened the connection.
 ## POST /voice/interactions/{id}/mic
 
 The user muted or unmuted the call's mic. Body exactly `{"muted": true|false}`; `200`
-`{"interaction_id": "...", "muted": true}`. The app sends it on every change (and when a call
-opens muted). While muted, the call skips its periodic "what the task is doing" updates (the
-pulse, about every 45 s while work runs); answers, questions and approvals are still spoken.
+`{"interaction_id": "...", "muted": true}`. The app sends it on every change and once when a call
+opens, muted or not. While muted, the call skips its periodic "what the task is doing" updates (the
+pulse); answers, questions and approvals are still spoken. With `{"muted": false}` the mic is open:
+a task's first pulse line comes about 12 s in and the pulse never backs off into silence. A call
+that never sends it (older apps) keeps the 45 s pulse that backs off to 90 s.
 Older plugins answer `404`, which the app ignores.
 
 ## GET /voice/interactions/{id}
